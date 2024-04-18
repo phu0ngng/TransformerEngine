@@ -17,6 +17,7 @@ from .cpp_extensions import gated_gelu, gated_gelu_fp8
 from .cpp_extensions import dgated_gelu, dgated_gelu_cast_transpose
 from .cpp_extensions import rmsnorm_fwd_fp8, rmsnorm_bwd
 from .cpp_extensions import layernorm_fwd_fp8, layernorm_bwd
+from .cpp_extensions import dbias_cast_transpose
 from .dot import fp8_dot_impl, get_precision_of_fp8_dot, quantize
 from .layernorm import canonicalize_layernorm_type
 from .fp8 import FP8Helper, FP8MetaPackage
@@ -24,17 +25,17 @@ from .sharding import with_sharding_constraint_by_logical_axes
 
 
 activation_dict = {
-    ('gelu',): { 'fwd': gelu,
-                "bwd": dgelu },
-    ('gelu', 'linear'): { 'fwd': gated_gelu,
-                         'bwd': dgated_gelu }
+    ('gelu',): {'fwd': gelu,
+                "bwd": dgelu},
+    ('gelu', 'linear'): {'fwd': gated_gelu,
+                         'bwd': dgated_gelu}
 }
 
 activation_fp8_dict = {
-    ('gelu',): { 'fwd': gelu_fp8,
-                'bwd': dgelu_dbias_cast_transpose },
-    ('gelu', 'linear'): { 'fwd': gated_gelu_fp8,
-                          'bwd': dgated_gelu_cast_transpose }
+    ('gelu',): {'fwd': gelu_fp8,
+                'bwd': dgelu_dbias_cast_transpose},
+    ('gelu', 'linear'): {'fwd': gated_gelu_fp8,
+                         'bwd': dgated_gelu_cast_transpose}
 }
 
 
@@ -43,7 +44,7 @@ def activation_lu(x: jnp.ndarray, activation_type: Sequence[Union[str, Callable]
     Activation Unit
     """
     if len(activation_type) > 1:
-        assert x.shape[-2] == 2 # Linear + GeLU
+        assert x.shape[-2] == 2  # Linear + GeLU
     output = _activation_lu(x, activation_type)
     return output
 
@@ -319,11 +320,13 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                        static_axis_boundary=-1, transpose_axis_boundary=-1)
 
     casted_activation_lu_out_t = transpose(casted_activation_lu_out,
-                                  static_axis_boundary=-1,
-                                  transpose_axis_boundary=-1)
+                                           static_axis_boundary=-1,
+                                           transpose_axis_boundary=-1)
     if use_bias:
         dbias_2 = jnp.sum(grad, axis=(i for i in range(grad.ndim - 1)))
         dbias_2 = jnp.reshape(dbias_2, bias_2_shape)
+    else:
+        dbias_2 = jnp.zeros(bias_2_shape, grad.dtype)
 
     # (hidden, batch...,) x (hidden, batch...)
     gemm2_x_scale_inv = scale_inv[gemm2_x_idx]
@@ -358,7 +361,6 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
             static_axis_boundary=-1,
             transpose_axis_boundary=-1)
 
-        dbias_1 = jnp.reshape(dbias_1, bias_1_shape)
     elif is_gated and not use_bias:
         casted_dactivation_lu, casted_dactivation_lu_t, updated_dactivation_lu_amax = \
         dactivation_lu_cast_transpose(
@@ -369,8 +371,20 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
             dactivation_lu_scale_inv,
             bwd_dtype,
             static_axis_boundary=-1)
-    else:
-        raise NotImplementedError
+        dbias_1 = jnp.zeros(bias_1_shape, grad.dtype)
+    else:  # d<activation> + fused cast transpose
+        dactivation_lu = activation_dict[activation_type]["bwd"](dgrad_2, dot_1_output)
+        casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax = \
+        dbias_cast_transpose(
+            dgrad_2,
+            dactivation_lu_amax,
+            dactivation_lu_scale,
+            dactivation_lu_scale_inv,
+            bwd_dtype,
+            static_axis_boundary=-1,
+            transpose_axis_boundary=-1)
+
+    dbias_1 = jnp.reshape(dbias_1, bias_1_shape)
 
     ln_out_t = transpose(ln_out, static_axis_boundary=-1, transpose_axis_boundary=-1)
 
@@ -423,10 +437,6 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     amax = amax.at[gemm2_grad_idx, 0].set(updated_grad_amax[0])
 
     scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
-
-    if not use_bias:
-        dbias_1 = None
-        dbias_2 = None
 
     return dx, dgamma, dbeta, wgrad_1, wgrad_2, dbias_1, dbias_2, \
            fp8_max, amax, scale, scale_inv
