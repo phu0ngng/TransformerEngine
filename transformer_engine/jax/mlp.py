@@ -10,14 +10,13 @@ import jax
 import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 
-from .cpp_extensions import cast_fp8, transpose, cast_transpose
+from .cpp_extensions import cast_fp8, transpose, cast_transpose, dbias_cast_transpose
 from .cpp_extensions import gelu
 from .cpp_extensions import gelu_fp8, dgelu, dgelu_dbias_cast_transpose
 from .cpp_extensions import gated_gelu, gated_gelu_fp8
 from .cpp_extensions import dgated_gelu, dgated_gelu_cast_transpose
 from .cpp_extensions import rmsnorm_fwd_fp8, rmsnorm_bwd
 from .cpp_extensions import layernorm_fwd_fp8, layernorm_bwd
-from .cpp_extensions import dbias_cast_transpose
 from .dot import fp8_dot_impl, get_precision_of_fp8_dot, quantize
 from .layernorm import canonicalize_layernorm_type
 from .fp8 import FP8Helper, FP8MetaPackage
@@ -372,17 +371,37 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
             bwd_dtype,
             static_axis_boundary=-1)
         dbias_1 = jnp.zeros(bias_1_shape, grad.dtype)
+        print(casted_dactivation_lu_t.shape)
     else:  # d<activation> + fused cast transpose
         dactivation_lu = activation_dict[activation_type]["bwd"](dgrad_2, dot_1_output)
-        casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax = \
-        dbias_cast_transpose(
-            dgrad_2,
-            dactivation_lu_amax,
-            dactivation_lu_scale,
-            dactivation_lu_scale_inv,
-            bwd_dtype,
-            static_axis_boundary=-1,
-            transpose_axis_boundary=-1)
+        dactivation_lu_shape = dactivation_lu.shape
+        if is_gated:
+            dactivation_lu = jnp.reshape(dactivation_lu, (dactivation_lu.shape[0], -1))
+        if use_bias:
+            casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax = \
+            dbias_cast_transpose(
+                dactivation_lu,
+                dactivation_lu_amax,
+                dactivation_lu_scale,
+                dactivation_lu_scale_inv,
+                bwd_dtype,
+                static_axis_boundary=-1,
+                transpose_axis_boundary=-1)
+        else:
+            casted_dactivation_lu, casted_dactivation_lu_t, updated_dactivation_lu_amax = \
+            cast_transpose(
+                dactivation_lu,
+                dactivation_lu_amax,
+                dactivation_lu_scale,
+                dactivation_lu_scale_inv,
+                bwd_dtype,
+                static_axis_boundary=-1,
+                transpose_axis_boundary=-1)
+            dbias_1 = jnp.zeros(bias_1_shape, bwd_dtype)
+        if is_gated:
+            casted_dactivation_lu = jnp.reshape(casted_dactivation_lu, dactivation_lu_shape)
+            # TODO tmr
+            casted_dactivation_lu_t = jnp.split(casted_dactivation_lu_t, casted_dactivation_lu_t.shape[0]//2, axis=0)
 
     dbias_1 = jnp.reshape(dbias_1, bias_1_shape)
 
@@ -398,7 +417,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                            (xt_batch_dims, xt_batch_dims_2),
                            get_precision_of_fp8_dot(FP8Helper.FP8_2X_ACC_WGRAD))
     # Expand act axis to match the shape with the given kernel_1
-    if use_bias:
+    if not is_gated:
         wgrad_1 = jnp.expand_dims(wgrad_1, axis=-2)
 
     # (batch..., hidden_out) x (hidden_in, hidden_out)

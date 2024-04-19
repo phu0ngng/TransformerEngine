@@ -4365,15 +4365,21 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         t_out = dz_aval.update(shape=t_shape, dtype=out_dtype)
 
         dbias_shape = (*dz_aval.shape[:static_axis_boundary + 1], gi_hidden_size)
+
         dbias = dz_aval.update(shape=dbias_shape, dtype=dtype)
 
         updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
 
+        print(dz_aval.dtype)
+        print(dz_aval.shape)
+        print(gi_hidden_size)
+        print(jax_dtype_to_te_dtype(dz_aval.dtype))
+        print(out_dtype)
         wkspace_info, = transformer_engine_jax.get_dbias_ct_workspace_sizes(
             dz_aval.size // gi_hidden_size,
             gi_hidden_size,
             jax_dtype_to_te_dtype(dz_aval.dtype),
-            jax_dtype_to_te_dtype(out_dtype),
+            jax_dtype_to_te_dtype(out_dtype)
         )
         wkspace_aval = dz_aval.update(shape=wkspace_info[0],
                                      dtype=te_dtype_to_jax_dtype(wkspace_info[1]))
@@ -4439,7 +4445,7 @@ class DBiasCastTransposePrimitive(BasePrimitive):
                             args,
                             opaque,
                             False,
-                            operand_output_aliases={2: 3})
+                            operand_output_aliases={1: 2})
 
         return out
 
