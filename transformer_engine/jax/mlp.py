@@ -371,12 +371,8 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
             bwd_dtype,
             static_axis_boundary=-1)
         dbias_1 = jnp.zeros(bias_1_shape, grad.dtype)
-        print(casted_dactivation_lu_t.shape)
     else:  # d<activation> + fused cast transpose
         dactivation_lu = activation_dict[activation_type]["bwd"](dgrad_2, dot_1_output)
-        dactivation_lu_shape = dactivation_lu.shape
-        if is_gated:
-            dactivation_lu = jnp.reshape(dactivation_lu, (dactivation_lu.shape[0], -1))
         if use_bias:
             casted_dactivation_lu, casted_dactivation_lu_t, dbias_1, updated_dactivation_lu_amax = \
             dbias_cast_transpose(
@@ -386,7 +382,7 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                 dactivation_lu_scale_inv,
                 bwd_dtype,
                 static_axis_boundary=-1,
-                transpose_axis_boundary=-1)
+                transpose_axis_boundary=-2 if is_gated else -1)
         else:
             casted_dactivation_lu, casted_dactivation_lu_t, updated_dactivation_lu_amax = \
             cast_transpose(
@@ -396,12 +392,8 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
                 dactivation_lu_scale_inv,
                 bwd_dtype,
                 static_axis_boundary=-1,
-                transpose_axis_boundary=-1)
-            dbias_1 = jnp.zeros(bias_1_shape, bwd_dtype)
-        if is_gated:
-            casted_dactivation_lu = jnp.reshape(casted_dactivation_lu, dactivation_lu_shape)
-            # TODO tmr
-            casted_dactivation_lu_t = jnp.split(casted_dactivation_lu_t, casted_dactivation_lu_t.shape[0]//2, axis=0)
+                transpose_axis_boundary=-2 if is_gated else -1)
+            dbias_1 = jnp.empty(bias_1_shape, bwd_dtype)
 
     dbias_1 = jnp.reshape(dbias_1, bias_1_shape)
 
@@ -456,7 +448,6 @@ def _fused_layernorm_fp8_mlp_bwd_rule(
     amax = amax.at[gemm2_grad_idx, 0].set(updated_grad_amax[0])
 
     scale, scale_inv = FP8Helper.update_fp8_scale(fp8_max, amax, scale)
-
     return dx, dgamma, dbeta, wgrad_1, wgrad_2, dbias_1, dbias_2, \
            fp8_max, amax, scale, scale_inv
 

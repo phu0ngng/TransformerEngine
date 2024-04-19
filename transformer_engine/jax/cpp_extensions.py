@@ -4358,23 +4358,18 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         assert scale_aval.dtype == jnp.float32
         assert scale_inv_aval.dtype == jnp.float32
         ir_hidden_szie = dz_aval.shape[-1]
-        gi_hidden_size = dz_aval.shape[-1]
-        assert ir_hidden_szie == gi_hidden_size
+        gi_hidden_size = dz_aval.shape[-1] 
+        """ assert ir_hidden_szie == gi_hidden_size """
         t_shape = _multidim_transpose(dz_aval.shape, static_axis_boundary, transpose_axis_boundary)
         out = dz_aval.update(shape=dz_aval.shape, dtype=out_dtype)
         t_out = dz_aval.update(shape=t_shape, dtype=out_dtype)
 
+        if dz_aval.shape[-2] == 2:
+            gi_hidden_size *= 2
         dbias_shape = (*dz_aval.shape[:static_axis_boundary + 1], gi_hidden_size)
-
         dbias = dz_aval.update(shape=dbias_shape, dtype=dtype)
 
         updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
-
-        print(dz_aval.dtype)
-        print(dz_aval.shape)
-        print(gi_hidden_size)
-        print(jax_dtype_to_te_dtype(dz_aval.dtype))
-        print(out_dtype)
         wkspace_info, = transformer_engine_jax.get_dbias_ct_workspace_sizes(
             dz_aval.size // gi_hidden_size,
             gi_hidden_size,
@@ -4410,8 +4405,13 @@ class DBiasCastTransposePrimitive(BasePrimitive):
         ir_dz_type = ir.RankedTensorType(dz.type)
         ir_dz_shape = ir_dz_type.shape
 
-        batch_szie = reduce(operator.mul, ir_dz_shape[:-1])
+        if dz_aval.shape[-2] == 2:
+            batch_szie = reduce(operator.mul, ir_dz_shape[:-2])
+        else:
+            batch_szie = reduce(operator.mul, ir_dz_shape[:-1])
         ir_hidden_szie = ir_dz_shape[-1]
+        if dz_aval.shape[-2] == 2:
+            ir_hidden_szie *= 2
         contracted_dz_shape = (batch_szie, ir_hidden_szie)
 
         ir_out_dtype = jax_dtype_to_ir_dtype(out_dtype)
@@ -4440,12 +4440,11 @@ class DBiasCastTransposePrimitive(BasePrimitive):
             contracted_dz_shape, wkspace_aval.shape, jax_dtype_to_te_dtype(dz_aval.dtype),
             jax_dtype_to_te_dtype(out_dtype), jax_dtype_to_te_dtype(wkspace_aval.dtype))
 
-        # TODO: what is operand_output_aliases?
         out = custom_caller(DBiasCastTransposePrimitive.name,
                             args,
                             opaque,
-                            False,
-                            operand_output_aliases={1: 2})
+                            False)
+        """ operand_output_aliases={1: 3}) """
 
         return out
 
