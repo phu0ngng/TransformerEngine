@@ -22,7 +22,7 @@ from ..dot import type_safe_dot_general
 from ..fp8 import FP8Helper, FP8MetaPackage
 from ..layernorm import canonicalize_layernorm_type
 from ..layernorm import layernorm, layernorm_fp8_dot
-from ..mlp import fused_layernorm_fp8_mlp, activation_lu
+from ..mlp import fused_layernorm_fp8_mlp
 from ..softmax import is_softmax_kernel_available
 from ..softmax import softmax, SoftmaxType
 from ..sharding import with_sharding_constraint_by_logical_axes
@@ -1138,18 +1138,22 @@ class LayerNormMLP(TransformerEngineBase):
                 bias_1_shape = (1,) * (x.ndim - bias_1.ndim) + bias_1.shape
                 x += jnp.reshape(bias_1, bias_1_shape)
 
-            x = checkpoint_name(x, ffn1_ckpt_name)
+            #if not is_act_implemented:
+            #    z = activation_lu(x, normalize_acts)
+            #else
+            # TODO: This is a temporary fix
+            # The 1st branch should be included back after the checkpoint converter is ready
+            x = jnp.split(x, num_activations, axis=-2)
             activations = []
-            if is_act_implemented:
-                z = activation_lu(x, normalize_acts)
-            else:
-                x = jnp.split(x, num_activations, axis=-2)
-                for idx, act_fn in enumerate(self.activations):
-                    x_i = _convert_to_activation_function(act_fn)(x[idx])
-                    activations.append(x_i)
-                z = functools.reduce(operator.mul, activations)
-                # Remove act axis
-                z = jnp.reshape(z, (*z.shape[:-2], -1))
+            for idx, act_fn in enumerate(normalize_acts):
+                x_i = _convert_to_activation_function(act_fn)(x[idx])
+                activations.append(x_i)
+            z = functools.reduce(operator.mul, activations)
+            # Remove act axis
+            z = jnp.reshape(z, (*z.shape[:-2], -1))
+            #
+
+            x = checkpoint_name(x, ffn1_ckpt_name)
 
             z = nn.Dropout(rate=self.intermediate_dropout_rate,
                            broadcast_dims=self.intermediate_hidden_dropout_dims,
