@@ -343,24 +343,37 @@ void ComputeScaleInv(void* scale, void* scale_inv);
 enum class NVTE_Norm_Type { LayerNorm, RMSNorm };
 enum class NVTE_Norm_Stage { Forward, Backward };
 
-// Derived classes for each normalization type
-class NormalizationPlan {
+class NormalizationPlanBase {
  public:
-  NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
-                    DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
-                    const bool zero_centered_gamma, const size_t sm_count);
+  virtual ~NormalizationPlanBase() = default;
+  virtual void build() = 0;
+  virtual std::vector<size_t> getWorkspaceShape() const = 0;
 
-  void build();
+  virtual void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
+               void* eps_dptr, void* rsigma_dptr, void* workspace_dptr, cudaStream_t stream) = 0;
 
-  std::vector<size_t> getWorkspaceShape() const;
+  virtual void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
+               void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
+               cudaStream_t stream) = 0;
+};
 
-  // FWD
+
+class CudnnNormalizationPlan : public NormalizationPlanBase {
+ public:
+  CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
+                         DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
+                         const bool zero_centered_gamma, const size_t sm_count);
+
+  void build() override;
+
+  std::vector<size_t> getWorkspaceShape() const override;
+
   void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
-               void* eps_dptr, void* rsigma_dptr, void* workspace_dptr, cudaStream_t stream);
-  // BWD
+               void* eps_dptr, void* rsigma_dptr, void* workspace_dptr, cudaStream_t stream) override;
+
   void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
                void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
-               cudaStream_t stream);
+               cudaStream_t stream) override;
 
  private:
   const bool _zero_centered, _fp8_out;
@@ -376,6 +389,7 @@ class NormalizationPlan {
   cudnnHandle_t _handle;
 };
 
+template <typename NormalizationPlanType>
 class NormalizationPlanRegistry {
  public:
   // TODO thread-safe
@@ -384,7 +398,7 @@ class NormalizationPlanRegistry {
     return instance;
   };
 
-  NormalizationPlan* getNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
+  NormalizationPlanType* getNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
                                           DType wtype, DType itype, DType otype,
                                           const size_t batch_size, const size_t hidden_size,
                                           const bool zero_centered_gamma, const size_t sm_count);
@@ -394,8 +408,12 @@ class NormalizationPlanRegistry {
   NormalizationPlanRegistry(const NormalizationPlanRegistry&) = delete;
   NormalizationPlanRegistry& operator=(const NormalizationPlanRegistry&) = delete;
 
-  std::unordered_map<int64_t, std::unique_ptr<NormalizationPlan>> normalizationPlanMap;
+  std::unordered_map<int64_t, std::unique_ptr<NormalizationPlanType>> normalizationPlanMap;
 };
+
+using CudnnNormalizationRegistry = NormalizationPlanRegistry<CudnnNormalizationPlan>;
+/* using TeNormalizationRegistry = NormalizationPlanRegistry<TENormalizationPlan>; */
+
 
 }  // namespace transformer_engine
 

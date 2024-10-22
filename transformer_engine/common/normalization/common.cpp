@@ -353,7 +353,7 @@ template void norms_launcher<NVTE_NORM_TYPE::RMS_FWD_TE, NormFwdTe<NVTE_NORM_TYP
 template void norms_launcher<NVTE_NORM_TYPE::RMS_BWD_TE, NormBwdTe<NVTE_NORM_TYPE::RMS_BWD_TE>>(
     NormBwdTe<NVTE_NORM_TYPE::RMS_BWD_TE>&, Tensor*, Tensor*, Tensor*, Tensor*);
 
-NormalizationPlan::NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
+CudnnNormalizationPlan::CudnnNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage,
                                      DType wtype, DType itype, DType otype, DType ctype,
                                      const size_t batch_size, const size_t hidden_size,
                                      const bool zero_centered_gamma, const size_t sm_count)
@@ -498,7 +498,7 @@ NormalizationPlan::NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage No
   this->build();
 }
 
-void NormalizationPlan::build() {
+void CudnnNormalizationPlan::build() {
   NVTE_CHECK(_graph.validate().is_good());
   NVTE_CHECK(_graph.build_operation_graph(_handle).is_good());
   NVTE_CHECK(_graph
@@ -510,11 +510,11 @@ void NormalizationPlan::build() {
       _graph.build_plans(_handle, cudnn_frontend::BuildPlanPolicy_t::HEURISTICS_CHOICE).is_good());
 }
 
-std::vector<size_t> NormalizationPlan::getWorkspaceShape() const {
+std::vector<size_t> CudnnNormalizationPlan::getWorkspaceShape() const {
   return {static_cast<size_t>(_graph.get_workspace_size())};
 }
 
-void NormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr,
+void CudnnNormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr,
                                 void* mean_dptr, void* eps_dptr, void* rsigma_dptr,
                                 void* workspace_dptr, cudaStream_t stream) {
   // Binding data pointers to graph tensors
@@ -541,7 +541,7 @@ void NormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void*
   if (_fp8_out) update_tensor_scale_inv(z, stream);
 }
 
-void NormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr,
+void CudnnNormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr,
                                 void* dx_dptr, void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr,
                                 void* workspace_dptr, cudaStream_t stream) {
   // Binding data pointers to graph tensors
@@ -562,10 +562,11 @@ void NormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr,
   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
 }
 
-NormalizationPlan* NormalizationPlanRegistry::getNormalizationPlan(
-    NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype,
-    const size_t batch_size, const size_t hidden_size, const bool zero_centered_gamma,
-    const size_t sm_count) {
+template <typename NormalizationPlanType>
+NormalizationPlanType* NormalizationPlanRegistry<NormalizationPlanType>::getNormalizationPlan(
+  NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype,
+  const size_t batch_size, const size_t hidden_size, const bool zero_centered_gamma,
+  const size_t sm_count) {
   const DType ctype = DType::kFloat32;
   auto key = get_key(NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size,
                      zero_centered_gamma);
@@ -575,8 +576,8 @@ NormalizationPlan* NormalizationPlanRegistry::getNormalizationPlan(
     return it->second.get();
   }
   auto plan =
-      std::make_unique<NormalizationPlan>(NormType, NormStage, wtype, itype, otype, ctype,
-                                          batch_size, hidden_size, zero_centered_gamma, sm_count);
+    std::make_unique<NormalizationPlanType>(NormType, NormStage, wtype, itype, otype, ctype,
+                                            batch_size, hidden_size, zero_centered_gamma, sm_count);
   normalizationPlanMap.insert({key, std::move(plan)});
   return normalizationPlanMap[key].get();
 }

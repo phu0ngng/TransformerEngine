@@ -40,7 +40,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
   Tensor empty;
 
   if (std::getenv("NVTE_FWD_RMSNORM_USE_CUDNN")) {
-    auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
+    auto plan = CudnnNormalizationRegistry::getInstance().getNormalizationPlan(
         NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::Forward,
         gamma.data.dtype,  // wtype
         x.data.dtype,      // itype
@@ -101,7 +101,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
   Tensor empty;
 
   if (std::getenv("NVTE_BWD_RMSNORM_USE_CUDNN")) {
-    auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
+    auto plan = CudnnNormalizationRegistry::getInstance().getNormalizationPlan(
         NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::Backward,
         gamma.data.dtype,  // wtype
         x.data.dtype,      // itype
