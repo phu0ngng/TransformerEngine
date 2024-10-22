@@ -357,6 +357,30 @@ class NormalizationPlanBase {
                cudaStream_t stream) = 0;
 };
 
+class TeNormalizationPlan : public NormalizationPlanBase {
+ public:
+  TeNormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage NormStage, DType wtype, DType itype,
+                         DType otype, DType ctype, const size_t batch_size, const size_t hidden_size,
+                         const bool zero_centered_gamma, const size_t sm_count);
+
+  void build() override;
+
+  std::vector<size_t> getWorkspaceShape() const override;
+
+  void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
+               void* eps_dptr, void* rsigma_dptr, void* workspace_dptr, cudaStream_t stream) override;
+
+  void execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr, void* dx_dptr,
+               void* dz_dptr, void* dbeta_dptr, void* dgamma_dptr, void* workspace_dptr,
+               cudaStream_t stream) override;
+
+ private:
+  const bool _zero_centered, _fp8_out;
+  std::unique_ptr<char[]> _scalar_dptr;
+  // FWD
+  // BWD
+};
+
 
 class CudnnNormalizationPlan : public NormalizationPlanBase {
  public:
