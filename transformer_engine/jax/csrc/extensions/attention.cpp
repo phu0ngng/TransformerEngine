@@ -333,36 +333,41 @@ void FusedAttnForward(cudaStream_t stream, void **buffers, const char *opaque, s
   nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
-Error_Type FusedAttnForwardFFI(
-    cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf, Buffer_Type v_buf,
-    Buffer_Type bias_buf, Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
-    Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf, Buffer_Type seed_buf,
-    Result_Type output_buf, Result_Type softmax_aux_buf, Result_Type rng_state_buf,
-    Result_Type workspace_buf, int64_t input_batch_, int64_t bias_batch_, int64_t q_max_seqlen_,
-    int64_t kv_max_seqlen_, int64_t attn_heads_, int64_t num_gqa_groups_, int64_t bias_heads_,
-    int64_t head_dim_, int64_t max_segments_per_seq_, int64_t wkspace_size_, double scaling_factor_,
-    double dropout_probability_, int64_t bias_type_, int64_t mask_type_, int64_t qkv_layout_,
-    int64_t dtype_, int64_t wkspace_dtype_, bool is_training, bool deterministic,
-    int64_t window_size_left, int64_t window_size_right) {
+Error_Type FusedAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
+                               Buffer_Type v_buf, Buffer_Type bias_buf,
+                               Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
+                               Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
+                               Buffer_Type seed_buf, Result_Type output_buf,
+                               Result_Type softmax_aux_buf, Result_Type rng_state_buf,
+                               Result_Type workspace_buf, Attn_Attr_Type attrs) {
   /* Descriptor data type conversion */
-  size_t input_batch = static_cast<size_t>(input_batch_);
-  size_t bias_batch = static_cast<size_t>(bias_batch_);
-  size_t q_max_seqlen = static_cast<size_t>(q_max_seqlen_);
-  size_t kv_max_seqlen = static_cast<size_t>(kv_max_seqlen_);
-  size_t attn_heads = static_cast<size_t>(attn_heads_);
-  size_t num_gqa_groups = static_cast<size_t>(num_gqa_groups_);
-  size_t bias_heads = static_cast<size_t>(bias_heads_);
-  size_t head_dim = static_cast<size_t>(head_dim_);
-  size_t max_segments_per_seq = static_cast<size_t>(max_segments_per_seq_);
-  size_t wkspace_size = static_cast<size_t>(wkspace_size_);
-  float scaling_factor = static_cast<float>(scaling_factor_);
-  float dropout_probability = static_cast<float>(dropout_probability_);
-  NVTE_Bias_Type bias_type = static_cast<NVTE_Bias_Type>(bias_type_);
-  NVTE_Mask_Type mask_type = static_cast<NVTE_Mask_Type>(mask_type_);
-  NVTE_QKV_Layout qkv_layout = static_cast<NVTE_QKV_Layout>(qkv_layout_);
-  DType dtype = static_cast<DType>(dtype_);
-  DType wkspace_dtype = static_cast<DType>(wkspace_dtype_);
+  size_t input_batch = attrs.input_batch;
+  size_t bias_batch = attrs.bias_batch;
+  size_t q_max_seqlen = attrs.q_max_seqlen;
+  size_t kv_max_seqlen = attrs.kv_max_seqlen;
+  size_t attn_heads = attrs.attn_heads;
+  size_t num_gqa_groups = attrs.num_gqa_groups;
+  size_t bias_heads = attrs.bias_heads;
+  size_t head_dim = attrs.head_dim;
+  size_t max_segments_per_seq = attrs.max_segments_per_seq;
+  auto window_size_left = attrs.window_size_left;
+  auto window_size_right = attrs.window_size_right;
+
+  float scaling_factor = attrs.scaling_factor;
+  float dropout_probability = attrs.dropout_probability;
+
+  NVTE_Bias_Type bias_type = static_cast<NVTE_Bias_Type>(attrs.bias_type);
+  NVTE_Mask_Type mask_type = static_cast<NVTE_Mask_Type>(attrs.mask_type);
+  NVTE_QKV_Layout qkv_layout = static_cast<NVTE_QKV_Layout>(attrs.qkv_layout);
+
+  bool is_training = attrs.is_training;
+  bool deterministic = attrs.deterministic;
+
   auto is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
+
+  size_t wkspace_size = workspace_buf->dimensions()[0];
+  DType dtype = convert_ffi_datatype_to_te_dtype(q_buf.element_type());
+  DType wkspace_dtype = convert_ffi_datatype_to_te_dtype(workspace_buf->element_type());
 
   /* Input buffers from XLA */
   /* q, k, v are parsed later for different qkv_layout */
@@ -505,27 +510,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnForwardHandler, FusedAttnForwardFFI,
                                   .Ret<Buffer_Type>()      // softmax_aux
                                   .Ret<Buffer_Type>()      // rng_state
                                   .Ret<Buffer_Type>()      // workspace
-                                  .Attr<int64_t>("input_batch")
-                                  .Attr<int64_t>("bias_batch")
-                                  .Attr<int64_t>("q_max_seqlen")
-                                  .Attr<int64_t>("kv_max_seqlen")
-                                  .Attr<int64_t>("attn_heads")
-                                  .Attr<int64_t>("num_gqa_groups")
-                                  .Attr<int64_t>("bias_heads")
-                                  .Attr<int64_t>("head_dim")
-                                  .Attr<int64_t>("max_segments_per_seq")
-                                  .Attr<int64_t>("wkspace_size")
-                                  .Attr<double>("scaling_factor")
-                                  .Attr<double>("dropout_probability")
-                                  .Attr<int64_t>("bias_type")
-                                  .Attr<int64_t>("mask_type")
-                                  .Attr<int64_t>("qkv_layout")
-                                  .Attr<int64_t>("dtype")
-                                  .Attr<int64_t>("wkspace_dtype")
-                                  .Attr<bool>("is_training")
-                                  .Attr<bool>("deterministic")
-                                  .Attr<int64_t>("window_size_left")
-                                  .Attr<int64_t>("window_size_right"),
+                                  .Attr<Attn_Attr_Type>("attrs"),
                               FFI_CudaGraph_Traits);
 
 pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(

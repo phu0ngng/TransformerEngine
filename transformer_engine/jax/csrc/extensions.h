@@ -26,7 +26,6 @@
 #include "common/common.h"
 #include "common/util/logging.h"
 #include "extensions/ffi.h"
-#include "extensions/misc.h"
 #include "transformer_engine/activation.h"
 #include "utils.h"
 
