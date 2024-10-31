@@ -7,6 +7,8 @@
 #include "extensions.h"
 #include "transformer_engine/fused_attn.h"
 
+#include "../../../common/fused_attn/utils.h"
+
 namespace transformer_engine {
 namespace jax {
 
@@ -105,6 +107,9 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
     float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
     size_t max_segments_per_seq, int64_t window_size_left, int64_t window_size_right) {
+
+  auto handle_ = cudnnExecutionPlanManager().Instance().GetCudnnHandle();
+
   // For qkv_packed
   auto qkv_shape = std::vector<size_t>{input_batch * q_max_seqlen, 3, attn_heads, head_dim};
   auto qkv_tensor = TensorWrapper(nullptr, qkv_shape, dtype);

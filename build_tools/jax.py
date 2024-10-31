@@ -45,6 +45,11 @@ def setup_jax_extension(
         csrc_source_files / "utils.cu",
     ] + all_files_in_dir(extensions_dir, ".cpp")
 
+    # Add CUDNN Frontend include directory
+    cudnn_frontend_dir = Path(__file__).parent.parent / "3rdparty" / "cudnn-frontend" / "include"
+    print("HERE ----------------------------------------")
+    print(cudnn_frontend_dir)
+
     # Header files
     cuda_home, _ = cuda_path()
     xla_home = xla_path()
@@ -55,6 +60,7 @@ def setup_jax_extension(
         common_header_files / "common" / "include",
         csrc_header_files,
         xla_home,
+        cudnn_frontend_dir,
     ]
 
     # Compile flags
