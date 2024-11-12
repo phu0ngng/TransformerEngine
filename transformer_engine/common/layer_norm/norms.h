@@ -365,9 +365,10 @@ class NormalizationPlan {
  private:
   const bool _zero_centered, _fp8_out;
   std::unique_ptr<char[]> _scalar_dptr;
+  std::unique_ptr<float> _one_dptr = std::make_unique<float>(1.0f);
   // FWD
   std::shared_ptr<fe::graph::Tensor_attributes> _x, _gamma_zero, _scalar_offset, _gamma, _beta,
-      _eps, _mean, _rsigma, _z, _z_scale, _amax, _z_fp8;
+      _eps, _mean, _rsigma, _z, _z_scale, _one_for_div, _z_scale_inv, _amax, _z_fp8;
   // BWD
   std::shared_ptr<fe::graph::Tensor_attributes> _dz, _dx, _dgamma, _dbeta;
 

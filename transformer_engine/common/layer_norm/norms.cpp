@@ -460,6 +460,17 @@ NormalizationPlan::NormalizationPlan(NVTE_Norm_Type NormType, NVTE_Norm_Stage No
                                        .set_mode(fe::ReductionMode_t::AMAX)
                                        .set_compute_data_type(get_cudnn_fe_dtype(ctype)));
       _amax->set_output(true).set_data_type(get_cudnn_fe_dtype(ctype)).set_dim({1, 1, 1, 1});
+      _one_for_div = _graph.tensor(fe::graph::Tensor_attributes()
+                                       .set_name("one_for_div")
+                                       .set_dim({1, 1, 1, 1})
+                                       .set_stride({1, 1, 1, 1})
+                                       .set_data_type(get_cudnn_fe_dtype(ctype))
+                                       .set_is_pass_by_value(true));
+      auto div_options = fe::graph::Pointwise_attributes()
+                             .set_mode(fe::PointwiseMode_t::DIV)
+                             .set_compute_data_type(get_cudnn_fe_dtype(ctype));
+      _z_scale_inv = _graph.pointwise(_one_for_div, _z_scale, div_options);
+      _z_scale_inv->set_output(true).set_data_type(get_cudnn_fe_dtype(ctype));
     }
   } else {
     _dz = _graph.tensor(fe::graph::Tensor_attributes()
@@ -529,16 +540,18 @@ void NormalizationPlan::execute(Tensor* z, void* x_dptr, void* gamma_dptr, void*
   else
     _variant_pack.insert({{_gamma, gamma_dptr}});
 
-  if (_fp8_out)
-    _variant_pack.insert(
-        {{_z_scale, z->scale.dptr}, {_amax, z->amax.dptr}, {_z_fp8, z->data.dptr}});
-  else
+  if (_fp8_out) {
+    _variant_pack.insert({{_one_for_div, reinterpret_cast<void*>(_one_dptr.get())},
+                          {_z_scale, z->scale.dptr},
+                          {_z_scale_inv, z->scale_inv.dptr},
+                          {_amax, z->amax.dptr},
+                          {_z_fp8, z->data.dptr}});
+  } else {
     _variant_pack.insert({{_z, z->data.dptr}});
-
+  }
   // Execute the computation
   NVTE_CHECK_CUDNN(cudnnSetStream(_handle, stream));
   NVTE_CHECK(_graph.execute(_handle, _variant_pack, workspace_dptr).is_good());
-  if (_fp8_out) update_tensor_scale_inv(z, stream);
 }
 
 void NormalizationPlan::execute(void* x_dptr, void* gamma_dptr, void* mean_dptr, void* rsigma_dptr,
