@@ -37,7 +37,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
   NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]});
   NVTE_CHECK(rsigma->data.dtype == DType::kFloat32);
 
-  if (workspace->data.dptr != nullptr) {
+  if (workspace->data.dptr == nullptr) {
     CheckInputTensor(x, "x");
     CheckInputTensor(gamma, "gamma");
     CheckInputTensor(beta, "beta");
@@ -59,7 +59,7 @@ void layernorm_fwd(const Tensor& x,      // BxSxhidden_size
         x.data.shape[1],   // hidden_size
         zero_centered_gamma, multiprocessorCount);
 
-    if (workspace->data.dptr == nullptr) {
+    if (workspace->data.shape.empty()) {
       workspace->data.shape = plan->getWorkspaceShape();
       workspace->data.dtype = DType::kByte;
       return;
@@ -105,7 +105,7 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
   NVTE_CHECK(dbeta->data.shape == gamma.data.shape);
   NVTE_CHECK(dbeta->data.dtype == gamma.data.dtype);
 
-  if (workspace->data.dptr) {
+  if (workspace->data.shape.empty()) {
     CheckInputTensor(dz, "dz");
     CheckInputTensor(x, "x");
     CheckInputTensor(mu, "mu");
@@ -126,7 +126,7 @@ void layernorm_bwd(const Tensor& dz, const Tensor& x, const Tensor& mu, const Te
         x.data.shape[1],   // hidden_size
         zero_centered_gamma, multiprocessorCount);
 
-    if (workspace->data.dptr == nullptr) {
+    if (workspace->data.shape.empty()) {
       workspace->data.shape = plan->getWorkspaceShape();
       workspace->data.dtype = DType::kByte;
       return;

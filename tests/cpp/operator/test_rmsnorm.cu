@@ -49,9 +49,22 @@ void compute_ref_output(const InputType *data, const InputType *gamma, OutputTyp
   for (size_t i = 0; i < N; ++i) {
     for (size_t j = 0; j < H; ++j) {
       compute_t current = static_cast<compute_t>(data[i * H + j]);
-      compute_t g = static_cast<compute_t>(gamma[j]);
-      if (zero_centered_gamma) {
-        g += 1;
+      // compute_t g = static_cast<compute_t>(gamma[j]);
+      // if (zero_centered_gamma) {
+      //   g += 1;
+      // }
+      compute_t g = static_cast<compute_t>(0.f);
+      if constexpr (!std::is_same_v<InputType, fp8e5m2> && !std::is_same_v<InputType, fp8e4m3>) {
+        InputType gi = gamma[j];
+        if (zero_centered_gamma) {
+          gi = gi + static_cast<InputType>(1.f);
+        }
+        g = static_cast<compute_t>(gi);
+      } else {
+        g = static_cast<compute_t>(gamma[j]);
+        if (zero_centered_gamma) {
+          g += static_cast<compute_t>(1.f);
+        }
       }
       compute_t tmp = current * rsigma[i] * g;
       output[i * H + j] = static_cast<OutputType>(tmp * scale);
