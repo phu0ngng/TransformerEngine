@@ -87,9 +87,22 @@ void compute_ref_backward(const OutputType *output_grad, const InputType *data, 
     for (size_t j = 0; j < H; ++j) {
       const compute_t x = static_cast<compute_t>(data[i * H + j]);
       const compute_t y = x * rsigma[i];
-      compute_t g = static_cast<compute_t>(gamma[j]);
-      if (zero_centered_gamma) {
-        g += 1;
+      // compute_t g = static_cast<compute_t>(gamma[j]);
+      // if (zero_centered_gamma) {
+      //   g += 1;
+      // }
+      compute_t g = static_cast<compute_t>(0.f);
+      if constexpr (!std::is_same_v<InputType, fp8e5m2> && !std::is_same_v<InputType, fp8e4m3>) {
+        InputType gi = gamma[j];
+        if (zero_centered_gamma) {
+          gi = gi + static_cast<InputType>(1.f);
+        }
+        g = static_cast<compute_t>(gi);
+      } else {
+        g = static_cast<compute_t>(gamma[j]);
+        if (zero_centered_gamma) {
+          g += static_cast<compute_t>(1.f);
+        }
       }
       const compute_t dz = static_cast<compute_t>(output_grad[i * H + j]);
       const compute_t dy = g * dz;
