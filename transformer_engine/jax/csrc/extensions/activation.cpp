@@ -198,6 +198,53 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuFP8Handler, ActLuFP8FFI,
                                   .Attr<int64_t>("act_enum"),
                               FFI_CudaGraph_Traits);
 
+
+Error_Type ActLuWithFP8(cudaStream_t stream, 
+                        Buffer_Type inp_data_buf, 
+                        Buffer_Type inp_scale_buf,
+                        Result_Type out_data_buf,
+                        Buffer_Type out_scale_inv_buf, 
+                        Buffer_Type out_amax_buf,
+                        int64_t act_enum) {
+
+  auto in_dtype = convert_ffi_datatype_to_te_dtype(inp_data_buf.element_type());
+  auto out_dtype = convert_ffi_datatype_to_te_dtype(out_data_buf->element_type());
+
+  auto *input = input_buf.untyped_data();
+  float *scale = reinterpret_cast<float*>(inp_scale_buf.untyped_data());
+  float *scale_inv = reinterpret_cast<float *>(out_scale_inv_buf.untyped_data());
+  float *amax = reinterpret_cast<float*>(out_amax_buf.untyped_data());
+
+  auto *output = output_data_buf->untyped_data();
+
+  // TODO: Why do we need this block?
+  // if (!use_fp8(out_dtype)) {
+  //   scale = nullptr;
+  //   scale_inv = nullptr;
+  //   amax_out = nullptr;
+  // }
+  auto input_dims = inp_data_buf.dimensions();
+  auto m = product(input_dims, 0, input_dims.size() - 2);
+  auto n = input_dims.back();
+  auto act_len = input_dims.end()[-2];
+  auto act_type = static_cast<NVTE_Activation_Type>(act_enum);
+
+  ActLuImpl(input, m, n, in_dtype, out_dtype, scale, stream, scale_inv, amax_out, output, act_type,
+            act_len);
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuWithFP8Handler, ActLuWithFP8,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // inp_data
+                                  .Arg<Buffer_Type>()      // inp_scale
+                                  .Ret<Buffer_Type>()      // out_data
+                                  .Ret<Buffer_Type>()      // out_scale_inv
+                                  .Ret<Buffer_Type>()      // out_amax
+                                  .Attr<int64_t>("act_enum"),
+                              FFI_CudaGraph_Traits);
+
 void DActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len) {
   auto *input = buffers[0];
   auto *act_input = buffers[1];

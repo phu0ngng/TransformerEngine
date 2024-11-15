@@ -28,8 +28,11 @@ from .misc import (
 from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP
 
+from ..fp8 import FP8Helper, FP8MetaPackage
+from ..tensor import GeneralTensor, FP8_QTensor, FP8_DQTensor
 
-__all__ = ["act_lu", "dact_lu", "act_lu_fp8"]
+
+__all__ = ["act_lu", "dact_lu", "act_lu_fp8", "general_act_lu"]
 
 
 ActivationEnum = {
@@ -506,3 +509,151 @@ def act_lu_fp8(
     return ActLuFp8Primitive.outer_primitive.bind(
         x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_type_id
     )
+
+def flatten_pytree_to_arrays(pytree):
+    """Recursively flatten a pytree into a list of arrays.
+
+    Args:
+        pytree: Any pytree (GeneralTensor, FP8Tensor, or their components)
+    Returns:
+        List of actual arrays that can be passed to mlir.custom_call
+    """
+    # Get children and aux_data
+    children, _ = jax.tree_util.tree_flatten(pytree)
+
+    # Flatten each child if it's a pytree, otherwise keep as is
+    arrays = []
+    for child in children:
+        if isinstance(child, (BaseTensor, ScalingMetadata)):
+            # Recursively flatten pytree children
+            arrays.extend(flatten_pytree_to_arrays(child))
+        else:
+            # Assume it's an actual array
+            arrays.append(child)
+    return arrays
+
+class ActLuGeneralPrimitive(BasePrimitive):
+    """
+    Activation Forward Primitive
+    """
+
+    name = "te_act_lu_general"
+    # multiple_results = False
+    inner_primitive = None
+    outer_primitive = None
+    impl_static_args = (1, 2,)
+
+    @staticmethod
+    def abstract(tensor_aval, *, act_enum, output_type):  # pylint: disable=unused-argument
+        """
+        act_lu abstract
+        """
+        if not isinstance(tensor_aval, TensorAbstractValue):
+            raise TypeError(f"Expected TensorAbstractValue, got {type(tensor_aval)}")
+
+        if not issubclass(output_type, BaseTensor):
+            raise TypeError(f"Expected output_type to be a subclass of BaseTensor, got {output_type}")
+        input_dtype = tensor_aval.dtype[0]
+        assert input_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+
+        if output_type == tensor_aval.tensor_type:
+            return TensorAbstractValue(
+                shape=tensor_aval.shape,
+                dtype=tensor_aval.dtype,
+                tensor_type=tensor_aval.tensor_type
+            )
+        elif output_type == type(FP8_DQTensor):
+            (data_shape, scale_shape,) = tensor_aval.shape
+            amax_shape = ()
+            output_shape = (data_shape, scale_shape, scale_inv_shape)
+
+            return TensorAbstractValue(
+                shape=output_shape,
+                dtype=jnp.float8_e4m3fn,
+                tensor_type=output_type
+            )
+
+    @staticmethod
+    def lowering(ctx, tensor, *, act_enum, output_type):
+        """
+        act_lu lowering rules
+        """
+        (input_aval,) = ctx.avals_in
+        input_dtype = input_aval.dtype[0]
+        assert input_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+
+        buffers = flatten_pytree_to_arrays(tensor)
+        name = "te_act_lu_ffi"
+        out = ffi.ffi_lowering(name)(ctx, buffers, act_enum=act_enum)
+
+        return out
+
+    @staticmethod
+    def impl(tensor, act_enum):
+        assert ActLuPrimitive.inner_primitive is not None
+        out = ActLuPrimitive.inner_primitive.bind(tensor, act_enum=act_enum, output_type=output_type)
+        return out
+
+    # @staticmethod
+    # def batcher(batched_args, batch_dims, *, act_enum):
+    #     """
+    #     act_lu batcher
+    #     """
+    #     check_valid_batch_dims(batch_dims)
+    #     assert ActLuPrimitive.outer_primitive is not None
+    #     (inputs,) = batched_args
+    #     (inputs_bdim,) = batch_dims
+    #
+    #     out_bdims = inputs_bdim
+    #     return ActLuPrimitive.outer_primitive.bind(inputs, act_enum=act_enum), out_bdims
+    #
+    # @staticmethod
+    # def infer_sharding_from_operands(act_enum, mesh, arg_infos, result_infos):
+    #     """
+    #     act_lu infer_sharding_from_operands
+    #     """
+    #     del result_infos, act_enum  # Unused.
+    #     x_spec = get_padded_spec(arg_infos[0])
+    #     out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
+    #     return out_sharding
+    #
+    # @staticmethod
+    # def partition(act_enum, mesh, arg_infos, result_infos):
+    #     """
+    #     act_lu partitioning
+    #     """
+    #     del result_infos
+    #     x_spec = get_padded_spec(arg_infos[0])
+    #     arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+    #     out_sharding = NamedSharding(mesh, PartitionSpec(*x_spec[:-2], x_spec[-1]))
+    #
+    #     def sharded_impl(x):
+    #         return ActLuPrimitive.impl(x, act_enum=act_enum)
+    #
+    #     return mesh, sharded_impl, out_sharding, arg_shardings
+
+
+register_primitive(ActLuGeneralPrimitive)
+
+
+def general_act_lu(inp_tensor: Union[GeneralTensor, FP8_DQTensor], 
+                   activation_type: Sequence[Union[str, Callable]]) ->
+    Union[GeneralTensor, FP8Tensor]:
+    """
+    act_lu wrapper
+    TODO
+    """
+    # if not ActLuPrimitive.enabled():
+    #     return _jax_act_lu(inputs, activation_type)
+
+    act_type_id = ActivationEnum[activation_type].value
+
+    if FP8Helper.is_fp8_enabled():
+        assert type(inp_tensor) == FP8_DQTensor
+        output_type = type(FP8Tensor)
+    else:
+        output_type = type(inp_tensor)
+
+    return ActLuPrimitive.outer_primitive.bind(inp_tensor,
+                                               act_enum=act_type_id,
+                                               output_type=output_type)

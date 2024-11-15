@@ -172,6 +172,8 @@ void ActLu(cudaStream_t stream, void **buffers, const char *opaque, size_t opaqu
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuHandler);
 
+XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuWithFP8Handler);
+
 void ActLuFP8(cudaStream_t stream, void **buffers, const char *opaque, size_t opaque_len);
 
 XLA_FFI_DECLARE_HANDLER_SYMBOL(ActLuFP8Handler);
