@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for activation"""
-from typing import Tuple, Sequence, Union, Callable
+from typing import Tuple, Sequence, Union, Callable, Optional
 import operator
 from functools import reduce, partial
 
@@ -28,8 +28,13 @@ from .misc import (
 from .quantization import _jax_cast_fp8
 from ..sharding import all_reduce_max_along_all_axes_except_PP
 
+from ..tensor import (
+    Float8ScaledQuantizer,
+    Float8ScaledTensor,
+)
 
-__all__ = ["act_lu", "dact_lu", "act_lu_fp8"]
+
+__all__ = ["act_lu", "dact_lu", "act_lu_fp8", "general_act_lu"]
 
 
 ActivationEnum = {
@@ -369,6 +374,7 @@ class ActLuFp8Primitive(BasePrimitive):
         batch_shape = x_aval.shape[:-2]
         out_shape = (batch_shape) + (hidden_size,)
         out_aval = x_aval.update(shape=out_shape, dtype=out_dtype)
+        assert amax_aval.dtype == jnp.float32
         updated_amax_aval = amax_aval.update(shape=amax_aval.shape, dtype=amax_aval.dtype)
 
         return out_aval, updated_amax_aval
@@ -506,3 +512,29 @@ def act_lu_fp8(
     return ActLuFp8Primitive.outer_primitive.bind(
         x, amax, scale, scale_inv, out_dtype=out_dtype, act_enum=act_type_id
     )
+
+def general_act_lu(x: Union[jnp.ndarray], activation_type:
+                   Sequence[Union[str, Callable]], quantizer: Optional[Float8ScaledQuantizer] =
+                   None) -> Union[jnp.ndarray, Float8ScaledQuantizer]:
+    """
+    act_lu wrapper
+    TODO
+    """
+    # if not ActLuGeneralPrimitive.enabled():
+    #     return _jax_act_lu(inputs, activation_type)
+
+    act_type_id = ActivationEnum[activation_type].value
+
+    if isinstance(quantizer, Float8ScaledQuantizer):
+        old_amax = jnp.zeros((1,))
+        scale_inv = jnp.zeros((1,))
+        output, updated_amax =  ActLuFp8Primitive.outer_primitive.bind(x, old_amax,
+                                                                       quantizer.scale,
+                                                                       scale_inv,
+                                                                       out_dtype=quantizer.dtype,
+                                                                       act_enum=act_type_id)
+        scale_inv = 1.0 / quantizer.scale # This should happen in C++
+        quantizer.update(updated_amax)
+        return Float8ScaledTensor.tree_unflatten((output, scale_inv), ())
+
+    return ActLuPrimitive.outer_primitive.bind(x, act_enum=act_type_id)

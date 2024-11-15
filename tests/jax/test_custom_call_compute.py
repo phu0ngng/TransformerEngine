@@ -26,6 +26,12 @@ from transformer_engine.jax.cpp_extensions.transpose import (
 )
 from transformer_engine.jax.cpp_extensions.quantization import _jax_cast_fp8
 from transformer_engine.jax import cpp_extensions as tex
+from transformer_engine.jax.tensor import (
+    Float8ScaledQuantizer,
+    ScaledTensor,
+    Float8ScaledTensor,
+)
+from transformer_engine.jax.activation import activation_lu as activation_lu_general
 
 
 GEMM_CASES = [
@@ -466,6 +472,50 @@ class TestActivationLu:
         assert_allclose(prim_out, ref_out, dtype=x.dtype)
         assert_allclose(prim_grad, ref_grad, dtype=x.dtype)
 
+class TestActivationLuGeneral:
+
+    def ref_func(self, x, activation_type):
+
+        def ref_act_lu(inputs):
+            x = _jax_act_lu(inputs, activation_type)
+            return jnp.mean(x)
+
+        ref_act_func = jit(value_and_grad(ref_act_lu, (0,)))
+        return ref_act_func(x)
+
+    def primitive_func(self, inputs, quantizer):
+        out = activation_lu_general(inputs, activation_type=self.activation_type,
+                                    quantizer=quantizer)
+        if isinstance(out, ScaledTensor):
+            out = out.dequantize()
+
+        return jnp.mean(out)
+
+    @pytest.mark.parametrize("shape", [(32, 1, 64),
+                                       # (16, 64, 1, 256)
+                                       ])
+    @pytest.mark.parametrize(
+        "activation_type",
+        [
+            ("gelu",),
+            # ("gelu", "linear"),
+        ],
+    )
+    @pytest.mark.parametrize( "output_type", [None, jnp.float8_e4m3fn])
+    def test_activation_lu(self, random_inputs, activation_type, output_type):
+        x = random_inputs
+        x = jnp.repeat(x, len(activation_type), axis=-2)
+        self.activation_type = activation_type
+
+        value_n_grad_primitive_func = jit(value_and_grad(self.primitive_func, (0,)))
+
+        quantizer = output_type if output_type is None else Float8ScaledQuantizer.create(output_type)
+
+        prim_out, (prim_grad,) = value_n_grad_primitive_func(x, quantizer)
+        ref_out, (ref_grad,) = self.ref_func(x, activation_type)
+
+        assert_allclose(prim_out, ref_out, dtype=x.dtype)
+        assert_allclose(prim_grad, ref_grad, dtype=x.dtype)
 
 class TestActivationLuFP8(TestActivationLu):
 
