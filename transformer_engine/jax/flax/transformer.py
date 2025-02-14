@@ -1769,8 +1769,9 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                     max_distance=128,
                     num_attention_heads=self.num_attention_heads,
                     dtype=self.dtype,
-                    embedding_init=nn.initializers.variance_scaling(1.0, "fan_avg", "uniform",
-                                                                    dtype=self.dtype),
+                    embedding_init=nn.initializers.variance_scaling(
+                        1.0, "fan_avg", "uniform", dtype=self.dtype
+                    ),
                     name="relpos_bias",
                 )
             else:
