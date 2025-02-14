@@ -149,8 +149,8 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
         del self.scale_factor
 
         if self.float32_logits:
-            query = query.astype(jnp.float32)
-            key = key.astype(jnp.float32)
+            query = query.astype(self.dtype)
+            key = key.astype(self.dtype)
         h_q, h_kv = query.shape[-2], key.shape[-2]
         # The generated GQA kernels are slower than normal MHA kernels even when h_q == h_kv.
         # Therefore, we have to maintain two code paths.
@@ -976,7 +976,9 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         )
 
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal", self.dtype)
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "normal", dtype=self.dtype
+            )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
         super().__post_init__()
@@ -1767,7 +1769,8 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                     max_distance=128,
                     num_attention_heads=self.num_attention_heads,
                     dtype=self.dtype,
-                    embedding_init=nn.initializers.variance_scaling(1.0, "fan_avg", "uniform"),
+                    embedding_init=nn.initializers.variance_scaling(1.0, "fan_avg", "uniform",
+                                                                    dtype=self.dtype),
                     name="relpos_bias",
                 )
             else:
