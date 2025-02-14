@@ -66,7 +66,7 @@ def train_step(state, inputs, masks, labels, var_collect, rngs):
 
     def loss_fn(var_collect, disable_dropout=False):
         logits = state.apply_fn(var_collect, inputs, masks, disable_dropout, rngs=rngs)
-        one_hot = jax.nn.one_hot(labels, 2)
+        one_hot = jax.nn.one_hot(labels.astype(jnp.int32), 2)
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
 
@@ -112,7 +112,7 @@ def eval_step(state, inputs, masks, labels, var_collect):
 
     def loss_fn(var_collect, disable_dropout=False):
         logits = state.apply_fn(var_collect, inputs, masks, disable_dropout)
-        one_hot = jax.nn.one_hot(labels, 2)
+        one_hot = jax.nn.one_hot(labels.astype(jnp.int32), 2)
         loss = jnp.mean(optax.softmax_cross_entropy(logits=logits, labels=one_hot))
         return loss, logits
 
