@@ -59,16 +59,12 @@ def _obtain_default_layernorm_scale_init_if_need(original_init, zero_centered_ga
 def _create_layernorm_parameters(
     layernorm_type, shape, scale_init, scale_axes, bias_init, bias_axes, input_dtype, dtype
 ):
-    scale = nn_partitioning.param_with_axes(
-        "scale", scale_init, shape, dtype, axes=scale_axes
-    )
+    scale = nn_partitioning.param_with_axes("scale", scale_init, shape, dtype, axes=scale_axes)
     scale = scale.astype(input_dtype)
 
     layernorm_type = canonicalize_layernorm_type(layernorm_type)
     if layernorm_type == "layernorm":
-        bias = nn_partitioning.param_with_axes(
-            "ln_bias", bias_init, shape, dtype, axes=bias_axes
-        )
+        bias = nn_partitioning.param_with_axes("ln_bias", bias_init, shape, dtype, axes=bias_axes)
         bias = bias.astype(input_dtype)
     else:
         assert layernorm_type == "rmsnorm"
@@ -178,9 +174,10 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
             if mask is not None:
                 attention_bias = lax.select(
                     mask > 0,
-                    jnp.full(mask.shape, -1e10).astype(input_dtype),
-                    jnp.full(mask.shape, 0.0).astype(input_dtype),
+                    jnp.full(mask.shape, -1e10),
+                    jnp.full(mask.shape, 0.0),
                 )
+                attention_bias = attention_bias.astype(input_dtype)
 
             if bias is not None:
                 attention_bias = _combine_biases(attention_bias, bias)
@@ -459,7 +456,8 @@ class DenseGeneral(TransformerEngineBase):
         kernel = nn_partitioning.param_with_axes(
             "kernel", self.kernel_init, kernel_shape, self.dtype, axes=self.kernel_axes
         )
-        kernel = kernel.astype(input_dtype)
+        if not FP8Helper.is_fp8_enabled():
+            kernel = kernel.astype(input_dtype)
 
         if self.use_bias:
             bias = nn_partitioning.param_with_axes(
@@ -498,7 +496,8 @@ class DenseGeneral(TransformerEngineBase):
                 axes=lora_a_kernel_axes,
             )
             lora_a_kernel = jnp.reshape(lora_a_kernel, lora_a_kernel_shape)
-            lora_a_kernel = lora_a_kernel.astype(input_dtype)
+            if not FP8Helper.is_fp8_enabled():
+                lora_a_kernel = lora_a_kernel.astype(input_dtype)
 
             lora_b_kernel_shape = (*features[:-1], self.low_rank_adaptation_dim, features[-1])
             lora_b_kernel_axes = (None,) * len(lora_b_kernel_shape)
@@ -509,7 +508,8 @@ class DenseGeneral(TransformerEngineBase):
                 self.dtype,
                 axes=lora_b_kernel_axes,
             )
-            lora_b_kernel = lora_b_kernel.astype(input_dtype)
+            if not FP8Helper.is_fp8_enabled():
+                lora_b_kernel = lora_b_kernel.astype(input_dtype)
 
             y += _apply_low_rank_adaptation(
                 inputs, axis, features, lora_a_kernel, lora_b_kernel, self.low_rank_adaptation_alpha
@@ -676,7 +676,6 @@ class LayerNormDenseGeneral(TransformerEngineBase):
             and not self.return_layernorm_output
             and self.enable_layernorm
         )
-        inputs = inputs.astype(input_dtype)
 
         if self.enable_layernorm:
             inputs = with_sharding_constraint_by_logical_axes(inputs, self.layernorm_input_axes)
@@ -724,7 +723,8 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         kernel = nn_partitioning.param_with_axes(
             "kernel", self.kernel_init, kernel_shape, self.dtype, axes=self.kernel_axes
         )
-        kernel = kernel.astype(input_dtype)
+        if not FP8Helper.is_fp8_enabled():
+            kernel = kernel.astype(input_dtype)
 
         contract_ind = tuple(range(0, len(axis)))
 
@@ -1075,7 +1075,8 @@ class LayerNormMLP(TransformerEngineBase):
             axes=self.kernel_axes_1,
         )
         kernel_1 = jnp.reshape(kernel_1, kernel_1_shape)
-        kernel_1 = kernel_1.astype(input_dtype)
+        if not FP8Helper.is_fp8_enabled():
+            kernel_1 = kernel_1.astype(input_dtype)
         hidden_size = inputs.shape[-1]
         hidden_size_tuple = _canonicalize_tuple(hidden_size)
         kernel_2_shape = (self.intermediate_dim,) + hidden_size_tuple
@@ -1088,7 +1089,8 @@ class LayerNormMLP(TransformerEngineBase):
             axes=self.kernel_axes_2,
         )
         kernel_2 = jnp.reshape(kernel_2, kernel_2_shape)
-        kernel_2 = kernel_2.astype(input_dtype)
+        if not FP8Helper.is_fp8_enabled():
+            kernel_2 = kernel_2.astype(input_dtype)
         contract_ind = tuple(range(0, len(axis)))
 
         ffn1_ckpt_name = "ffn1"
@@ -1187,7 +1189,8 @@ class LayerNormMLP(TransformerEngineBase):
                     axes=wi_lora_a_kernel_axes,
                 )
                 wi_lora_a_kernel = jnp.reshape(wi_lora_a_kernel, wi_lora_a_kernel_shape)
-                wi_lora_a_kernel = wi_lora_a_kernel.astype(input_dtype)
+                if not FP8Helper.is_fp8_enabled():
+                    wi_lora_a_kernel = wi_lora_a_kernel.astype(input_dtype)
 
                 wi_lora_b_kernel_shape = (
                     num_activations,
@@ -1202,7 +1205,8 @@ class LayerNormMLP(TransformerEngineBase):
                     self.dtype,
                     axes=wi_lora_b_kernel_axes,
                 )
-                wi_lora_b_kernel = wi_lora_b_kernel.astype(input_dtype)
+                if not FP8Helper.is_fp8_enabled():
+                    wi_lora_b_kernel = wi_lora_b_kernel.astype(input_dtype)
 
                 x += _apply_low_rank_adaptation(
                     y,
@@ -1264,7 +1268,8 @@ class LayerNormMLP(TransformerEngineBase):
                     self.dtype,
                     axes=wo_lora_a_kernel_axes,
                 )
-                wo_lora_a_kernel = wo_lora_a_kernel.astype(input_dtype)
+                if not FP8Helper.is_fp8_enabled():
+                    wo_lora_a_kernel = wo_lora_a_kernel.astype(input_dtype)
 
                 wo_lora_b_kernel_shape = (self.low_rank_adaptation_dim, hidden_size)
                 wo_lora_b_kernel_axes = (None,) * len(wo_lora_b_kernel_shape)
@@ -1275,7 +1280,8 @@ class LayerNormMLP(TransformerEngineBase):
                     self.dtype,
                     axes=wo_lora_b_kernel_axes,
                 )
-                wo_lora_b_kernel = wo_lora_b_kernel.astype(input_dtype)
+                if not FP8Helper.is_fp8_enabled():
+                    wo_lora_b_kernel = wo_lora_b_kernel.astype(input_dtype)
 
                 out += _apply_low_rank_adaptation(
                     z,

@@ -674,10 +674,10 @@ def rotary_pos_emb(
         sin, cos = generate_sin_cos(time_scales)
 
         x1, x2 = jnp.split(x, 2, axis=-1)
-        part_1 = (x1 * cos - x2 * sin).astype(x.dtype)
-        part_2 = (x2 * cos + x1 * sin).astype(x.dtype)
+        part_1 = x1 * cos - x2 * sin
+        part_2 = x2 * cos + x1 * sin
 
-        output = jnp.concatenate([part_1, part_2], axis=-1)
+        output = jnp.concatenate([part_1, part_2], axis=-1, dtype=x.dtype)
         return output
 
     def consecutive_impl():
@@ -976,9 +976,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         )
 
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(
-                1.0, "fan_in", "normal", self.dtype
-            )
+            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal", self.dtype)
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
         super().__post_init__()
