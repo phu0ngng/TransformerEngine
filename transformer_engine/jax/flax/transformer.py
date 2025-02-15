@@ -142,6 +142,8 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
         assert key.shape[-2] == value.shape[-2], "k, v num_attention_heads must match."
         assert query.shape[-1] == key.shape[-1], "q, k head_dim must match."
 
+        input_dtype = query.dtype
+
         if self.scale_factor is None:
             scale_factor = 1.0 / sqrt(query.shape[-1])
         else:
@@ -253,6 +255,8 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
 
         if is_gqa:
             return jnp.einsum("bhgqk,bkhd->bqhgd", attn_weights, value).reshape(query.shape)
+
+        attn_weights = attn_weights.astype(input_dtype)
         return jnp.einsum("bhqk,bkhd->bqhd", attn_weights, value)
 
 
@@ -1022,6 +1026,9 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             Output tensors.
         """
 
+        assert inputs_q.dtype == inputs_kv.dtype, f"q.dtype = {inputs_q.dtype}, kv.dtype = {inputs_kv.dtype}"
+        input_dtype = inputs_q.dtype
+
         def query_init(*args):
             depth_scaling = jnp.sqrt(self.head_dim).astype(self.dtype)
             return self.kernel_init(*args) / (depth_scaling if self.scaled_query_init else 1.0)
@@ -1199,9 +1206,11 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 assert ln_out is not None
                 inputs_kv = ln_out
 
+            query = query.astype(input_dtype)
             key = kv_projection(kernel_init=self.kernel_init, name="key")(inputs_kv)
-            key = key.astype(self.dtype)
+            key = key.astype(input_dtype)
             value = kv_projection(kernel_init=self.kernel_init, name="value")(inputs_kv)
+            value = value.astype(input_dtype)
             query = checkpoint_name(query, "query_proj")
             key = checkpoint_name(key, "key_proj")
             value = checkpoint_name(value, "value_proj")
