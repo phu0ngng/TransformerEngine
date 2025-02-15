@@ -227,8 +227,9 @@ class DenseGeneral(nn.Module):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal",
-                                                                dtype=self.dtype)
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "truncated_normal", dtype=self.dtype
+            )
         super().__post_init__()
 
     @nn.compact
@@ -299,8 +300,9 @@ class MlpBlock(nn.Module):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal",
-                                                                dtype=self.dtype)
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "truncated_normal", dtype=self.dtype
+            )
         super().__post_init__()
 
     @nn.compact
@@ -362,7 +364,9 @@ class MlpBlock(nn.Module):
             bias_axes="embed",
             name="wo",
         )(x)
-        assert output.dtype == inputs.dtype, f"input.dtype={input.dtype}, output.dtype={output.dtype}"
+        assert (
+            output.dtype == inputs.dtype
+        ), f"input.dtype={input.dtype}, output.dtype={output.dtype}"
         return output
 
 
@@ -458,8 +462,9 @@ class MultiHeadAttention(nn.Module):
 
     def __post_init__(self):
         if self.kernel_init is None:
-            self.kernel_init = nn.initializers.variance_scaling(1.0, "fan_in", "normal",
-                                                                dtype=self.dtype)
+            self.kernel_init = nn.initializers.variance_scaling(
+                1.0, "fan_in", "normal", dtype=self.dtype
+            )
         if self.num_gqa_groups is None:
             self.num_gqa_groups = self.num_attention_heads
         super().__post_init__()
@@ -744,7 +749,9 @@ class MultiHeadAttention(nn.Module):
             dtype=self.dtype,
             name="out",
         )(x)
-        assert inputs_q.dtype == inputs_kv.dtype == out.dtype, f"q.dtype={inputs_q.dtype}, kv.dtype={inputs_kv.dtype}, out.dtype={out.dtype}"
+        assert (
+            inputs_q.dtype == inputs_kv.dtype == out.dtype
+        ), f"q.dtype={inputs_q.dtype}, kv.dtype={inputs_kv.dtype}, out.dtype={out.dtype}"
         return out
 
 

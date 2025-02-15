@@ -1065,7 +1065,9 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
             Output tensors.
         """
 
-        assert inputs_q.dtype == inputs_kv.dtype, f"q.dtype = {inputs_q.dtype}, kv.dtype = {inputs_kv.dtype}"
+        assert (
+            inputs_q.dtype == inputs_kv.dtype
+        ), f"q.dtype = {inputs_q.dtype}, kv.dtype = {inputs_kv.dtype}"
         input_dtype = inputs_q.dtype
 
         def query_init(*args):
