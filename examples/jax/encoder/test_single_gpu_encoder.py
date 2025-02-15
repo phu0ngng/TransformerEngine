@@ -33,8 +33,7 @@ class Net(nn.Module):
 
     @nn.compact
     def __call__(self, x, mask, disable_dropout=False):
-        x = nn.Embed(num_embeddings=self.num_embed, features=256)(x)
-        x = x.astype(jnp.bfloat16)
+        x = nn.Embed(num_embeddings=self.num_embed, features=256, dtype=jnp.bfloat16)(x)
 
         te_Encoder = partial(
             te_flax.TransformerLayer,
