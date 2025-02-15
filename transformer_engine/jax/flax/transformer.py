@@ -674,8 +674,8 @@ def rotary_pos_emb(
         sin, cos = generate_sin_cos(time_scales)
 
         x1, x2 = jnp.split(x, 2, axis=-1)
-        part_1 = x1 * cos - x2 * sin
-        part_2 = x2 * cos + x1 * sin
+        part_1 = (x1 * cos - x2 * sin).astype(dtype=x.dtype)
+        part_2 = (x2 * cos + x1 * sin).astype(dtype=x.dtype)
 
         output = jnp.concatenate([part_1, part_2], axis=-1, dtype=x.dtype)
         return output
