@@ -269,6 +269,7 @@ class DenseGeneral(nn.Module):
         contract_ind = tuple(range(0, len(axis)))
 
         y = lax.dot_general(inputs, kernel, ((axis, contract_ind), ((), ())))
+        y = y.astype(input_dtype)
 
         if bias is not None:
             y += jnp.reshape(bias, (1,) * (y.ndim - 1) + (-1,))
@@ -806,7 +807,8 @@ class LayerNorm(nn.Module):
             y = x * lax.rsqrt(mean2 + self.epsilon)
             z = y * scale
 
-        return jnp.asarray(z, input_dtype)
+        assert z.dtype == x.dtype, f"output_dtype={z.dtype}, input_dtype={x.dtype}"
+        return z
 
 
 class RelativePositionBiases(nn.Module):
@@ -1101,6 +1103,7 @@ class EncoderLayer(nn.Module):
                 dtype=self.dtype,
                 name="output_layernorm",
             )(y)
+        assert y.dtype == inputs.dtype, f"output_dtype={y.dtype}, input_dtype={inputs.dtype}"
         return y
 
 
@@ -1307,6 +1310,7 @@ class DecoderLayer(nn.Module):
                 name="output_layernorm",
             )(z)
 
+        assert z.dtype == inputs.dtype, f"output_dtype={z.dtype}, input_dtype={inputs.dtype}"
         return z
 
 

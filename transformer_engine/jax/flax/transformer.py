@@ -235,7 +235,7 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
 
         attn_weights = Softmax(softmax_type=softmax_type, scale_factor=fused_scale_factor)(
             attn_weights, mask, bias
-        ).astype(self.dtype)
+        ).astype(input_dtype)
 
         if is_gqa:
             attn_weights = attn_weights.reshape(attn_weights_with_groups_shape)
@@ -245,9 +245,10 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             dropout_shape = list(attn_weights.shape)
             # TODO(rewang): add attention dropout broadcast dimension arguments for users
             keep = jax_random.bernoulli(dropout_rng, keep_prob, dropout_shape)
-            multiplier = keep.astype(attn_weights.dtype) / jnp.asarray(keep_prob, dtype=self.dtype)
+            multiplier = keep.astype(input_dtype) / jnp.asarray(keep_prob, dtype=input_dtype)
             attn_weights = attn_weights * multiplier
 
+        assert attn_weights.dtype == input_dtype, f"output={attn_weights.dtype}, input={input_dtype}"
         if self.transpose_batch_sequence:
             if is_gqa:
                 return jnp.einsum("bhgqk,kbhd->qbhgd", attn_weights, value).reshape(query.shape)
@@ -256,7 +257,6 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
         if is_gqa:
             return jnp.einsum("bhgqk,bkhd->bqhgd", attn_weights, value).reshape(query.shape)
 
-        attn_weights = attn_weights.astype(input_dtype)
         return jnp.einsum("bhqk,bkhd->bqhd", attn_weights, value)
 
 
@@ -374,6 +374,7 @@ class _FusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-me
         if self.transpose_batch_sequence:
             x = x.transpose([1, 0, 2, 3])
 
+        assert x.dtype == query.dtype
         return x
 
 
@@ -551,6 +552,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
         outputs: jax.numpy.ndarray
             Output tensors.
         """
+        input_dtype = query.dtype
 
         if mask is not None:
             if sequence_descriptor is not None:
@@ -676,7 +678,7 @@ class DotProductAttention(nn.Module):  # pylint: disable=too-few-public-methods
                 dropout_rng=dropout_rng,
                 deterministic=deterministic,
             )
-
+        assert x.dtype == input_dtype, f"output_dtype={x.dtype}, input_dtype={input_dtype}"
         return x
 
 
@@ -1405,6 +1407,7 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         )(x)
         out = checkpoint_name(out, "out_proj")
 
+        assert inputs_q.dtype == out.dtype, f"output_dtype={out.dtype}, input_dtype={inputs_q.dtype}"
         return out, ln_out
 
 
@@ -1781,7 +1784,7 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
         outputs: jax.numpy.ndarray
             Output tensors.
         """
-
+        input_dtype = inputs.dtype
         assert (
             self.layer_type in TransformerLayerType
         ), f"layer_type should be one of TransformerLayerType, but got {self.layer_type}."
@@ -2048,5 +2051,5 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                 dtype=self.dtype,
                 name="output_layernorm",
             )(z)
-
+        assert z.dtype == input_dtype, f"output_dtype={z.dtype}, input_dtype={input_dtype}"
         return z

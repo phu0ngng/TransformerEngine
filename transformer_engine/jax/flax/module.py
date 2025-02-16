@@ -194,6 +194,7 @@ class Softmax(nn.Module):  # pylint: disable=too-few-public-methods
             else:
                 outputs = jax_nn.softmax(logits * self.scale_factor)
 
+        assert input_dtype == outputs.dtype
         return outputs
 
 
@@ -310,7 +311,7 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
             input_dtype,
             self.dtype,
         )
-        return layernorm(
+        out = layernorm(
             x,
             scale,
             ln_bias,
@@ -318,6 +319,8 @@ class LayerNorm(nn.Module):  # pylint: disable=too-few-public-methods
             zero_centered_gamma=self.zero_centered_gamma,
             epsilon=self.epsilon,
         )
+        assert out.dtype == input_dtype
+        return out
 
 
 class TransformerEngineBase(nn.Module):  # pylint: disable=too-few-public-methods
@@ -516,6 +519,8 @@ class DenseGeneral(TransformerEngineBase):
         if bias is not None:
             bias_shape = (1,) * (y.ndim - bias.ndim) + bias.shape
             y += jnp.reshape(bias, bias_shape)
+
+        assert y.dtype == input_dtype
         return y
 
 
@@ -800,6 +805,7 @@ class LayerNormDenseGeneral(TransformerEngineBase):
         if self.depth_scaling is not None:
             z = z / self.depth_scaling
 
+        assert z.dtype == input_dtype
         return z, ln_output  # dense_output, layer_norm_output
 
 
@@ -1300,4 +1306,5 @@ class LayerNormMLP(TransformerEngineBase):
 
             out = checkpoint_name(out, ffn2_ckpt_name)
 
+        assert out.dtype == input_dtype
         return out, ln_output  # Output, layner_norm_output
