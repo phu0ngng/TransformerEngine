@@ -248,7 +248,9 @@ class _UnfusedDotProductAttention(nn.Module):  # pylint: disable=too-few-public-
             multiplier = keep.astype(input_dtype) / jnp.asarray(keep_prob, dtype=input_dtype)
             attn_weights = attn_weights * multiplier
 
-        assert attn_weights.dtype == input_dtype, f"output={attn_weights.dtype}, input={input_dtype}"
+        assert (
+            attn_weights.dtype == input_dtype
+        ), f"output={attn_weights.dtype}, input={input_dtype}"
         if self.transpose_batch_sequence:
             if is_gqa:
                 return jnp.einsum("bhgqk,kbhd->qbhgd", attn_weights, value).reshape(query.shape)
@@ -1407,7 +1409,9 @@ class MultiHeadAttention(nn.Module):  # pylint: disable=too-few-public-methods
         )(x)
         out = checkpoint_name(out, "out_proj")
 
-        assert inputs_q.dtype == out.dtype, f"output_dtype={out.dtype}, input_dtype={inputs_q.dtype}"
+        assert (
+            inputs_q.dtype == out.dtype
+        ), f"output_dtype={out.dtype}, input_dtype={inputs_q.dtype}"
         return out, ln_out
 
 
