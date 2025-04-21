@@ -435,15 +435,15 @@ class ScalingMode(Enum):
         Returns:
             The shape for scale tensors
         """
-        grouped_scale_size = 0
+        grouped_scale_size = []
         for group_sizes_i in group_sizes:
             # data_shape_i = (group_sizes[i], *data_shape[flatten_axis:])
             data_shape_i = (group_sizes_i, *data_shape[1:])
             scale_shape_i = self._get_impl().get_scale_shape(
                 data_shape_i, is_colwise, is_padded, flatten_axis
             )
-            grouped_scale_size += math.prod(scale_shape_i)
-        return (grouped_scale_size,)
+            grouped_scale_size.append(scale_shape_i)
+        return tuple(grouped_scale_size)
 
     def get_grouped_scale_shape_from_flattened_data_shape(
         self, data_shape, group_sizes, original_shape, group_axis,
