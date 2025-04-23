@@ -138,21 +138,21 @@ def _grouped_dequantize(grouped_scaled_tensor):
     data = grouped_scaled_tensor.data
     scale_inv = grouped_scaled_tensor.scale_inv
     group_sizes = grouped_scaled_tensor.group_sizes
-    other_sizes = grouped_scaled_tensor.other_sizes
+    original_shape = grouped_scaled_tensor.original_shape
     flatten_axis = grouped_scaled_tensor.flatten_axis
     scaling_mode = grouped_scaled_tensor.scaling_mode
 
-    data_ndim = 1 + len(other_sizes)
+    data_ndim = len(original_shape)
 
     flatten_axis = data_ndim + flatten_axis if flatten_axis < 0 else flatten_axis
 
     output = []
-    matrix_sizes = group_sizes * math.prod(other_sizes)
+    matrix_sizes = group_sizes * math.prod(original_shape[1:])
     data = jnp.split(data, jnp.cumulative_sum(matrix_sizes)[:-1])
 
     scale_inv_ptr = 0
     for i, data_i in enumerate(data):
-        data_shape_i = (group_sizes[i], *other_sizes)
+        data_shape_i = (group_sizes[i], *original_shape[1:])
         assert math.prod(data_shape_i) == data_i.size, (
             f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
             f" {data_i.size}"

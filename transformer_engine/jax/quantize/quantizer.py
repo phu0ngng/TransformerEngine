@@ -545,7 +545,7 @@ class GroupedQuantizer(Quantizer):
             )
         self.data_layout = self.quantizers[0].data_layout
 
-    def _create_grouped_tensor_from_tensor_list(self, tensor_list, group_sizes, other_sizes):
+    def _create_grouped_tensor_from_tensor_list(self, tensor_list, group_sizes, original_shape):
         grouped_data = []
         grouped_scale_inv = []
 
@@ -565,7 +565,7 @@ class GroupedQuantizer(Quantizer):
             tensor_list[0].data_layout,
             tensor_list[0].flatten_axis,
             group_sizes=group_sizes,
-            other_sizes=other_sizes,
+            original_shape=original_shape,
         )
 
     def _quantize_func(self, *args, **kwargs):
@@ -579,8 +579,14 @@ class GroupedQuantizer(Quantizer):
         dq_dtype=None,
         flatten_axis=-1,
         group_sizes=None,
+        group_axis=0,
     ):
-        assert group_sizes is not None, "Expect group_sizes input!"
+        """
+        Expected input shape: [M, K] or [G, K, N]
+        Split to x.shape[group_dim] number of groups if group_sizes is not given
+        """
+        assert group_axis == 0, "Only group_axis == 0 is supported now!"
+
         dq_dtype = dq_dtype if dq_dtype is not None else x.dtype
         if flatten_axis < 0:
             flatten_axis += x.ndim
@@ -598,22 +604,19 @@ class GroupedQuantizer(Quantizer):
         )
         assert is_rowwise or is_colwise, "No quantization layout is specified"
 
-        assert (
-            flatten_axis == 1
-        ), f"GroupedQuantizer only support flatten_axis == 1, got {flatten_axis}"
-        assert group_sizes.ndim == 1, (
-            "GroupedQuantizer only support 1D group_sizes, got group_sizes.ndim ="
-            f" {group_sizes.ndim}"
-        )
+        original_shape = x.shape
 
-        assert jnp.sum(group_sizes) == x.shape[flatten_axis - 1], (
-            f"Unable to split x. x.shape[{flatten_axis - 1}] = {x.shape[flatten_axis -1]} while"
-            f" sum(group_sizes) = {jnp.sum(group_sizes)}."
-        )
+        if group_sizes is not None:
+            assert group_sizes.ndim == 1, (
+                    "GroupedQuantizer only support 1D group_sizes, got group_sizes.ndim ="
+                    f" {group_sizes.ndim}"
+                    )
 
-        other_sizes = x.shape[flatten_axis:]
+            x = jnp.split(x, jnp.cumulative_sum(group_sizes)[:-1], axis=group_axis)
+        else:
+            group_sizes = jnp.ones(x.shape[group_axis], dtype=jnp.int32)
+            x = jnp.split(x, x.shape[group_axis], axis=group_axis)
 
-        x = jnp.split(x, jnp.cumulative_sum(group_sizes)[:-1], axis=flatten_axis - 1)
         tensor_list = []
         for i in range(len(group_sizes)):
             tensor = self.quantizers[i].quantize(
@@ -625,12 +628,12 @@ class GroupedQuantizer(Quantizer):
         if is_rowwise:
             rowwise_tensor_list = [tensor.get_rowwise_tensor() for tensor in tensor_list]
             grouped_rowwise_tensor = self._create_grouped_tensor_from_tensor_list(
-                rowwise_tensor_list, group_sizes, other_sizes
+                rowwise_tensor_list, group_sizes, original_shape
             )
         if is_colwise:
             colwise_tensor_list = [tensor.get_colwise_tensor() for tensor in tensor_list]
             grouped_colwise_tensor = self._create_grouped_tensor_from_tensor_list(
-                colwise_tensor_list, group_sizes, other_sizes
+                colwise_tensor_list, group_sizes, original_shape
             )
 
         if is_colwise and is_rowwise:

@@ -421,13 +421,13 @@ class ScalingMode(Enum):
         )
         return (rowwise_scale_shape, colwise_scale_shape)
 
-    def get_grouped_scale_shape_from_original_data_shape(
+    def get_grouped_scale_shape(
         self, data_shape, group_sizes, is_colwise, is_padded=True, flatten_axis=-1
     ) -> Tuple[int]:
         """Get the shape for scale tensors in this mode.
 
         Args:
-            data_shape: Shape of the data tensor
+            data_shape: Original shape of the data tensor
             is_colwise: Whether to use column-wise scaling
             is_padded: Whether to use padded shapes
             flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
@@ -435,10 +435,10 @@ class ScalingMode(Enum):
         Returns:
             The shape for scale tensors
         """
-        assert jnp.sum(group_sizes) == data_shape[0]
         grouped_scale_size = 0
-        for i in range(group_sizes.size):
-            data_shape_i = (group_sizes[i], *data_shape[1:])
+        for group_sizes_i in group_sizes:
+            # data_shape_i = (group_sizes[i], *data_shape[flatten_axis:])
+            data_shape_i = (group_sizes_i, *data_shape[1:])
             scale_shape_i = self._get_impl().get_scale_shape(
                 data_shape_i, is_colwise, is_padded, flatten_axis
             )
@@ -446,12 +446,12 @@ class ScalingMode(Enum):
         return (grouped_scale_size,)
 
     def get_grouped_scale_shape_from_flattened_data_shape(
-        self, data_shape, group_sizes, other_sizes, is_colwise, is_padded=True, flatten_axis=-1
+        self, data_shape, group_sizes, original_shape, is_colwise, is_padded=True, flatten_axis=-1
     ) -> Tuple[int]:
         """Get the shape for scale tensors in this mode.
 
         Args:
-            data_shape: Shape of the data tensor
+            data_shape: Shape of the 1D data tensor
             is_colwise: Whether to use column-wise scaling
             is_padded: Whether to use padded shapes
             flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
@@ -460,10 +460,9 @@ class ScalingMode(Enum):
             The shape for scale tensors
         """
         assert len(data_shape) == 1, f"Expect 1D flattened data_shape, got {data_shape}"
-        assert jnp.sum(group_sizes) * math.prod(other_sizes) == data_shape[0]
         grouped_scale_size = 0
-        for i in range(group_sizes.size):
-            data_shape_i = (group_sizes[i], *other_sizes)
+        for group_size_i in group_sizes:
+            data_shape_i = (group_size_i, *original_shape[1:])
             scale_shape_i = self._get_impl().get_scale_shape(
                 data_shape_i, is_colwise, is_padded, flatten_axis
             )
