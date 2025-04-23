@@ -583,7 +583,7 @@ class GroupedQuantizer(Quantizer):
     ):
         """
         Expected input shape: [M, K] or [G, K, N]
-        Split to x.shape[group_dim] number of groups if group_sizes is not given
+        Split to x.shape[group_axis] number of groups if group_sizes is not given
         """
         assert group_axis == 0, "Only group_axis == 0 is supported now!"
 
