@@ -525,8 +525,8 @@ class GroupedQuantizer(Quantizer):
     scaling_mode: ScalingMode
     q_layout: QuantizeLayout
     data_layout: str = None
-    quantizers: List[Quantizer] = None
     n_groups: int = 1
+    quantizers: List[Quantizer] = None
 
     def tree_flatten(self):
         """Flatten the quantizer for JAX tree operations.
