@@ -260,16 +260,16 @@ class ScaledTensor1x(ScaledTensor):
 class GroupedScaledTensor1x(ScaledTensor1x):
     """Quantizer for grouped of array"""
 
-    data: jnp.ndarray  # 1d flattened
-    scale_inv: jnp.ndarray  # 1d flattened
-    scaling_mode: ScalingMode
-    dq_dtype: jnp.dtype
-    _dq_func: Callable
-    is_colwise: bool
-    data_layout: str
-    flatten_axis: int
     group_sizes: jnp.ndarray
     original_shape: Tuple
+
+    def __init__(self, data, scale_inv, group_sizes,
+                 scaling_mode, dq_dtype, _dq_func, is_colwise,
+                 data_layout, flatten_axis, original_shape):
+        self.group_sizes = group_sizes
+        self.original_shape = original_shape
+        super().__init__(data, scale_inv, scaling_mode, dq_dtype,
+                         _dq_func, is_colwise, data_layout, flatten_axis)
 
     def __post_init__(self):
         assert self.scale_inv.ndim == 1, "Only support flattened scale_inv"
@@ -312,22 +312,6 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             self.original_shape,
         )
         return (children, aux_data)
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        """Reconstructs the tensor from its flattened representation.
-
-        Args:
-            aux_data: Auxiliary data needed for reconstruction
-            children: The flattened tensor components
-
-        Returns:
-            A reconstructed tensor instance
-        """
-        (data, scale_inv, group_sizes) = children
-        (scaling_mode, dq_dtype, _dq_func, is_colwise, data_layout, flatten_axis, original_shape) = aux_data
-        return cls(data, scale_inv, scaling_mode, dq_dtype, _dq_func, is_colwise, data_layout,
-                   flatten_axis, group_sizes, original_shape)
 
     def apply_sharding_constraint_by_logical_axes(self, logical_axis_names: Tuple[str, ...]):
         raise NotImplementedError
