@@ -549,17 +549,17 @@ class GroupedQuantizer(Quantizer):
         # mode 0 = concate, mode 1 = add
         # TODO (Ming Huang): Consider to apply Enum for mode.
         assert mode in [0, 1]
-        grouped_data = [] if mode == 0 else jnp.zeros(ensor_list[0].data.shape, tensor_list[0].data.dtype)
+        grouped_data = [] if mode == 0 else jnp.zeros(tensor_list[0].data.shape, tensor_list[0].data.dtype)
         grouped_scale_inv = []
 
         for tensor in tensor_list:
-            f mode == 0:
+            if mode == 0:
                 grouped_data.append(tensor.data.flatten())
             else:
-                grouped_data += ensor.data
+                grouped_data += tensor.data
             grouped_scale_inv.append(tensor.scale_inv.flatten())
 
-        grouped_data = jnp.concatenate(grouped_data) if mode == 0 else grouped_data
+        grouped_data = jnp.concatenate(grouped_data) if mode == 0 else grouped_data.flatten()
         grouped_scale_inv = jnp.concatenate(grouped_scale_inv)
 
         return ScaledTensorFactory.create_1x(
@@ -619,10 +619,10 @@ class GroupedQuantizer(Quantizer):
                     )
 
             _zeros = partial(jax.lax.full_like, fill_value=0)
-            
+
             x_iota = jax.lax.broadcasted_iota(group_sizes.dtype, x.shape, 0)
-            group_ends = jnp.cumulative_sum(gs)
-            group_starts = jax.lax.concatenate([_zeros(gs)[:1], group_ends[:-1]], dimension=0,)
+            group_ends = jnp.cumulative_sum(group_sizes)
+            group_starts = jax.lax.concatenate([_zeros(group_sizes)[:1], group_ends[:-1]], dimension=0,)
             x_zero = _zeros(x)
 
             tensor_list = []
@@ -630,7 +630,7 @@ class GroupedQuantizer(Quantizer):
                 mask = jax.lax.bitwise_and(group_starts[i] <= x_iota, x_iota < group_ends[i])
                 x_selected = jax.lax.select(mask, x, x_zero)
                 tensor = self.quantizers[i].quantize(
-                    x[i], is_rowwise, is_colwise, dq_dtype, flatten_axis
+                    x_selected, is_rowwise, is_colwise, dq_dtype, flatten_axis
                 )
                 tensor_list.append(tensor)
             combine_mode =  1 # Add
