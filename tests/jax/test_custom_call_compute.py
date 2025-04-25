@@ -1189,6 +1189,8 @@ class TestGroupedDense:
     @pytest_parametrize_wrapper("layout", ["NN"])
     def test_grouped_gemm_fp16(self, dtype, input_shape, layout):
         lhs, rhs, group_sizes, contracting_dims = self._generate_grouped_gemm_input(dtype, input_shape, layout)
+        # f_jit = jax.jit(tex.grouped_gemm, static_argnums=3)
+        # primitive_out = f_jit(lhs, rhs, group_sizes, contracting_dims=contracting_dims)
         primitive_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
         ref_out = self._ref_grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
         self._assert_grouped_gemm_output(primitive_out, group_sizes, ref_out, dtype)

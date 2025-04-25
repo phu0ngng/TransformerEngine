@@ -50,27 +50,14 @@ class GroupedGemmPrimitive(BasePrimitive):
 
     name = "te_grouped_gemm_ffi"
     multiple_results = True
-    impl_static_args = ()
+    impl_static_args = (7, 8, 9, 10, 11, 12, 13, 14)
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(lhs_data,
-                 lhs_scale_inv,
-                 rhs_data,
-                 rhs_scale_inv,
-                 bias,
-                 group_sizes,
-                 group_offset,
-                 M,
-                 N,
-                 K,
-                 lhs_is_trans,
-                 rhs_is_trans,
-                 scaling_mode,
-                 out_dtype,
-                 has_bias,
-                 ):
+    def abstract(lhs_data_aval, lhs_scale_inv_aval, rhs_data_aval, rhs_scale_inv_aval,
+                 bias_aval, group_sizes_aval, group_offset_aval, *,
+                 M, N, K, lhs_is_trans, rhs_is_trans, scaling_mode, out_dtype, has_bias):
         """
             scaling_mode: Scaling mode for the GEMM operations.
             out_dtype: Data type of the output tensors.
@@ -89,29 +76,40 @@ class GroupedGemmPrimitive(BasePrimitive):
     @staticmethod
     def outer_abstract(*args, **kwargs):
         (out_aval, _) = GroupedGemmPrimitive.abstract(*args, **kwargs)
-        return out_aval
+        return (out_aval,)
 
     @staticmethod
-    def lowering(ctx, *args, M, N, K, lhs_is_trans, rhs_is_trans,
-                 scaling_mode, out_dtype, has_bias):
+    def lowering(ctx, *args,
+                 M, N, K, lhs_is_trans, rhs_is_trans, scaling_mode, out_dtype, has_bias):
         del out_dtype
         return jax.ffi.ffi_lowering(GroupedGemmPrimitive.name)(
-            ctx,
-            *args,
-            M=M,
-            N=N,
-            K=K,
-            lhs_is_trans=lhs_is_trans,
-            rhs_is_trans=rhs_is_trans,
-            scaling_mode=scaling_mode.value,
-            has_bias=has_bias,
-        )
+                ctx,
+                *args,
+                M=M,
+                N=N,
+                K=K,
+                lhs_is_trans=lhs_is_trans,
+                rhs_is_trans=rhs_is_trans,
+                scaling_mode=scaling_mode.value,
+                has_bias=has_bias
+                )
 
     @staticmethod
-    def impl(*args, **kwargs):
+    def impl(lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias, group_sizes, group_offset,
+             M, N, K, lhs_is_trans, rhs_is_trans, scaling_mode, out_dtype, has_bias):
         assert GroupedGemmPrimitive.inner_primitive is not None
-        out, _ = GroupedGemmPrimitive.inner_primitive.bind(*args, **kwargs)  # exclude wkspace
-        return out
+        (out, _) = GroupedGemmPrimitive.inner_primitive.bind(
+                lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias, group_sizes, group_offset,
+                M=M,
+                N=N,
+                K=K,
+                lhs_is_trans=lhs_is_trans,
+                rhs_is_trans=rhs_is_trans,
+                scaling_mode=scaling_mode,
+                out_dtype=out_dtype,
+                has_bias=has_bias
+                )
+        return (out,)
 
 
 register_primitive(GroupedGemmPrimitive)
@@ -503,7 +501,7 @@ def grouped_gemm(
     assert not has_bias or bias.size == N
     bias = bias or jnp.empty((), jnp.float32)
 
-    return GroupedGemmPrimitive.outer_primitive.bind(
+    (out, ) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,
         lhs_scale_inv,
         rhs_data,
@@ -520,3 +518,4 @@ def grouped_gemm(
         out_dtype=out_dtype,
         has_bias=has_bias,
     )
+    return out
