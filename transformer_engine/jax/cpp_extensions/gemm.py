@@ -447,17 +447,24 @@ def grouped_gemm(
     if not isinstance(lhs, ScaledTensor) and not isinstance(rhs, ScaledTensor) and quantizer_set != noop_quantizer_set:
         assert isinstance(quantizer_set.x, GroupedQuantizer)
         assert type(quantizer_set.x) is type(quantizer_set.kernel)
+        scaling_mode = quantizer_set.x.scaling_mode
+        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING and is_gemm_with_all_layouts_supported():
+            lhs_is_rowwise = rhs_is_rowwise = True
+        else:
+            lhs_is_rowwise = not lhs_is_trans
+            rhs_is_rowwise = lhs_is_trans
+
         lhs_q = quantizer_set.x.quantize(
                 lhs,
-                is_rowwise=not lhs_is_trans,
-                is_colwise=lhs_is_trans,
+                is_rowwise=lhs_is_rowwise,
+                is_colwise=not lhs_is_rowwise,
                 flatten_axis=lhs_flatten_axis,
                 group_sizes=group_sizes,
                 )
         rhs_q = quantizer_set.kernel.quantize(
                 rhs,
-                is_rowwise=rhs_is_trans,
-                is_colwise=not rhs_is_trans,
+                is_rowwise=rhs_is_rowwise,
+                is_colwise=not rhs_is_rowwise,
                 flatten_axis=rhs_flatten_axis,
                 )
         lhs_data = lhs_q.data
