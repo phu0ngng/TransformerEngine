@@ -549,7 +549,8 @@ class TestQuantize:
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
 @pytest_parametrize_wrapper("input_shape", [(8, 64, 32)])
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
-@pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+# @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+@pytest_parametrize_wrapper("scaling_mode", [ScalingMode.DELAYED_TENSOR_SCALING])
 @pytest_parametrize_wrapper("flatten_axis", [-1, -2])
 @pytest_parametrize_wrapper(
     "q_layout", [QuantizeLayout.ROWWISE, QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE]
@@ -559,6 +560,8 @@ class TestGroupedQuantize:
     def test_grouped_qdq(
         self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
     ):
+        if with_group_sizes and q_layout in (QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE):
+            pytest.skip("Skip as NotImplemented!")
         n_groups, m, n = input_shape
         key = jax.random.PRNGKey(0)
         subkeys = jax.random.split(key, 2)

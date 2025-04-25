@@ -545,7 +545,8 @@ class GroupedQuantizer(Quantizer):
             )
         self.data_layout = self.quantizers[0].data_layout
 
-    def _create_grouped_tensor_from_tensor_list(self, tensor_list, group_sizes, original_shape, mode):
+    def _create_grouped_tensor_from_tensor_list(self, tensor_list, group_sizes, original_shape,
+                                                group_axis, mode):
         # mode 0 = concate, mode 1 = add
         # TODO (Ming Huang): Consider to apply Enum for mode.
         assert mode in [0, 1]
@@ -572,6 +573,7 @@ class GroupedQuantizer(Quantizer):
             tensor_list[0].flatten_axis,
             group_sizes=group_sizes,
             original_shape=original_shape,
+            group_axis=group_axis,
         )
 
     def _quantize_func(self, *args, **kwargs):
@@ -613,6 +615,7 @@ class GroupedQuantizer(Quantizer):
         original_shape = x.shape
 
         if group_sizes is not None:
+            assert not is_colwise, "Not yet implememted!"
             assert group_sizes.ndim == 1, (
                     "GroupedQuantizer only support 1D group_sizes, got group_sizes.ndim ="
                     f" {group_sizes.ndim}"
@@ -650,12 +653,12 @@ class GroupedQuantizer(Quantizer):
         if is_rowwise:
             rowwise_tensor_list = [tensor.get_rowwise_tensor() for tensor in tensor_list]
             grouped_rowwise_tensor = self._create_grouped_tensor_from_tensor_list(
-                rowwise_tensor_list, group_sizes, original_shape, combine_mode
+                rowwise_tensor_list, group_sizes, original_shape, group_axis, combine_mode
             )
         if is_colwise:
             colwise_tensor_list = [tensor.get_colwise_tensor() for tensor in tensor_list]
             grouped_colwise_tensor = self._create_grouped_tensor_from_tensor_list(
-                colwise_tensor_list, group_sizes, original_shape, combine_mode
+                colwise_tensor_list, group_sizes, original_shape, group_axis, combine_mode
             )
 
         if is_colwise and is_rowwise:

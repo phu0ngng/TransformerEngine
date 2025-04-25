@@ -262,12 +262,14 @@ class GroupedScaledTensor1x(ScaledTensor1x):
 
     group_sizes: jnp.ndarray
     original_shape: Tuple
+    group_axis: int
 
     def __init__(self, data, scale_inv, group_sizes,
                  scaling_mode, dq_dtype, _dq_func, is_colwise,
-                 data_layout, flatten_axis, original_shape):
+                 data_layout, flatten_axis, original_shape, group_axis=0):
         self.group_sizes = group_sizes
         self.original_shape = original_shape
+        self.group_axis = group_axis
         super().__init__(data, scale_inv, scaling_mode, dq_dtype,
                          _dq_func, is_colwise, data_layout, flatten_axis)
 
@@ -281,10 +283,22 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             0 < flatten_axis < data_ndim
         ), f"flatten_axis {flatten_axis} is out of bounds for data.ndim = {data_ndim}"
 
+        group_axis = (
+            len(self.original_shape) + self.group_axis if self.group_axis < 0 else self.group_axis
+        )
+        assert 0 <= group_axis < data_ndim, (
+                f"group_axis {group_axis} is out of bounds for shape {self.original_shape}"
+                )
+
+        # Only need to correct the group_axis for the lhs input case
+        if self.data_layout == "T" and self.group_sizes.size != self.original_shape[group_axis]:
+            self.group_axis = self.flatten_axis
+
         expected_scale_shape = self.scaling_mode.get_grouped_scale_shape_from_flattened_data_shape(
             self.data.shape,
             self.group_sizes,
             self.original_shape,
+            self.group_axis,
             self.is_colwise,
             is_padded=True,
             flatten_axis=flatten_axis,
@@ -310,6 +324,7 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             self.data_layout,
             self.flatten_axis,
             self.original_shape,
+            self.group_axis,
         )
         return (children, aux_data)
 
@@ -407,6 +422,7 @@ class ScaledTensorFactory:
         flatten_axis=-1,
         group_sizes=None,
         original_shape=None,
+        group_axis=0,
     ):
         """Creates a single-scale quantized tensor.
 
@@ -438,6 +454,7 @@ class ScaledTensorFactory:
                 flatten_axis=flatten_axis,
                 group_sizes=group_sizes,
                 original_shape=original_shape,
+                group_axis=group_axis,
             )
 
         return ScaledTensor1x(
@@ -463,6 +480,7 @@ class ScaledTensorFactory:
         flatten_axis=-1,
         group_sizes=None,
         original_shape=None,
+        group_axis=0,
     ):
         """Creates a double-scale quantized tensor.
 
@@ -492,6 +510,7 @@ class ScaledTensorFactory:
             flatten_axis=flatten_axis,
             group_sizes=group_sizes,
             original_shape=original_shape,
+            group_axis=group_axis,
         )
         colwise_tensor = ScaledTensorFactory.create_1x(
             colwise_data,
@@ -503,6 +522,7 @@ class ScaledTensorFactory:
             flatten_axis=flatten_axis,
             group_sizes=group_sizes,
             original_shape=original_shape,
+            group_axis=group_axis,
         )
         return ScaledTensor2x(rowwise_tensor, colwise_tensor)
 
@@ -519,6 +539,7 @@ class ScaledTensorFactory:
         flatten_axis: int = -1,
         group_sizes: jnp.ndarray = None,
         original_shape: Tuple[int] = None,
+        group_axis: int = 0,
     ):
         """Creates a scaled tensor based on the quantization axis.
 
@@ -547,6 +568,7 @@ class ScaledTensorFactory:
                 flatten_axis=flatten_axis,
                 group_sizes=group_sizes,
                 original_shape=original_shape,
+                group_axis=group_axis,
             )
 
         is_colwise = q_layout == QuantizeLayout.COLWISE
@@ -560,6 +582,7 @@ class ScaledTensorFactory:
             flatten_axis=flatten_axis,
             group_sizes=group_sizes,
             original_shape=original_shape,
+            group_axis=group_axis,
         )
 
 
