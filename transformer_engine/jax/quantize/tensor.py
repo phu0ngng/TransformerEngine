@@ -294,20 +294,21 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         if self.data_layout == "T" and self.group_sizes.size != self.original_shape[group_axis]:
             self.group_axis = self.flatten_axis
 
-        expected_scale_shape = self.scaling_mode.get_grouped_scale_shape_from_flattened_data_shape(
-            self.data.shape,
-            self.group_sizes,
-            self.original_shape,
-            self.group_axis,
-            self.is_colwise,
-            is_padded=True,
-            flatten_axis=flatten_axis,
-        )
-
-        assert self.scale_inv.shape == expected_scale_shape, (
-            f"Unexpected scale_inv shape! \nExpect {expected_scale_shape} for padded"
-            f" scale_inv, got {self.scale_inv.shape}"
-        )
+        # TODO(Phuong): add a scale shape check without dynamic shapes
+        # expected_scale_shape = self.scaling_mode.get_grouped_scale_shape_from_flattened_data_shape(
+        #     self.data.shape,
+        #     self.group_sizes,
+        #     self.original_shape,
+        #     self.group_axis,
+        #     self.is_colwise,
+        #     is_padded=True,
+        #     flatten_axis=flatten_axis,
+        # )
+        #
+        # assert self.scale_inv.shape == expected_scale_shape, (
+        #     f"Unexpected scale_inv shape! \nExpect {expected_scale_shape} for padded"
+        #     f" scale_inv, got {self.scale_inv.shape}"
+        # )
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.
