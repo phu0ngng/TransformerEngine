@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from jax import jit, value_and_grad
 from functools import reduce
-import operator
+import operator, re
 
 from utils import (
     assert_allclose,
@@ -106,6 +106,12 @@ def assert_dequantized_scaled_tensor(a: ScaledTensor, b: jnp.ndarray):
         assert_dequantized_scaled_tensor(a.get_colwise_tensor(), b)
     else:
         pytest.fail("a must be a ScaledTensor object")
+
+
+def check_fp8_call(lowered):
+    hlo = lowered.compile()
+    has_fp8 = re.search(r"custom-call\(f8e4m3fn.*, f8e4m3fn.*", hlo.as_text())
+    assert has_fp8, "No Usage of FP8 is detected!"
 
 
 ALL_ACTIVATION_SHAPES = [(32, 64), (16, 128, 256)]
@@ -804,9 +810,11 @@ class TestDense:
         quantizer_set = QuantizerFactory.create_set(
             scaling_mode=scaling_mode, fwd_dtype=q_dtype, bwd_dtype=q_dtype, is_2x2x=False
         )
-        primitive_out = tex.gemm(
+        jitted_fn = jax.jit(tex.gemm, static_argnums=(2,))
+        primitive_out = jitted_fn(
             x, w, contracting_dims=contracting_dims, quantizer_set=quantizer_set
         )
+        check_fp8_call(jitted_fn.lower(x, w, contracting_dims=contracting_dims, quantizer_set=quantizer_set))
         ref_out = self._ref_gemm_with_jnp_dot(x, w, data_layout)
 
         assert_allclose(primitive_out, ref_out, dtype=q_dtype)

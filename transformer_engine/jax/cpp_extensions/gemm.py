@@ -155,20 +155,19 @@ def _dequantize(x, scale_inv, dq_dtype):
 def _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision):
     # Need to hard-code the dequantize here instead of calling lhs.dequantize() for pattern matching
     """FP8 GEMM for XLA pattern match"""
-    lhs_dq = _dequantize(lhs.data, lhs.scale_inv, lhs.dq_dtype)
-    rhs_dq = _dequantize(rhs.data, rhs.scale_inv, rhs.dq_dtype)
-
     (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dim_nums
     if lhs.data_layout == "T":
-        lhs_contract = _transpose_contract_dims(lhs_dq.ndim, lhs_contract)
+        lhs_contract = _transpose_contract_dims(lhs.data.ndim, lhs_contract)
     if rhs.data_layout == "T":
-        rhs_contract = _transpose_contract_dims(rhs_dq.ndim, rhs_contract)
+        rhs_contract = _transpose_contract_dims(rhs.data.ndim, rhs_contract)
 
     dim_nums = (lhs_contract, rhs_contract), (lhs_batch, rhs_batch)
 
-    return jax.lax.dot_general(
-        lhs_dq, rhs_dq, dim_nums, precision=precision, preferred_element_type=lhs.dq_dtype
+    out_fp8 = jax.lax.dot_general(
+        lhs.data, rhs.data, dim_nums, precision=precision, preferred_element_type=lhs.dq_dtype
     )
+    output = _dequantize(out_fp8, lhs.scale_inv * rhs.scale_inv, lhs.dq_dtype)
+    return output
 
 
 @partial(jax.jit, static_argnums=(2,))
