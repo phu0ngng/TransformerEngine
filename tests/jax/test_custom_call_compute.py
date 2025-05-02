@@ -801,7 +801,8 @@ class TestDense:
         assert_allclose(primitive_out, ref_out, dtype=jnp.bfloat16)
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
+    # @pytest_parametrize_wrapper("m,n,k", [(64, 32, 64)])
+    @pytest_parametrize_wrapper("m,n,k", [(512, 512, 256)])
     @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2])
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("data_layout", ["TN", "NT", "NN", "TT"])
