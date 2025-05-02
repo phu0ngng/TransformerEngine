@@ -53,8 +53,10 @@ GEMM_CASES = [
 FP8_COMPUTE_TYPE = [jnp.float8_e4m3fn, jnp.float8_e5m2]
 LN_CASES = [(256, 128), (128, 256)]
 DTYPES = [jnp.bfloat16, jnp.float32]
-is_fp8_supported, reason = helper.is_fp8_available()
-is_mxfp8_supported, reason = helper.is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+# is_fp8_supported, reason = helper.is_fp8_available()
+is_fp8_supported, reason = True, ""
+# is_mxfp8_supported, reason = helper.is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+is_mxfp8_supported, reason = True, ""
 
 supported_scaling_modes = []
 """ Find supported scaling modes"""
