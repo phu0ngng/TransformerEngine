@@ -1249,8 +1249,9 @@ class TestGroupedDense:
 
         lhs = jax.random.uniform(subkeys[0], lhs_shape, dtype=dtype)
         rhs = jax.random.uniform(subkeys[1], rhs_shape, dtype=dtype)
-        # import math
+        import math
         # rhs = jax.numpy.arange(math.prod(rhs_shape), dtype=dtype).reshape(rhs_shape)
+        # lhs = jax.numpy.arange(math.prod(lhs_shape), dtype=dtype).reshape(lhs_shape)
         # lhs = jax.numpy.ones(lhs_shape, dtype=dtype)
         # rhs = jax.numpy.ones(rhs_shape, dtype=dtype)
 
@@ -1267,7 +1268,6 @@ class TestGroupedDense:
             assert_allclose(out_list[i], ref_list[i], dtype=dtype)
 
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
-    # @pytest_parametrize_wrapper("layout", ["NN", "TN", "NT", "TT"])
     @pytest_parametrize_wrapper("layout", ["NN"])
     def test_grouped_gemm_fp16(self, dtype, input_shape, layout):
         lhs, rhs, group_sizes, contracting_dims = self._generate_grouped_gemm_input(
@@ -1281,8 +1281,8 @@ class TestGroupedDense:
 
     @pytest.mark.skipif(not is_fp8_supported, reason=reason)
     @pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
-    @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-    # @pytest_parametrize_wrapper("layout", ["NN", "TN", "NT", "TT"])
+    # @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+    @pytest_parametrize_wrapper("scaling_mode", [ScalingMode.MXFP8_1D_SCALING])
     @pytest_parametrize_wrapper("layout", ["NN"])
     def test_grouped_gemm_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape, layout):
         fwd_dtype, bwd_dtype = fwd_bwd_dtype

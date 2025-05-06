@@ -22,6 +22,7 @@ from ..quantize import (
     GroupedQuantizer,
     QuantizeConfig,
     QuantizerSet,
+    QuantizeLayout,
     noop_quantizer_set,
 )
 
@@ -417,28 +418,16 @@ def grouped_gemm(
         assert isinstance(quantizer_set.x, GroupedQuantizer)
         assert type(quantizer_set.x) is type(quantizer_set.kernel)
         scaling_mode = quantizer_set.x.scaling_mode
-        if (
-            scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
-            and is_gemm_with_all_layouts_supported()
-        ):
+        if scaling_mode.is_tensor_scaling() and is_gemm_with_all_layouts_supported():
             lhs_is_rowwise = rhs_is_rowwise = True
         else:
             lhs_is_rowwise = not lhs_is_trans
             rhs_is_rowwise = lhs_is_trans
+        quantizer_set.x.q_layout = QuantizeLayout.ROWWISE if lhs_is_rowwise else QuantizeLayout.COLWISE
+        quantizer_set.kernel.q_layout = QuantizeLayout.ROWWISE if rhs_is_rowwise else QuantizeLayout.COLWISE
+        lhs_q = grouped_quantize(lhs, quantizer_set.x, group_sizes, lhs_flatten_axis)
+        rhs_q = grouped_quantize(rhs, quantizer_set.kernel, group_sizes=None, flatten_axis=rhs_flatten_axis)
 
-        lhs_q = quantizer_set.x.quantize(
-            lhs,
-            is_rowwise=lhs_is_rowwise,
-            is_colwise=not lhs_is_rowwise,
-            flatten_axis=lhs_flatten_axis,
-            group_sizes=group_sizes,
-        )
-        rhs_q = quantizer_set.kernel.quantize(
-            rhs,
-            is_rowwise=rhs_is_rowwise,
-            is_colwise=not rhs_is_rowwise,
-            flatten_axis=rhs_flatten_axis,
-        )
         lhs_data = lhs_q.data
         rhs_data = rhs_q.data
         lhs_scale_inv = lhs_q.scale_inv
