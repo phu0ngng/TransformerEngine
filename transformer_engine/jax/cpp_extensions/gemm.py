@@ -12,6 +12,7 @@ import jax.numpy as jnp
 from transformer_engine_jax import get_device_compute_capability
 
 from .base import BasePrimitive, register_primitive
+from .quantization import grouped_quantize
 
 from ..quantize import (
     ScaledTensor,
@@ -25,7 +26,7 @@ from ..quantize import (
 )
 
 
-__all__ = ["gemm"]
+__all__ = ["gemm", "grouped_gemm"]
 
 
 num_cublas_streams = 4
@@ -371,6 +372,8 @@ def grouped_gemm(
     """
     # TODO(Phuong): implement the group_offset
     group_offset = group_offset or jnp.zeros((1,), jnp.int32)
+
+    # TODO(Phuong): implement the precision
 
     if isinstance(lhs, jnp.ndarray):
         assert isinstance(rhs, jnp.ndarray)
