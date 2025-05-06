@@ -1377,7 +1377,10 @@ class TestGroupedDense:
         )
 
         quantizer_set = QuantizerFactory.create_set(
-            scaling_mode=scaling_mode, fwd_dtype=fwd_dtype, bwd_dtype=bwd_dtype, is_2x2x=True,
+            scaling_mode=scaling_mode,
+            fwd_dtype=fwd_dtype,
+            bwd_dtype=bwd_dtype,
+            is_2x2x=True,
             n_groups=group_sizes.size,
         )
         value_n_grad_ref_func = value_and_grad(self._ref_sum_grouped_gemm, (0, 1))
@@ -1389,10 +1392,8 @@ class TestGroupedDense:
             group_sizes,
             contracting_dims,
         )
-        primitive_out_mean, (primitive_dgrad, primitive_wgrad) = (
-            value_n_grad_primitive_func(
-                x, kernel, group_sizes, contracting_dims, quantizer_set=quantizer_set
-            )
+        primitive_out_mean, (primitive_dgrad, primitive_wgrad) = value_n_grad_primitive_func(
+            x, kernel, group_sizes, contracting_dims, quantizer_set=quantizer_set
         )
 
         assert_allclose(primitive_out_mean, ref_out_mean, dtype=fwd_dtype)
