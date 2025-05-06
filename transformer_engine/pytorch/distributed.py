@@ -19,7 +19,12 @@ from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp._traversal_utils import _get_fsdp_states_with_modules
 
-from .utils import non_tn_fp8_gemm_supported, safely_set_viewless_tensor_data, needs_quantized_gemm
+from . import torch_version
+from .utils import (
+    is_non_tn_fp8_gemm_supported,
+    safely_set_viewless_tensor_data,
+    needs_quantized_gemm,
+)
 from .constants import dist_group_type
 from .fp8 import FP8GlobalStateManager, fp8_autocast
 from .tensor.float8_tensor import Float8Quantizer, Float8Tensor, Float8CurrentScalingQuantizer
@@ -267,17 +272,36 @@ def _get_active_autocast_contexts():
     """
     autocast_cached = torch.is_autocast_cache_enabled()
 
-    gpu_autocast_enabled = torch.is_autocast_enabled()
-    gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
-    gpu_autocast_ctx = torch.cuda.amp.autocast(
-        gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
-    )
+    if torch_version() >= (2, 4, 0):
+        gpu_autocast_enabled = torch.is_autocast_enabled("cuda")
+        gpu_autocast_dtype = torch.get_autocast_dtype("cuda")
+        gpu_autocast_ctx = torch.amp.autocast(
+            "cuda",
+            enabled=gpu_autocast_enabled,
+            dtype=gpu_autocast_dtype,
+            cache_enabled=autocast_cached,
+        )
 
-    cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
-    cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
-    cpu_autocast_ctx = torch.cpu.amp.autocast(
-        cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
-    )
+        cpu_autocast_enabled = torch.is_autocast_enabled("cpu")
+        cpu_autocast_dtype = torch.get_autocast_dtype("cpu")
+        cpu_autocast_ctx = torch.amp.autocast(
+            "cpu",
+            enabled=cpu_autocast_enabled,
+            dtype=cpu_autocast_dtype,
+            cache_enabled=autocast_cached,
+        )
+    else:
+        gpu_autocast_enabled = torch.is_autocast_enabled()
+        gpu_autocast_dtype = torch.get_autocast_gpu_dtype()
+        gpu_autocast_ctx = torch.cuda.amp.autocast(
+            gpu_autocast_enabled, gpu_autocast_dtype, autocast_cached
+        )
+
+        cpu_autocast_enabled = torch.is_autocast_cpu_enabled()
+        cpu_autocast_dtype = torch.get_autocast_cpu_dtype()
+        cpu_autocast_ctx = torch.cpu.amp.autocast(
+            cpu_autocast_enabled, cpu_autocast_dtype, autocast_cached
+        )
 
     return gpu_autocast_ctx, cpu_autocast_ctx
 
@@ -561,7 +585,9 @@ def has_te_modules(network):
     """
     from .module import LayerNorm, RMSNorm
     from .module.base import TransformerEngineBaseModule
-    from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
+    from .attention.dot_product_attention.backends import UnfusedDotProductAttention
+    from .attention.dot_product_attention.dot_product_attention import DotProductAttention
+    from .attention.multi_head_attention import MultiheadAttention
     from .transformer import TransformerLayer
 
     te_classes_list = [
@@ -938,7 +964,7 @@ def _all_gather_fp8(
 
     # Make sure FP8 transpose is populated if needed
     needs_transpose = (
-        quantizer is not None and quantizer.columnwise_usage and not non_tn_fp8_gemm_supported()
+        quantizer is not None and quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported()
     )
     if needs_transpose:
         if handle is not None:
@@ -1474,7 +1500,9 @@ def _is_te_module(module):
     """
     from .module import LayerNorm, RMSNorm
     from .module.base import TransformerEngineBaseModule
-    from .attention import UnfusedDotProductAttention, DotProductAttention, MultiheadAttention
+    from .attention.dot_product_attention.dot_product_attention import DotProductAttention
+    from .attention.dot_product_attention.backends import UnfusedDotProductAttention
+    from .attention.multi_head_attention import MultiheadAttention
     from .transformer import TransformerLayer
 
     te_classes_list = [

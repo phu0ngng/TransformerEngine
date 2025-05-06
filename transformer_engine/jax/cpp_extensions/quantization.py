@@ -6,6 +6,7 @@ import operator
 from functools import reduce
 from typing import Tuple, Optional
 from packaging import version
+import math
 
 import jax
 import jax.numpy as jnp
@@ -26,8 +27,18 @@ from .misc import (
     NamedSharding,
 )
 from ..sharding import all_reduce_max_along_all_axes_except_PP, all_reduce_sum_along_dp_fsdp
-from ..quantize import ScaledTensor2x, ScaledTensor, ScaledTensorFactory
-from ..quantize import Quantizer, QuantizeLayout, DelayedScaleQuantizer, ScalingMode
+from ..quantize import (
+    ScaledTensor2x,
+    ScaledTensor,
+    ScaledTensorFactory,
+    GroupedScaledTensor1x,
+    Quantizer,
+    GroupedQuantizer,
+    QuantizeLayout,
+    DelayedScaleQuantizer,
+    ScalingMode,
+    compute_scale_from_amax,
+)
 
 if version.parse(jax.__version__) >= version.parse("0.5.0"):
     from jax import ffi  # pylint: disable=ungrouped-imports
@@ -35,7 +46,7 @@ else:
     from jax.extend import ffi  # pylint: disable=ungrouped-imports
 
 
-__all__ = ["quantize", "quantize_dbias"]
+__all__ = ["quantize", "quantize_dbias", "grouped_quantize"]
 
 
 class DBiasQuantizePrimitive(BasePrimitive):
@@ -53,8 +64,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         6,
         7,
         8,
-        9,
-    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype, scale_shapes, is_dbias, is_outer
+    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype, is_dbias, is_outer
     inner_primitive = None
     outer_primitive = None
 
@@ -68,14 +78,12 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
     ):
         """
         te_dbias_quantize_p abstract
         """
-        del scale_shapes
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         out_shape = x_aval.shape
@@ -94,7 +102,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         ).get_scale_shape_2x(x_aval.shape, is_padded=not is_outer, flatten_axis=flatten_axis)
 
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+            if ScalingMode(scaling_mode).is_tensor_scaling():
                 colwise_out_shape = multidim_transpose(out_shape, transpose_axis=flatten_axis)
             else:
                 colwise_out_shape = out_shape
@@ -166,14 +174,13 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
     ):
         """
         te_dbias_quantize_p lowering rules
         """
-        del out_dtype, scale_dtype, scale_shapes, is_outer
+        del out_dtype, scale_dtype, is_outer
         x_aval, scale_aval = ctx.avals_in
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval.dtype == jnp.float32
@@ -196,7 +203,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
     ):
@@ -221,7 +227,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
             q_layout=q_layout,
             flatten_axis=flatten_axis,
             scale_dtype=scale_dtype,
-            scale_shapes=scale_shapes,
             is_dbias=is_dbias,
             is_outer=False,
         )
@@ -254,7 +259,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
     ):
@@ -278,7 +282,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 q_layout=q_layout,
                 flatten_axis=flatten_axis,
                 scale_dtype=scale_dtype,
-                scale_shapes=scale_shapes,
                 is_dbias=is_dbias,
             ),
             out_bdims,
@@ -291,14 +294,14 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
         mesh,
         arg_infos,
         result_infos,
     ):
-        del (out_dtype, result_infos, scale_dtype, scale_shapes, is_outer)  # Unused.
+        del (out_dtype, result_infos, scale_dtype, is_outer)  # Unused.
+
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
         out_sharding = NamedSharding(
@@ -307,7 +310,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             desc="DBiasQuantizePrimitive.out_sharding",
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+            if ScalingMode(scaling_mode).is_tensor_scaling():
                 colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
             else:
                 colwise_out_spec = x_spec
@@ -363,7 +366,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
         mesh,
@@ -371,6 +373,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
         result_infos,
     ):
         del result_infos, is_outer
+
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
         out_sharding = NamedSharding(
@@ -379,7 +382,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
             desc="DBiasQuantizePrimitive.out_sharding",
         )
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+            if ScalingMode(scaling_mode).is_tensor_scaling():
                 colwise_out_spec = multidim_transpose(x_spec, transpose_axis=flatten_axis)
             else:
                 colwise_out_spec = x_spec
@@ -445,7 +448,6 @@ class DBiasQuantizePrimitive(BasePrimitive):
                 q_layout=q_layout,
                 flatten_axis=flatten_axis,
                 scale_dtype=scale_dtype,
-                scale_shapes=scale_shapes,
                 is_dbias=is_dbias,
                 is_outer=True,
             )
@@ -478,17 +480,18 @@ class DBiasQuantizePrimitive(BasePrimitive):
         q_layout,
         flatten_axis,
         scale_dtype,
-        scale_shapes,
         is_dbias,
         is_outer,
         mesh,
         value_types,
         result_types,
     ):
-        del out_dtype, scale_dtype, scale_shapes, is_outer, mesh, result_types
+        del out_dtype, scale_dtype, is_outer, mesh, result_types
 
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
-            len(value_types[0].shape), unique_var="i", flatten_axis=flatten_axis
+            len(value_types[0].shape),
+            unique_var="DBiasQuantizePrimitive_i",
+            flatten_axis=flatten_axis,
         )
 
         x_axes = scale_rules.input_spec
@@ -496,7 +499,7 @@ class DBiasQuantizePrimitive(BasePrimitive):
 
         out = x_axes
         if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
-            if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
+            if ScalingMode(scaling_mode).is_tensor_scaling():
                 colwise_out = tuple(multidim_transpose(x_axes, transpose_axis=flatten_axis))
             else:
                 colwise_out = x_axes
@@ -612,6 +615,13 @@ def _quantize_dbias_impl(
             return x, _jax_dbias(x, dtype=dq_dtype, flatten_axis=flatten_axis)
         return x, None
 
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        # Globally reduce amax across all devices for current scaling so we have a single global scale.
+        # This differs from the PyTorch implementation which uses a local amax and scale per-device and persists this
+        # until the tensor is dequantized (e.g. in the GEMM).
+        amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32)
+        scale = compute_scale_from_amax(amax, quantizer.q_dtype)
+
     if isinstance(quantizer, DelayedScaleQuantizer):
         scale = quantizer.scale
 
@@ -630,12 +640,11 @@ def _quantize_dbias_impl(
         q_layout=quantizer.q_layout.value,
         flatten_axis=flatten_axis,
         scale_dtype=quantizer.get_scale_dtype(),
-        scale_shapes=quantizer.get_scale_shapes(x.shape, flatten_axis=flatten_axis),
         is_dbias=is_dbias,
         is_outer=True,
     )
     # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
-    if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING and quantizer.is_2x2x():
+    if quantizer.scaling_mode.is_tensor_scaling() and quantizer.is_2x2x():
         colwise_scale_inv = rowwise_scale_inv
 
     quantizer.update(updated_amax)
@@ -705,3 +714,252 @@ def quantize_dbias(
     return _quantize_dbias_impl(
         dz, quantizer=quantizer, is_dbias=is_dbias, flatten_axis=flatten_axis
     )
+
+
+class GroupedQuantizePrimitive(BasePrimitive):
+    """
+    Cast Primitive wrapping nvte_quantize and nvte_quantize_dbias
+    """
+
+    name = "te_grouped_quantize_ffi"
+    multiple_results = True
+    impl_static_args = (
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+    )  # out_dtype, scaling_mode, q_layout, flatten_axis, scale_dtype
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        x_aval,
+        scale_aval,
+        group_sizes_aval,
+        *,
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        group_axis,
+        scale_dtype,
+    ):
+        """
+        te_dbias_quantize_p abstract
+        """
+        dtype = dtypes.canonicalize_dtype(x_aval.dtype)
+        assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        out_shape = math.prod(x_aval.shape)
+        # TODO(Phuong): can scale_aval be None?
+        assert scale_aval is None or scale_aval.dtype == jnp.float32
+
+        rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
+            scaling_mode
+        ).get_grouped_scale_shape_2x(
+            x_aval.shape,
+            group_sizes_aval.size,
+            group_axis,
+            is_padded=True,
+            flatten_axis=flatten_axis,
+        )
+
+        if q_layout in (QuantizeLayout.ROWWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+            rowwise_out_shape = out_shape
+        else:
+            rowwise_out_shape = (1,)
+            rowwise_scale_inv_shape = (1,)
+        rowwise_out_aval = jax.core.ShapedArray(shape=rowwise_out_shape, dtype=out_dtype)
+
+        amax_aval = jax.core.ShapedArray(shape=(group_sizes_aval.size,), dtype=jnp.float32)
+
+        if q_layout in (QuantizeLayout.COLWISE.value, QuantizeLayout.ROWWISE_COLWISE.value):
+            colwise_out_shape = out_shape
+        else:
+            colwise_out_shape = (1,)
+            colwise_scale_inv_shape = (1,)
+        colwise_out_aval = jax.core.ShapedArray(shape=colwise_out_shape, dtype=out_dtype)
+        scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
+        colwise_scale_inv_aval = jax.core.ShapedArray(
+            shape=colwise_scale_inv_shape, dtype=scale_dtype
+        )
+
+        return (
+            rowwise_out_aval,
+            colwise_out_aval,
+            scale_inv_aval,
+            colwise_scale_inv_aval,
+            amax_aval,
+        )
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        """
+        te_dbias_quantize_p outer primitive abstract
+        """
+        # Phuong: keeping outer abstract so that we can add fuse dbias later
+        (
+            out,
+            colwise_out,
+            scale_inv,
+            colwise_scale_inv,
+            updated_amax,
+        ) = DBiasQuantizePrimitive.abstract(*args, **kwargs)
+        return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
+
+    @staticmethod
+    def lowering(
+        ctx,
+        x,
+        scale,
+        group_sizes,
+        *,
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        group_axis,
+        scale_dtype,
+    ):
+        """
+        te_dbias_quantize_p lowering rules
+        """
+        del out_dtype, scale_dtype
+        x_aval, scale_aval, group_sizes_aval = ctx.avals_in
+        assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
+        assert scale_aval.dtype == jnp.float32
+        assert group_sizes_aval.dtype == jnp.int32
+        assert group_axis == 0
+        return ffi.ffi_lowering(GroupedQuantizePrimitive.name)(
+            ctx,
+            x,
+            scale,
+            group_sizes,
+            scaling_mode=scaling_mode.value,
+            q_layout=q_layout,
+            flatten_axis=flatten_axis,
+        )
+
+    @staticmethod
+    def impl(
+        x,
+        scale,
+        group_sizes,
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        group_axis,
+        scale_dtype,
+    ):
+        """
+        te_dbias_quantize_p implementation
+        """
+        assert GroupedQuantizePrimitive.inner_primitive is not None
+        (
+            out,
+            colwise_out,
+            scale_inv,
+            colwise_scale_inv,
+            updated_amax,
+        ) = GroupedQuantizePrimitive.inner_primitive.bind(
+            x,
+            scale,
+            group_sizes,
+            out_dtype=out_dtype,
+            scaling_mode=scaling_mode,
+            q_layout=q_layout,
+            flatten_axis=flatten_axis,
+            group_axis=group_axis,
+            scale_dtype=scale_dtype,
+        )
+        return (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax)
+
+
+register_primitive(GroupedQuantizePrimitive)
+
+
+def grouped_quantize(
+    x: jnp.ndarray,
+    quantizer: GroupedQuantizer,
+    group_sizes: jnp.ndarray = None,
+    flatten_axis: int = -1,
+) -> GroupedScaledTensor1x:
+
+    # TODO(Phuong): add support for flatten_axis = -2
+    assert flatten_axis == -1, f"Only flatten_axis = -1 is supported for now, got {flatten_axis}"
+    group_axis = 0
+
+    if group_sizes is None:
+        group_sizes = jnp.ones(x.shape[group_axis], dtype=jnp.int32)
+
+    if not GroupedQuantizePrimitive.enabled():
+        return quantizer.quantize(
+            x, flatten_axis=flatten_axis, group_sizes=group_sizes, group_axis=group_axis
+        )
+    n_groups = group_sizes.size
+    original_shape = x.shape
+    assert n_groups == len(
+        quantizer.quantizers
+    ), f"n_groups={n_groups} != n_quantizers = {len(quantizer.quantizers)}"
+    scale = jnp.empty((n_groups,), jnp.float32)
+
+    if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+        for i, quantizer_i in enumerate(quantizer.quantizers):
+            scale = scale.at[i].set(quantizer_i.scale[0])
+
+    # WAR for DelayedScaling COLWISE
+    apply_colwise_war = (
+        quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
+        and quantizer.q_layout == QuantizeLayout.COLWISE
+    )
+    q_layout = QuantizeLayout.ROWWISE_COLWISE if apply_colwise_war else quantizer.q_layout
+
+    (
+        rowwise_casted_output,
+        colwise_casted_output,
+        rowwise_scale_inv,
+        colwise_scale_inv,
+        updated_amax,
+    ) = GroupedQuantizePrimitive.outer_primitive.bind(
+        x,
+        scale,
+        group_sizes,
+        out_dtype=quantizer.q_dtype,
+        scaling_mode=quantizer.scaling_mode.value,
+        q_layout=q_layout.value,
+        flatten_axis=flatten_axis,
+        group_axis=group_axis,
+        scale_dtype=quantizer.get_scale_dtype(),
+    )
+
+    # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
+    if (
+        quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
+        and quantizer.is_2x2x()
+        or apply_colwise_war
+    ):
+        colwise_scale_inv = rowwise_scale_inv
+
+    # TODO(Phuong): store the whole updated_amax in the grouped_quantize instead?
+    if quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING:
+        for i, quantizer_i in enumerate(quantizer.quantizers):
+            quantizer_i.update(updated_amax[i].reshape((1,)))
+
+    out = ScaledTensorFactory.create(
+        data=rowwise_casted_output,
+        scale_inv=rowwise_scale_inv,
+        colwise_data=colwise_casted_output,
+        colwise_scale_inv=colwise_scale_inv,
+        scaling_mode=quantizer.scaling_mode,
+        dq_dtype=x.dtype,
+        q_layout=quantizer.q_layout,
+        data_layout=quantizer.get_data_layout(),
+        flatten_axis=flatten_axis,
+        group_sizes=group_sizes,
+        group_axis=group_axis,
+        original_shape=original_shape,
+    )
+    return out

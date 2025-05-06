@@ -99,17 +99,14 @@ class BlockScaleDequantizer(Dequantizer):
             int(data_shape[-1] / scale_shape[-1]),
         )
 
-        # E8M0 does not have a bit for sign. So 0 - 127 represent negative numbers.
         scale_inv = jnp.expand_dims(scale_inv, axis=(flatten_axis + 2 - 2, -1))
+
         # E8M0 does not have a bit for sign. So 0 - 127 represent negative numbers.
         return jnp.asarray(data * jnp.power(2, scale_inv - 127), dq_dtype).reshape(data_shape)
 
     @staticmethod
     def dequantize(scaled_tensor):
         """Dequantize a tensor using block scaling.
-
-        This function dequantizes a tensor that was quantized using block scaling
-        by applying the inverse scaling factor to each block of data.
 
         Args:
             scaled_tensor: The quantized tensor to dequantize
@@ -129,6 +126,7 @@ class BlockScaleDequantizer(Dequantizer):
 
 ScalingModeToDequantizerMap = {
     ScalingMode.DELAYED_TENSOR_SCALING: TensorScaleDequantizer,
+    ScalingMode.CURRENT_TENSOR_SCALING: TensorScaleDequantizer,
     ScalingMode.MXFP8_1D_SCALING: BlockScaleDequantizer,
 }
 
@@ -138,14 +136,14 @@ def _grouped_dequantize(grouped_scaled_tensor):
     data = grouped_scaled_tensor.data
     scale_inv = grouped_scaled_tensor.scale_inv
     group_sizes = grouped_scaled_tensor.group_sizes
-    original_shape = grouped_scaled_tensor.original_shape
-    group_axis = grouped_scaled_tensor.group_axis
+    other_sizes = grouped_scaled_tensor.other_sizes
     flatten_axis = grouped_scaled_tensor.flatten_axis
     scaling_mode = grouped_scaled_tensor.scaling_mode
+    original_shape = grouped_scaled_tensor.original_shape
+    group_axis = grouped_scaled_tensor.group_axis
 
-    data_ndim = len(original_shape)
+    data_ndim = 1 + len(other_sizes)
 
-    # TODO: remove
     flatten_axis = data_ndim + flatten_axis if flatten_axis < 0 else flatten_axis
 
     output = []
@@ -154,19 +152,11 @@ def _grouped_dequantize(grouped_scaled_tensor):
     )
     matrix_sizes = group_sizes * math.prod(non_group_shape)
 
-    assert (
-        grouped_scaled_tensor.data_layout != "T" or group_sizes.size == original_shape[group_axis]
-    )
-
     data = jnp.split(data, jnp.cumulative_sum(matrix_sizes)[:-1])
 
     scale_inv_ptr = 0
     for i, data_i in enumerate(data):
-        data_shape_i = (
-            *original_shape[:group_axis],
-            group_sizes[i],
-            *original_shape[group_axis + 1 :],
-        )
+        data_shape_i = (group_sizes[i], *other_sizes)
         assert math.prod(data_shape_i) == data_i.size, (
             f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
             f" {data_i.size}"
@@ -191,7 +181,6 @@ def _grouped_dequantize(grouped_scaled_tensor):
         output.append(out_i)
         scale_inv_ptr += scale_shape_i_size
 
-    # TODO(Phuong): Stack the output to a single ndarray !?
     return output
 
 

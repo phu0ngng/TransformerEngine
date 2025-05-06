@@ -230,7 +230,6 @@ class ScaledTensor1x(ScaledTensor):
         # axis_names were given for N layout, so needs to be transpose for T layout
         if self.data_layout == "T":
             assert self.flatten_axis > 0
-            flatten_axis = -self.flatten_axis
             axis_names = (*logical_axis_names[flatten_axis:], *logical_axis_names[:flatten_axis])
         else:
             axis_names = logical_axis_names
@@ -302,25 +301,28 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             0 <= group_axis < data_ndim
         ), f"group_axis {group_axis} is out of bounds for shape {self.original_shape}"
 
-        # Only need to correct the group_axis for the lhs input case
-        if self.data_layout == "T" and self.group_sizes.size != self.original_shape[group_axis]:
-            self.group_axis = self.flatten_axis
+        if self.data_layout == "T":
+            self.original_shape = (
+                *self.original_shape[flatten_axis:],
+                *self.original_shape[:flatten_axis],
+            )
+            flatten_axis = len(self.original_shape) - flatten_axis
+            self.group_axis = flatten_axis
 
-        # TODO(Phuong): add a scale shape check without dynamic shapes
-        # expected_scale_shape = self.scaling_mode.get_grouped_scale_shape_from_flattened_data_shape(
-        #     self.data.shape,
-        #     self.group_sizes,
-        #     self.original_shape,
-        #     self.group_axis,
-        #     self.is_colwise,
-        #     is_padded=True,
-        #     flatten_axis=flatten_axis,
-        # )
-        #
-        # assert self.scale_inv.shape == expected_scale_shape, (
-        #     f"Unexpected scale_inv shape! \nExpect {expected_scale_shape} for padded"
-        #     f" scale_inv, got {self.scale_inv.shape}"
-        # )
+        self.flatten_axis = flatten_axis
+        expected_scale_shape = self.scaling_mode.get_grouped_scale_shape(
+            self.original_shape,
+            self.group_sizes.size,
+            self.group_axis,
+            self.is_colwise,
+            is_padded=True,
+            flatten_axis=flatten_axis,
+        )
+
+        assert self.scale_inv.shape == expected_scale_shape, (
+            f"Unexpected scale_inv shape! \nExpect {expected_scale_shape} for padded"
+            f" scale_inv, got {self.scale_inv.shape}"
+        )
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.
@@ -587,6 +589,20 @@ class ScaledTensorFactory:
             )
 
         is_colwise = q_layout == QuantizeLayout.COLWISE
+        if is_colwise:
+            return ScaledTensorFactory.create_1x(
+                colwise_data,
+                colwise_scale_inv,
+                scaling_mode,
+                dq_dtype,
+                is_colwise=is_colwise,
+                data_layout=data_layout[0],
+                flatten_axis=flatten_axis,
+                group_sizes=group_sizes,
+                original_shape=original_shape,
+                group_axis=group_axis,
+            )
+
         return ScaledTensorFactory.create_1x(
             data,
             scale_inv,

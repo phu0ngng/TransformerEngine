@@ -27,6 +27,10 @@ from transformer_engine_jax import JAXX_Scaling_Mode
 __all__ = ["QuantizeShardyRules", "ScalingMode"]
 
 
+def DIVUP(a, b):
+    return -(a // -b)
+
+
 @dataclass
 class QuantizeShardyRules:
     """Information necessary to shard scale tensors with Shardy.
@@ -81,6 +85,22 @@ class ScalingModeMetadataImpl(ABC):
         """
 
     @abstractmethod
+    def get_grouped_scale_shape(
+        self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
+    ) -> Tuple[int]:
+        """Get the shape for scale tensors in this mode.
+
+        Args:
+            data_shape: Original shape of the data tensor
+            is_colwise: Whether to use column-wise scaling
+            is_padded: Whether to use padded shapes
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
+
+        Returns:
+            The shape for scale tensors
+        """
+
+    @abstractmethod
     def get_shardy_sharding_rules(
         self, input_rank, unique_var, flatten_axis
     ) -> QuantizeShardyRules:
@@ -96,10 +116,10 @@ class ScalingModeMetadataImpl(ABC):
         """
 
 
-class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
-    """Implementation for delayed scaling mode.
+class CurrentScalingModeMetadataImpl(ScalingModeMetadataImpl):
+    """Implementation for current scaling mode.
 
-    This implementation provides metadata for delayed scaling mode, including scale data type and shape.
+    This implementation provides metadata for current scaling mode, including scale data type and shape.
     """
 
     def get_scale_dtype(self) -> jnp.dtype:
@@ -131,6 +151,24 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
         del data_shape, is_colwise
         return (1,)
 
+    def get_grouped_scale_shape(
+        self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
+    ) -> Tuple[int]:
+        """Get the shape for scale tensors in this mode.
+
+        Args:
+            data_shape: Original shape of the data tensor
+            is_colwise: Whether to use column-wise scaling
+            is_padded: Whether to use padded shapes
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
+
+        Returns:
+            The shape for scale tensors
+        """
+        del data_shape, group_axis, is_colwise
+        assert isinstance(n_groups, int)
+        return (n_groups,)
+
     def get_shardy_sharding_rules(
         self, input_rank, unique_var, flatten_axis
     ) -> QuantizeShardyRules:
@@ -147,6 +185,13 @@ class DelayedScalingModeMetadataImpl(ScalingModeMetadataImpl):
         del flatten_axis
         input_spec = tuple(f"x{i}" for i in range(input_rank))
         return QuantizeShardyRules(input_spec, (unique_var,), (unique_var,), {})
+
+
+class DelayedScalingModeMetadataImpl(CurrentScalingModeMetadataImpl):
+    """Implementation for delayed scaling mode.
+
+    This implementation provides metadata for delayed scaling mode, including scale data type and shape.
+    """
 
 
 class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
@@ -270,6 +315,77 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
 
         return (*first_dim_scale_shape, *last_dim_scale_shape)
 
+    def get_grouped_scale_shape(
+        self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
+    ) -> Tuple[int]:
+        """Get the shape for grouped scale tensors in this mode.
+        If padded: The estimiated maximal possible shape for grouped scale tensor is return instead.
+
+        Args:
+            data_shape: Original shape of the data tensor
+            is_colwise: Whether to use column-wise scaling
+            is_padded: Whether to use padded shapes
+            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
+
+        Returns:
+            The shape for scale tensors
+        """
+        assert isinstance(n_groups, int)
+        block_alignment = self._block_alignment if is_padded else (1, 1)
+
+        if is_colwise:
+            block_y, block_x = self._block_dims
+            alignment_y, alignment_x = block_alignment
+        else:
+            block_x, block_y = self._block_dims
+            alignment_x, alignment_y = block_alignment
+
+        if flatten_axis < 0:
+            flatten_axis = len(data_shape) + flatten_axis
+        assert (
+            0 < flatten_axis < len(data_shape)
+        ), f"flatten_axis {flatten_axis} is out of bounds for shape {data_shape}"
+
+        assert data_shape[flatten_axis - 1] % block_x == 0, (
+            f"Data shape {data_shape} should be divisible by block_x {block_x} in axis"
+            f" {flatten_axis - 1}"
+        )
+        assert (
+            data_shape[-1] % block_y == 0
+        ), f"Data shape {data_shape} should be divisible by block_y {block_y} in axis -1"
+
+        flattened_first_dim = reduce(operator.mul, data_shape[:flatten_axis], 1)
+        flattened_last_dim = reduce(operator.mul, data_shape[flatten_axis:], 1)
+
+        assert flattened_first_dim % block_x == 0, (
+            f"Flattened first dim - mutiplication of axes={tuple(range(0, flatten_axis))} of shape"
+            f" {data_shape} - should be divisible by block_x {block_x}"
+        )
+        assert flattened_last_dim % block_y == 0, (
+            "Flattened last dim - mutiplication of"
+            f" axes={tuple(range(flatten_axis, len(data_shape)))} of shape {data_shape} - should be"
+            f" divisible by block_y {block_y}"
+        )
+
+        n_block_x = int(flattened_first_dim // block_x)
+        n_block_y = int(flattened_last_dim // block_y)
+
+        """
+            Given the scale shape of [M, N], and G groups, and padding alignment (128, 4),
+            The worst scenario is when we have (G-1) groups with 1 rows and 1 group with (M-G+1) rows.
+            Then:
+                max_padded_rows = (G-1) * 128 + DIVUP(M-G+1, 128) * 128
+                max_padded_cols = DIVUP(N, 4) * 4
+                max_scale_size = max_padded_rows * max_padded_cols
+        """
+        if is_padded:
+            n_block_x = (n_groups - 1) * alignment_x + DIVUP(
+                n_block_x - n_groups + 1, alignment_x
+            ) * alignment_x
+            n_block_y = DIVUP(n_block_y, alignment_y) * alignment_y
+
+        return (n_block_x * n_block_y,)
+
     def get_shardy_sharding_rules(
         self, input_rank, unique_var, flatten_axis
     ) -> QuantizeShardyRules:
@@ -318,12 +434,14 @@ class ScalingMode(Enum):
     This class defines the available scaling modes for tensor quantization:
     - DELAYED_TENSOR_SCALING: Uses delayed scaling with FP8 data type and float32 scales
     - MXFP8_1D_SCALING: Uses block-based scaling with FP8 data type and E8M0 scales
+    - CURRENT_TENSOR_SCALING: Uses current scaling with FP8 data type and float32 scales
     - NO_SCALING: No scaling applied
     """
 
     NO_SCALING = JAXX_Scaling_Mode.NO_SCALING
     DELAYED_TENSOR_SCALING = JAXX_Scaling_Mode.DELAYED_TENSOR_SCALING
     MXFP8_1D_SCALING = JAXX_Scaling_Mode.MXFP8_1D_SCALING
+    CURRENT_TENSOR_SCALING = JAXX_Scaling_Mode.CURRENT_TENSOR_SCALING
 
     def _get_impl(self) -> ScalingModeMetadataImpl:
         """Get the implementation for this scaling mode.
@@ -397,7 +515,7 @@ class ScalingMode(Enum):
         return self._get_impl().get_shardy_sharding_rules(input_rank, unique_var, flatten_axis)
 
     def get_grouped_scale_shape_2x(
-        self, data_shape, group_sizes, is_padded=True, flatten_axis=-1
+        self, data_shape, n_groups, group_axis, is_padded=True, flatten_axis=-1
     ) -> Tuple[Tuple[int]]:
         """Get shapes for both row-wise and column-wise scaling.
 
@@ -411,74 +529,62 @@ class ScalingMode(Enum):
         """
         rowwise_scale_shape = self.get_grouped_scale_shape(
             data_shape,
-            group_sizes,
+            n_groups,
+            group_axis,
             is_colwise=False,
             is_padded=is_padded,
             flatten_axis=flatten_axis,
         )
         colwise_scale_shape = self.get_grouped_scale_shape(
-            data_shape, group_sizes, is_colwise=True, is_padded=is_padded, flatten_axis=flatten_axis
+            data_shape,
+            n_groups,
+            group_axis,
+            is_colwise=True,
+            is_padded=is_padded,
+            flatten_axis=flatten_axis,
         )
         return (rowwise_scale_shape, colwise_scale_shape)
 
     def get_grouped_scale_shape(
-        self, data_shape, group_sizes, is_colwise, is_padded=True, flatten_axis=-1
-    ) -> Tuple[int]:
-        """Get the shape for scale tensors in this mode.
+        self, data_shape, n_groups, group_axis, is_colwise, is_padded=True, flatten_axis=-1
+    ) -> Tuple[Tuple[int]]:
+        """Get shapes for both row-wise and column-wise scaling.
 
         Args:
-            data_shape: Original shape of the data tensor
-            is_colwise: Whether to use column-wise scaling
+            data_shape: Shape of the data tensor
             is_padded: Whether to use padded shapes
             flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
 
         Returns:
-            The shape for scale tensors
+            Tuple of (rowwise_scale_shape, colwise_scale_shape)
         """
-        grouped_scale_size = []
-        for group_sizes_i in group_sizes:
-            # data_shape_i = (group_sizes[i], *data_shape[flatten_axis:])
-            data_shape_i = (group_sizes_i, *data_shape[1:])
-            scale_shape_i = self._get_impl().get_scale_shape(
-                data_shape_i, is_colwise, is_padded, flatten_axis
-            )
-            grouped_scale_size.append(scale_shape_i)
-        return tuple(grouped_scale_size)
+        return self._get_impl().get_grouped_scale_shape(
+            data_shape,
+            n_groups,
+            group_axis,
+            is_colwise=is_colwise,
+            is_padded=is_padded,
+            flatten_axis=flatten_axis,
+        )
 
-    def get_grouped_scale_shape_from_flattened_data_shape(
-        self,
-        data_shape,
-        group_sizes,
-        original_shape,
-        group_axis,
-        is_colwise,
-        is_padded=True,
-        flatten_axis=-1,
-    ) -> Tuple[int]:
-        """Get the shape for scale tensors in this mode.
-
-        Args:
-            data_shape: Shape of the 1D data tensor
-            is_colwise: Whether to use column-wise scaling
-            is_padded: Whether to use padded shapes
-            flatten_axis: Axis along which data can be flattened to 2D for quantization. Defaults to -1.
+    def is_tensor_scaling(self) -> bool:
+        """Check if this scaling mode is per-tensor scaling.
 
         Returns:
-            The shape for scale tensors
+            True if the scaling mode is tensor scaling, False otherwise
         """
-        assert len(data_shape) == 1, f"Expect 1D flattened data_shape, got {data_shape}"
-        grouped_scale_size = 0
-        for group_size_i in group_sizes:
-            data_shape_i = (
-                *original_shape[:group_axis],
-                group_size_i,
-                *original_shape[group_axis + 1 :],
-            )
-            scale_shape_i = self._get_impl().get_scale_shape(
-                data_shape_i, is_colwise, is_padded, flatten_axis
-            )
-            grouped_scale_size += math.prod(scale_shape_i)
-        return (grouped_scale_size,)
+        return self in (
+            ScalingMode.DELAYED_TENSOR_SCALING,
+            ScalingMode.CURRENT_TENSOR_SCALING,
+        )
+
+    def is_1d_block_scaling(self) -> bool:
+        """Check if this scaling mode is 1D block scaling.
+
+        Returns:
+            True if the scaling mode is 1D block scaling, False otherwise
+        """
+        return self == ScalingMode.MXFP8_1D_SCALING
 
     def __eq__(self, other):
         """Compare this scaling mode with another.
@@ -519,5 +625,6 @@ SCALING_MODES_TO_IMPL: Dict[ScalingMode, ScalingModeMetadataImpl] = {
     ScalingMode.DELAYED_TENSOR_SCALING: DelayedScalingModeMetadataImpl(),
     ScalingMode.MXFP8_1D_SCALING: BlockScalingModeMetadataImpl(block_dims=(1, 32)),
     # WAR
+    ScalingMode.CURRENT_TENSOR_SCALING: CurrentScalingModeMetadataImpl(),
     ScalingMode.NO_SCALING: DelayedScalingModeMetadataImpl(),
 }
