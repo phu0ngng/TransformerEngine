@@ -86,6 +86,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         del scaling_mode
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
+        workspace_size += lhs_scale_inv_aval.size + rhs_scale_inv_aval.size
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
         out_aval = jax.core.ShapedArray(shape=(M, N), dtype=out_dtype)
         return (out_aval, workspace_aval)
@@ -410,6 +411,9 @@ def grouped_gemm(
     rhs_is_trans = rhs_contract_dim[0] != 1
     rhs_flatten_axis = -len(rhs_contract_dim) if rhs_is_trans else 1 + len(rhs_contract_dim)
 
+    if (lhs_is_trans or rhs_is_trans) and isinstance(lhs, jnp.ndarray):
+        raise NotImplementedError("Non FP8 types + other layout than NN is not yet supported")
+
     if (
         not isinstance(lhs, ScaledTensor)
         and not isinstance(rhs, ScaledTensor)
@@ -418,15 +422,25 @@ def grouped_gemm(
         assert isinstance(quantizer_set.x, GroupedQuantizer)
         assert type(quantizer_set.x) is type(quantizer_set.kernel)
         scaling_mode = quantizer_set.x.scaling_mode
-        if scaling_mode.is_tensor_scaling() and is_gemm_with_all_layouts_supported():
+        if (
+            scaling_mode.is_tensor_scaling()
+            and is_gemm_with_all_layouts_supported()
+            or scaling_mode.is_1d_block_scaling()
+        ):
             lhs_is_rowwise = rhs_is_rowwise = True
         else:
             lhs_is_rowwise = not lhs_is_trans
             rhs_is_rowwise = lhs_is_trans
-        quantizer_set.x.q_layout = QuantizeLayout.ROWWISE if lhs_is_rowwise else QuantizeLayout.COLWISE
-        quantizer_set.kernel.q_layout = QuantizeLayout.ROWWISE if rhs_is_rowwise else QuantizeLayout.COLWISE
+        quantizer_set.x.q_layout = (
+            QuantizeLayout.ROWWISE if lhs_is_rowwise else QuantizeLayout.COLWISE
+        )
+        quantizer_set.kernel.q_layout = (
+            QuantizeLayout.ROWWISE if rhs_is_rowwise else QuantizeLayout.COLWISE
+        )
         lhs_q = grouped_quantize(lhs, quantizer_set.x, group_sizes, lhs_flatten_axis)
-        rhs_q = grouped_quantize(rhs, quantizer_set.kernel, group_sizes=None, flatten_axis=rhs_flatten_axis)
+        rhs_q = grouped_quantize(
+            rhs, quantizer_set.kernel, group_sizes=None, flatten_axis=rhs_flatten_axis
+        )
 
         lhs_data = lhs_q.data
         rhs_data = rhs_q.data
@@ -456,24 +470,6 @@ def grouped_gemm(
         lhs_data = _shape_normalization(lhs.data, (lhs_contract_dim, ()), lhs.data_layout == "N")
         rhs_data = _shape_normalization(rhs.data, (rhs_contract_dim), rhs.data_layout == "T")
 
-    # if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-    #     lhs_scale_inv = grouped_swizzled_scale(
-    #         lhs.scale_inv,
-    #         lhs.group_sizes,
-    #         lhs_shape,
-    #         lhs.is_colwise,
-    #         lhs.scaling_mode,
-    #         lhs.flatten_axis,
-    #     )
-    #     rhs_scale_inv = grouped_swizzled_scale(
-    #         rhs.scale_inv,
-    #         rhs.group_sizes,
-    #         rhs_shape,
-    #         rhs.is_colwise,
-    #         rhs.scaling_mode,
-    #         rhs.flatten_axis,
-    #     )
-
     # Calling GroupedGEMM Custom Call
     K_lhs = math.prod(lhs_shape[i] for i in lhs_contract_dim)
     K_rhs = math.prod(rhs_shape[i] for i in rhs_contract_dim)
@@ -486,6 +482,8 @@ def grouped_gemm(
     has_bias = bias is not None
     assert not has_bias or bias.size == N
     bias = bias or jnp.empty((), jnp.float32)
+
+    assert scaling_mode != ScalingMode.MXFP8_1D_SCALING, "MXFP8_1D_SCALING is not yet supported"
 
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,

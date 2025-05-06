@@ -60,7 +60,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   auto lhs_sinv_size = product(lhs_scale.dimensions());
   auto rhs_sinv_size = product(rhs_scale.dimensions());
-  auto workspace_size = (workspace_total_size - lhs_sinv_size - rhs_sinv_size)  / num_streams;
+  auto workspace_size = (workspace_total_size - lhs_sinv_size - rhs_sinv_size) / num_streams;
   auto swizzled_lhs_sinv_ptr = workspace_ptr;
   auto swizzled_rhs_sinv_ptr = workspace_ptr + lhs_sinv_size;
   workspace_ptr += lhs_sinv_size + rhs_sinv_size;
@@ -102,7 +102,9 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   const int arch = cuda::sm_arch();
 
   if (arch < 100 && is_fp8_dtype(lhs_dtype))
-  NVTE_CHECK(!lhs_is_trans && rhs_is_trans, "Only NT (row-major) GEMM is supported, got lhs_is_trans=", lhs_is_trans, ", rhs_is_trans=", rhs_is_trans);
+    NVTE_CHECK(!lhs_is_trans && rhs_is_trans,
+               "Only NT (row-major) GEMM is supported, got lhs_is_trans=", lhs_is_trans,
+               ", rhs_is_trans=", rhs_is_trans);
 
   // These lists are to keep the TensorWrapper objects alive
   std::vector<TensorWrapper> lhs_wrapper_list;
@@ -140,12 +142,12 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     auto lhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
     auto rhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
 
-    if (rhs_use_colwise) // MatA
+    if (rhs_use_colwise)  // MatA
       rhs_i.set_columnwise_data(static_cast<void *>(rhs_ptr), rhs_dtype, rhs_shape);
     else
       rhs_i.set_rowwise_data(static_cast<void *>(rhs_ptr), rhs_dtype, rhs_shape);
 
-    if (lhs_use_colwise) // MatB
+    if (lhs_use_colwise)  // MatB
       lhs_i.set_columnwise_data(static_cast<void *>(lhs_ptr), lhs_dtype, lhs_shape);
     else
       lhs_i.set_rowwise_data(static_cast<void *>(lhs_ptr), lhs_dtype, lhs_shape);
@@ -161,18 +163,18 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       // Need to add swizzle here
     }
     if (is_fp8_dtype(lhs_dtype)) {
-      if (rhs_use_colwise) // MatA
+      if (rhs_use_colwise)  // MatA
         rhs_i.set_columnwise_scale_inv(static_cast<void *>(rhs_scale_ptr), rhs_scale_dtype,
                                        rhs_scale_size);
       else
         rhs_i.set_rowwise_scale_inv(static_cast<void *>(rhs_scale_ptr), rhs_scale_dtype,
                                     rhs_scale_size);
-      if (lhs_use_colwise) // MatB
-      lhs_i.set_columnwise_scale_inv(static_cast<void *>(lhs_scale_ptr), lhs_scale_dtype,
-                                  lhs_scale_size);
+      if (lhs_use_colwise)  // MatB
+        lhs_i.set_columnwise_scale_inv(static_cast<void *>(lhs_scale_ptr), lhs_scale_dtype,
+                                       lhs_scale_size);
       else
-      lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_scale_ptr), lhs_scale_dtype,
-                                  lhs_scale_size);
+        lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_scale_ptr), lhs_scale_dtype,
+                                    lhs_scale_size);
     } else {
       NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
                  "Unsupported scaling mode: ", static_cast<int>(scaling_mode));

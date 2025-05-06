@@ -888,8 +888,13 @@ def grouped_quantize(
     flatten_axis: int = -1,
 ) -> GroupedScaledTensor1x:
 
+    if quantizer is None:
+        return x
+
     # TODO(Phuong): add support for flatten_axis = -2
-    assert flatten_axis == -1 or flatten_axis == x.ndim - 1, f"Only flatten_axis = -1 is supported for now, got {flatten_axis}"
+    assert (
+        flatten_axis == -1 or flatten_axis == x.ndim - 1
+    ), f"Only flatten_axis = -1 is supported for now, got {flatten_axis}"
     group_axis = 0
 
     if group_sizes is None:
