@@ -446,8 +446,14 @@ class ScalingMode(Enum):
         return tuple(grouped_scale_size)
 
     def get_grouped_scale_shape_from_flattened_data_shape(
-        self, data_shape, group_sizes, original_shape, group_axis,
-        is_colwise, is_padded=True, flatten_axis=-1
+        self,
+        data_shape,
+        group_sizes,
+        original_shape,
+        group_axis,
+        is_colwise,
+        is_padded=True,
+        flatten_axis=-1,
     ) -> Tuple[int]:
         """Get the shape for scale tensors in this mode.
 
@@ -463,7 +469,11 @@ class ScalingMode(Enum):
         assert len(data_shape) == 1, f"Expect 1D flattened data_shape, got {data_shape}"
         grouped_scale_size = 0
         for group_size_i in group_sizes:
-            data_shape_i = (*original_shape[:group_axis], group_size_i, *original_shape[group_axis+1:])
+            data_shape_i = (
+                *original_shape[:group_axis],
+                group_size_i,
+                *original_shape[group_axis + 1 :],
+            )
             scale_shape_i = self._get_impl().get_scale_shape(
                 data_shape_i, is_colwise, is_padded, flatten_axis
             )

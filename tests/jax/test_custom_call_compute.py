@@ -560,7 +560,10 @@ class TestGroupedQuantize:
     def test_grouped_qdq(
         self, in_dtype, input_shape, q_dtype, scaling_mode, q_layout, flatten_axis, with_group_sizes
     ):
-        if with_group_sizes and q_layout in (QuantizeLayout.COLWISE, QuantizeLayout.ROWWISE_COLWISE):
+        if with_group_sizes and q_layout in (
+            QuantizeLayout.COLWISE,
+            QuantizeLayout.ROWWISE_COLWISE,
+        ):
             pytest.skip("Skip as NotImplemented!")
         n_groups, m, n = input_shape
         key = jax.random.PRNGKey(0)
@@ -1188,7 +1191,9 @@ class TestGroupedDense:
     # @pytest_parametrize_wrapper("layout", ["NN", "TN", "NT", "TT"])
     @pytest_parametrize_wrapper("layout", ["NN"])
     def test_grouped_gemm_fp16(self, dtype, input_shape, layout):
-        lhs, rhs, group_sizes, contracting_dims = self._generate_grouped_gemm_input(dtype, input_shape, layout)
+        lhs, rhs, group_sizes, contracting_dims = self._generate_grouped_gemm_input(
+            dtype, input_shape, layout
+        )
         # f_jit = jax.jit(tex.grouped_gemm, static_argnums=3)
         # primitive_out = f_jit(lhs, rhs, group_sizes, contracting_dims=contracting_dims)
         primitive_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
@@ -1203,8 +1208,11 @@ class TestGroupedDense:
     def test_grouped_gemm_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape, layout):
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
         quantizer_set = QuantizerFactory.create_set(
-            scaling_mode=scaling_mode, fwd_dtype=fwd_dtype, bwd_dtype=bwd_dtype, is_2x2x=False,
-            n_groups=input_shape[0]
+            scaling_mode=scaling_mode,
+            fwd_dtype=fwd_dtype,
+            bwd_dtype=bwd_dtype,
+            is_2x2x=False,
+            n_groups=input_shape[0],
         )
 
         # quantizer_set.x and quantizer_set.kernel has fwd_dtype, while quantizer_set.grad has bwd_dtype
@@ -1212,9 +1220,12 @@ class TestGroupedDense:
         quantizer_set.kernel = quantizer_set.dgrad
 
         out_dtype = jnp.bfloat16
-        lhs, rhs, group_sizes, contracting_dims = self._generate_grouped_gemm_input(out_dtype, input_shape, layout)
-        primitive_out = tex.grouped_gemm(lhs, rhs, group_sizes, contracting_dims,
-                                         quantizer_set=quantizer_set)
+        lhs, rhs, group_sizes, contracting_dims = self._generate_grouped_gemm_input(
+            out_dtype, input_shape, layout
+        )
+        primitive_out = tex.grouped_gemm(
+            lhs, rhs, group_sizes, contracting_dims, quantizer_set=quantizer_set
+        )
         ref_out = self._ref_grouped_gemm(lhs, rhs, group_sizes, contracting_dims)
 
         allclose_dtype = jnp.float8_e4m3fn
@@ -1223,8 +1234,8 @@ class TestGroupedDense:
 
         self._assert_grouped_gemm_output(primitive_out, group_sizes, ref_out, allclose_dtype)
 
-    #@pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
-    #def test_grouped_dense_grad_fp16(self, dtype, shape_list):
+    # @pytest_parametrize_wrapper("dtype", [jnp.bfloat16, jnp.float16])
+    # def test_grouped_dense_grad_fp16(self, dtype, shape_list):
     #    group_size = len(shape_list)
     #    layout_list = ["NN" for _ in range(group_size)]
 
@@ -1275,10 +1286,10 @@ class TestGroupedDense:
     #        assert_allclose(primitive_wgrad_list[i], ref_wgrad_list[i], dtype=dtype)
     #        assert_allclose(primitive_dbias_list[i], ref_dbias_list[i], dtype=dtype)
 
-    #@pytest.mark.skipif(not is_fp8_supported, reason=reason)
-    #@pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
-    #@pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-    #def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, shape_list):
+    # @pytest.mark.skipif(not is_fp8_supported, reason=reason)
+    # @pytest.mark.parametrize("fwd_bwd_dtype", fwd_bwd_dtypes)
+    # @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+    # def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, shape_list):
     #    group_size = len(shape_list)
     #    layout_list = ["NN" for _ in range(group_size)]
     #    fwd_dtype, bwd_dtype = fwd_bwd_dtype

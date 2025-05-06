@@ -264,14 +264,26 @@ class GroupedScaledTensor1x(ScaledTensor1x):
     original_shape: Tuple
     group_axis: int
 
-    def __init__(self, data, scale_inv, group_sizes,
-                 scaling_mode, dq_dtype, _dq_func, is_colwise,
-                 data_layout, flatten_axis, original_shape, group_axis=0):
+    def __init__(
+        self,
+        data,
+        scale_inv,
+        group_sizes,
+        scaling_mode,
+        dq_dtype,
+        _dq_func,
+        is_colwise,
+        data_layout,
+        flatten_axis,
+        original_shape,
+        group_axis=0,
+    ):
         self.group_sizes = group_sizes
         self.original_shape = original_shape
         self.group_axis = group_axis
-        super().__init__(data, scale_inv, scaling_mode, dq_dtype,
-                         _dq_func, is_colwise, data_layout, flatten_axis)
+        super().__init__(
+            data, scale_inv, scaling_mode, dq_dtype, _dq_func, is_colwise, data_layout, flatten_axis
+        )
 
     def __post_init__(self):
         assert self.scale_inv.ndim == 1, "Only support flattened scale_inv"
@@ -286,9 +298,9 @@ class GroupedScaledTensor1x(ScaledTensor1x):
         group_axis = (
             len(self.original_shape) + self.group_axis if self.group_axis < 0 else self.group_axis
         )
-        assert 0 <= group_axis < data_ndim, (
-                f"group_axis {group_axis} is out of bounds for shape {self.original_shape}"
-                )
+        assert (
+            0 <= group_axis < data_ndim
+        ), f"group_axis {group_axis} is out of bounds for shape {self.original_shape}"
 
         # Only need to correct the group_axis for the lhs input case
         if self.data_layout == "T" and self.group_sizes.size != self.original_shape[group_axis]:
@@ -443,7 +455,9 @@ class ScaledTensorFactory:
         """
         dequantizer = ScalingModeToDequantizerMap.get(scaling_mode)
         if group_sizes is not None:
-            assert original_shape is not None, "original_shape is not given for GroupedScaledTensor1x"
+            assert (
+                original_shape is not None
+            ), "original_shape is not given for GroupedScaledTensor1x"
             return GroupedScaledTensor1x(
                 data=data,
                 scale_inv=scale_inv,

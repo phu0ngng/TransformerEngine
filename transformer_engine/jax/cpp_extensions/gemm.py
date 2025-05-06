@@ -55,9 +55,24 @@ class GroupedGemmPrimitive(BasePrimitive):
     outer_primitive = None
 
     @staticmethod
-    def abstract(lhs_data_aval, lhs_scale_inv_aval, rhs_data_aval, rhs_scale_inv_aval,
-                 bias_aval, group_sizes_aval, group_offset_aval, *,
-                 M, N, K, lhs_is_trans, rhs_is_trans, scaling_mode, out_dtype, has_bias):
+    def abstract(
+        lhs_data_aval,
+        lhs_scale_inv_aval,
+        rhs_data_aval,
+        rhs_scale_inv_aval,
+        bias_aval,
+        group_sizes_aval,
+        group_offset_aval,
+        *,
+        M,
+        N,
+        K,
+        lhs_is_trans,
+        rhs_is_trans,
+        scaling_mode,
+        out_dtype,
+        has_bias,
+    ):
         """
             scaling_mode: Scaling mode for the GEMM operations.
             out_dtype: Data type of the output tensors.
@@ -79,36 +94,58 @@ class GroupedGemmPrimitive(BasePrimitive):
         return (out_aval,)
 
     @staticmethod
-    def lowering(ctx, *args,
-                 M, N, K, lhs_is_trans, rhs_is_trans, scaling_mode, out_dtype, has_bias):
+    def lowering(
+        ctx, *args, M, N, K, lhs_is_trans, rhs_is_trans, scaling_mode, out_dtype, has_bias
+    ):
         del out_dtype
         return jax.ffi.ffi_lowering(GroupedGemmPrimitive.name)(
-                ctx,
-                *args,
-                M=M,
-                N=N,
-                K=K,
-                lhs_is_trans=lhs_is_trans,
-                rhs_is_trans=rhs_is_trans,
-                scaling_mode=scaling_mode.value,
-                has_bias=has_bias
-                )
+            ctx,
+            *args,
+            M=M,
+            N=N,
+            K=K,
+            lhs_is_trans=lhs_is_trans,
+            rhs_is_trans=rhs_is_trans,
+            scaling_mode=scaling_mode.value,
+            has_bias=has_bias,
+        )
 
     @staticmethod
-    def impl(lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias, group_sizes, group_offset,
-             M, N, K, lhs_is_trans, rhs_is_trans, scaling_mode, out_dtype, has_bias):
+    def impl(
+        lhs_data,
+        lhs_scale_inv,
+        rhs_data,
+        rhs_scale_inv,
+        bias,
+        group_sizes,
+        group_offset,
+        M,
+        N,
+        K,
+        lhs_is_trans,
+        rhs_is_trans,
+        scaling_mode,
+        out_dtype,
+        has_bias,
+    ):
         assert GroupedGemmPrimitive.inner_primitive is not None
         (out, _) = GroupedGemmPrimitive.inner_primitive.bind(
-                lhs_data, lhs_scale_inv, rhs_data, rhs_scale_inv, bias, group_sizes, group_offset,
-                M=M,
-                N=N,
-                K=K,
-                lhs_is_trans=lhs_is_trans,
-                rhs_is_trans=rhs_is_trans,
-                scaling_mode=scaling_mode,
-                out_dtype=out_dtype,
-                has_bias=has_bias
-                )
+            lhs_data,
+            lhs_scale_inv,
+            rhs_data,
+            rhs_scale_inv,
+            bias,
+            group_sizes,
+            group_offset,
+            M=M,
+            N=N,
+            K=K,
+            lhs_is_trans=lhs_is_trans,
+            rhs_is_trans=rhs_is_trans,
+            scaling_mode=scaling_mode,
+            out_dtype=out_dtype,
+            has_bias=has_bias,
+        )
         return (out,)
 
 
@@ -352,26 +389,29 @@ def swizzled_scale(scales):
     return scales
 
 
-def grouped_swizzled_scale(grouped_scale, group_sizes, original_shape, is_colwise, scaling_mode,
-                           flatten_axis):
+def grouped_swizzled_scale(
+    grouped_scale, group_sizes, original_shape, is_colwise, scaling_mode, flatten_axis
+):
     """Swizzle the scale tensor for FP8 GEMM"""
 
-    scale_shapes = scaling_mode.value.get_grouped_scale_shape(original_shape, group_sizes,
-                                                              is_colwise, flatten_axis=flatten_axis)
+    scale_shapes = scaling_mode.value.get_grouped_scale_shape(
+        original_shape, group_sizes, is_colwise, flatten_axis=flatten_axis
+    )
     ptr = 0
     for scale_shape in scale_shapes:
         rows = math.prod(scale_shape[:flatten_axis])
         cols = math.prod(scale_shape[flatten_axis:])
         scale_size = rows * cols
-        scale = grouped_scale[ptr: ptr + scale_size].reshape((rows, cols))
+        scale = grouped_scale[ptr : ptr + scale_size].reshape((rows, cols))
         if is_colwise:
             scale = jnp.transpose(scale, (1, 0))
             rows, cols = (cols, rows)
         scale = scale.reshape(rows // 128, 4, 32, cols // 4, 4)
         scale = jnp.transpose(scale, (0, 3, 2, 1, 4))
-        grouped_scale = grouped_scale.at[ptr: ptr + scale_size].set(scale)
+        grouped_scale = grouped_scale.at[ptr : ptr + scale_size].set(scale)
         ptr += scale_size
     return grouped_scale
+
 
 # Note: already_transposed doesn't matter for the output shape
 # x.shape = [B, D1, D2]
@@ -393,16 +433,16 @@ def grouped_swizzled_scale(grouped_scale, group_sizes, original_shape, is_colwis
 
 
 def grouped_gemm(
-        lhs: Union[jnp.ndarray, GroupedScaledTensor1x],
-        rhs: Union[jnp.ndarray, GroupedScaledTensor1x],
-        group_sizes: jnp.ndarray,
-        contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (2,)),
-        bias: jnp.ndarray = None,
-        precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
-        preferred_element_type: jnp.dtype = None,
-        group_offset: jnp.array = None,
-        quantizer_set: QuantizerSet = noop_quantizer_set,
-        ) -> jnp.ndarray:
+    lhs: Union[jnp.ndarray, GroupedScaledTensor1x],
+    rhs: Union[jnp.ndarray, GroupedScaledTensor1x],
+    group_sizes: jnp.ndarray,
+    contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (2,)),
+    bias: jnp.ndarray = None,
+    precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
+    preferred_element_type: jnp.dtype = None,
+    group_offset: jnp.array = None,
+    quantizer_set: QuantizerSet = noop_quantizer_set,
+) -> jnp.ndarray:
     """
     lhs: [M, K]
     rhs: [G, N, K]
@@ -444,56 +484,81 @@ def grouped_gemm(
     rhs_is_trans = rhs_contract_dim[0] != 1
     rhs_flatten_axis = -len(rhs_contract_dim) if rhs_is_trans else 1 + len(rhs_contract_dim)
 
-    if not isinstance(lhs, ScaledTensor) and not isinstance(rhs, ScaledTensor) and quantizer_set != noop_quantizer_set:
+    if (
+        not isinstance(lhs, ScaledTensor)
+        and not isinstance(rhs, ScaledTensor)
+        and quantizer_set != noop_quantizer_set
+    ):
         assert isinstance(quantizer_set.x, GroupedQuantizer)
         assert type(quantizer_set.x) is type(quantizer_set.kernel)
         scaling_mode = quantizer_set.x.scaling_mode
-        if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING and is_gemm_with_all_layouts_supported():
+        if (
+            scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
+            and is_gemm_with_all_layouts_supported()
+        ):
             lhs_is_rowwise = rhs_is_rowwise = True
         else:
             lhs_is_rowwise = not lhs_is_trans
             rhs_is_rowwise = lhs_is_trans
 
         lhs_q = quantizer_set.x.quantize(
-                lhs,
-                is_rowwise=lhs_is_rowwise,
-                is_colwise=not lhs_is_rowwise,
-                flatten_axis=lhs_flatten_axis,
-                group_sizes=group_sizes,
-                )
+            lhs,
+            is_rowwise=lhs_is_rowwise,
+            is_colwise=not lhs_is_rowwise,
+            flatten_axis=lhs_flatten_axis,
+            group_sizes=group_sizes,
+        )
         rhs_q = quantizer_set.kernel.quantize(
-                rhs,
-                is_rowwise=rhs_is_rowwise,
-                is_colwise=not rhs_is_rowwise,
-                flatten_axis=rhs_flatten_axis,
-                )
+            rhs,
+            is_rowwise=rhs_is_rowwise,
+            is_colwise=not rhs_is_rowwise,
+            flatten_axis=rhs_flatten_axis,
+        )
         lhs_data = lhs_q.data
         rhs_data = rhs_q.data
         lhs_scale_inv = lhs_q.scale_inv
         rhs_scale_inv = rhs_q.scale_inv
 
-    assert not (lhs_data.dtype == jnp.float8_e5m2 and rhs_data.dtype == jnp.float8_e5m2
-                ), "FP8 GEMM does not support E5M2 * E5M2"
+    assert not (
+        lhs_data.dtype == jnp.float8_e5m2 and rhs_data.dtype == jnp.float8_e5m2
+    ), "FP8 GEMM does not support E5M2 * E5M2"
 
     # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs
     # thus additional transpose is required
-    if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING and not is_gemm_with_all_layouts_supported():
+    if (
+        scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
+        and not is_gemm_with_all_layouts_supported()
+    ):
         lhs_is_trans = False
         rhs_is_trans = True
         if lhs.data_layout == "T":
-            lhs_contract_dim = tuple((lhs.data.ndim - 1 - i) % lhs.data.ndim for i in
-                                     lhs_contract_dim)
+            lhs_contract_dim = tuple(
+                (lhs.data.ndim - 1 - i) % lhs.data.ndim for i in lhs_contract_dim
+            )
         if rhs.data_layout == "T":
-            rhs_contract_dim = tuple((rhs.data.ndim - 1 - i) % rhs.data.ndim for i in
-                                     rhs_contract_dim)
+            rhs_contract_dim = tuple(
+                (rhs.data.ndim - 1 - i) % rhs.data.ndim for i in rhs_contract_dim
+            )
         lhs_data = _shape_normalization(lhs.data, (lhs_contract_dim, ()), lhs.data_layout == "N")
         rhs_data = _shape_normalization(rhs.data, (rhs_contract_dim), rhs.data_layout == "T")
 
     if scaling_mode == ScalingMode.MXFP8_1D_SCALING:
-        lhs_scale_inv = grouped_swizzled_scale(lhs.scale_inv, lhs.group_sizes, lhs_shape,
-                                               lhs.is_colwise, lhs.scaling_mode, lhs.flatten_axis)
-        rhs_scale_inv = grouped_swizzled_scale(rhs.scale_inv, rhs.group_sizes, rhs_shape,
-                                               rhs.is_colwise, rhs.scaling_mode, rhs.flatten_axis)
+        lhs_scale_inv = grouped_swizzled_scale(
+            lhs.scale_inv,
+            lhs.group_sizes,
+            lhs_shape,
+            lhs.is_colwise,
+            lhs.scaling_mode,
+            lhs.flatten_axis,
+        )
+        rhs_scale_inv = grouped_swizzled_scale(
+            rhs.scale_inv,
+            rhs.group_sizes,
+            rhs_shape,
+            rhs.is_colwise,
+            rhs.scaling_mode,
+            rhs.flatten_axis,
+        )
 
     # Calling GroupedGEMM Custom Call
     K_lhs = math.prod(lhs_shape[i] for i in lhs_contract_dim)
@@ -508,7 +573,7 @@ def grouped_gemm(
     assert not has_bias or bias.size == N
     bias = bias or jnp.empty((), jnp.float32)
 
-    (out, ) = GroupedGemmPrimitive.outer_primitive.bind(
+    (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,
         lhs_scale_inv,
         rhs_data,

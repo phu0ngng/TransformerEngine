@@ -17,16 +17,11 @@
 namespace transformer_engine {
 namespace jax {
 
-
-Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data,
-                          Buffer_Type lhs_scale, Buffer_Type rhs_data,
-                          Buffer_Type rhs_scale, Buffer_Type bias,
-                          Buffer_Type group_sizes, Buffer_Type group_offset,
-                          Result_Type output, Result_Type workspace,
-                          size_t m, size_t n, size_t k,
-                          bool lhs_is_trans, bool rhs_is_trans,
-                          JAXX_Scaling_Mode scaling_mode,
-                          bool has_bias){
+Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_scale,
+                          Buffer_Type rhs_data, Buffer_Type rhs_scale, Buffer_Type bias,
+                          Buffer_Type group_sizes, Buffer_Type group_offset, Result_Type output,
+                          Result_Type workspace, size_t m, size_t n, size_t k, bool lhs_is_trans,
+                          bool rhs_is_trans, JAXX_Scaling_Mode scaling_mode, bool has_bias) {
   // Notes on matrix layouts and transpose:
   // Jax uses row-major data_layout, on entering this function, each input matrix pair:
   //   A: row-major [m, k] for N - [k, m] for T
@@ -50,7 +45,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data,
   auto rhs_dtype = convert_ffi_datatype_to_te_dtype(rhs_data.element_type());
   auto lhs_scale_dtype = convert_ffi_datatype_to_te_dtype(lhs_scale.element_type());
   auto rhs_scale_dtype = convert_ffi_datatype_to_te_dtype(rhs_scale.element_type());
-  auto bias_ptr = has_bias ? reinterpret_cast<uint8_t *>(bias.untyped_data()): nullptr;
+  auto bias_ptr = has_bias ? reinterpret_cast<uint8_t *>(bias.untyped_data()) : nullptr;
   auto bias_dtype = convert_ffi_datatype_to_te_dtype(bias.element_type());
 
   NVTE_CHECK(group_sizes.dimensions().size() == 1);
@@ -72,10 +67,13 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data,
   NVTE_CHECK(lhs_dtype_bytes == rhs_dtype_bytes, "sizeof(lhs_dtype) != sizeof(rhs_dtype)");
   NVTE_CHECK(lhs_scale_dtype_bytes == rhs_scale_dtype_bytes,
              "sizeof(lhs_scale_dtype) != sizeof(rhs_scale_dtype)");
-  NVTE_CHECK(m * k == product(lhs_data.dimensions()), "Unexpected lhs size! Expect ", m * k, ", got ", product(lhs_data.dimensions()));
-  NVTE_CHECK(n * k * num_gemms == product(rhs_data.dimensions()), "Unexpected rhs size! Expect n * k * num_gemms = ",
-      n, " * ", k, " * ", num_gemms, " = ", n * k * num_gemms, ", got ", product(rhs_data.dimensions()));
-  NVTE_CHECK(n * m == product(output->dimensions()), "Unexpected output size! Expect ", n * m, ", got ", product(output->dimensions()));
+  NVTE_CHECK(m * k == product(lhs_data.dimensions()), "Unexpected lhs size! Expect ", m * k,
+             ", got ", product(lhs_data.dimensions()));
+  NVTE_CHECK(n * k * num_gemms == product(rhs_data.dimensions()),
+             "Unexpected rhs size! Expect n * k * num_gemms = ", n, " * ", k, " * ", num_gemms,
+             " = ", n * k * num_gemms, ", got ", product(rhs_data.dimensions()));
+  NVTE_CHECK(n * m == product(output->dimensions()), "Unexpected output size! Expect ", n * m,
+             ", got ", product(output->dimensions()));
 
   size_t dim_list_bytes = sizeof(int32_t) * num_gemms;
   std::vector<int32_t> dim_list_host(num_gemms);
@@ -85,7 +83,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data,
   // Note: This may break cudaGraph.
   cudaStreamSynchronize(stream);
   size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
-  NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M =", m, ", got sum(group_sizes)=", sum_group_sizes);
+  NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M =", m,
+             ", got sum(group_sizes)=", sum_group_sizes);
 
   bool trans_lhs = lhs_is_trans;
   bool trans_rhs = rhs_is_trans;
@@ -114,10 +113,8 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data,
 
   for (size_t i = 0; i < num_gemms; i++) {
     size_t m_i = dim_list_host[i];
-    auto lhs_shape = std::vector<size_t>{lhs_is_trans ? k : m_i,
-                                        lhs_is_trans ? m_i : k};
-    auto rhs_shape = std::vector<size_t>{rhs_is_trans ? n : k,
-                                         rhs_is_trans ? k : n};
+    auto lhs_shape = std::vector<size_t>{lhs_is_trans ? k : m_i, lhs_is_trans ? m_i : k};
+    auto rhs_shape = std::vector<size_t>{rhs_is_trans ? n : k, rhs_is_trans ? k : n};
     // auto lhs_shape = std::vector<size_t>{lhs_is_trans ? m_i : k,
     //                                     lhs_is_trans ? k : m_i};
     // auto rhs_shape = std::vector<size_t>{rhs_is_trans ? k : n,
@@ -146,17 +143,20 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data,
       lhs_scale_size[0] = m_i * scale_k;
       rhs_scale_size[0] = n * scale_k;
     }
-    if (is_fp8_dtype(lhs_dtype)){
-        lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_scale_ptr), lhs_scale_dtype, lhs_scale_size);
+    if (is_fp8_dtype(lhs_dtype)) {
+      lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_scale_ptr), lhs_scale_dtype,
+                                  lhs_scale_size);
 
       if (arch < 100 && !rhs_is_trans)
-        rhs_i.set_columnwise_scale_inv(static_cast<void *>(rhs_scale_ptr), rhs_scale_dtype, rhs_scale_size);
+        rhs_i.set_columnwise_scale_inv(static_cast<void *>(rhs_scale_ptr), rhs_scale_dtype,
+                                       rhs_scale_size);
       else
-        rhs_i.set_rowwise_scale_inv(static_cast<void *>(rhs_scale_ptr), rhs_scale_dtype, rhs_scale_size);
+        rhs_i.set_rowwise_scale_inv(static_cast<void *>(rhs_scale_ptr), rhs_scale_dtype,
+                                    rhs_scale_size);
 
     } else {
       NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
-          "Unsupported scaling mode: ", static_cast<int>(scaling_mode));
+                 "Unsupported scaling mode: ", static_cast<int>(scaling_mode));
     }
     lhs_wrapper_list.push_back(std::move(lhs_i));
     rhs_wrapper_list.push_back(std::move(rhs_i));
@@ -165,7 +165,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data,
     lhs_ptr += m_i * k * lhs_dtype_bytes;
     rhs_ptr += n * k * rhs_dtype_bytes;
     out_ptr += m_i * n * out_dtype_bytes;
-    if (is_fp8_dtype(lhs_dtype)){
+    if (is_fp8_dtype(lhs_dtype)) {
       lhs_scale_ptr += lhs_scale_size[0] * lhs_scale_dtype_bytes;
       rhs_scale_ptr += rhs_scale_size[0] * rhs_scale_dtype_bytes;
     }
@@ -202,7 +202,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data,
   return ffi_with_cuda_error_check();
 }
 
-
 XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
@@ -223,7 +222,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmHandler, GroupedGemmFFI,
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("has_bias"),
                               FFI_CudaGraph_Traits);
-
 
 }  // namespace jax
 }  // namespace transformer_engine
