@@ -187,7 +187,7 @@ def grouped_dense(
     x: jnp.ndarray,
     kernel: jnp.ndarray,
     group_sizes: jnp.ndarray,
-    contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (0,)),
+    contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (1,)),
     bias: jnp.ndarray = None,
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype = None,
@@ -195,7 +195,6 @@ def grouped_dense(
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ):
     # Perform grouped_dense layer transformation with optional quantization.
-
     if quantizer_set == noop_quantizer_set:
         # Code duplication for now, we will unify the two when we have NoopQuantizer
         output = _grouped_dense_no_quant(
@@ -265,7 +264,7 @@ def _grouped_dense_fwd_rule(
 
     x_contracting_dims, k_contracting_dims = contracting_dims
     flatten_axis_x = -len(x_contracting_dims)
-    flatten_axis_k = len(k_contracting_dims) - len(kernel.shape)
+    flatten_axis_k = len(k_contracting_dims) - len(kernel.shape) + 1  # +1 for G axis
 
     casted_x = tex.grouped_quantize(x, quantizer_set.x, group_sizes, flatten_axis=flatten_axis_x)
     casted_kernel = tex.grouped_quantize(kernel, quantizer_set.kernel, flatten_axis=flatten_axis_k)

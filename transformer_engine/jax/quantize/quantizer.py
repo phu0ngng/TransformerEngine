@@ -9,7 +9,7 @@ This module provides classes and utilities for quantizing tensors in JAX.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Union, Optional, List
+from typing import Union, Optional, Tuple
 import warnings
 
 import jax
@@ -327,7 +327,7 @@ class DelayedScaleQuantizer(CurrentScaleQuantizer):
             Tuple of (children, aux_data) for tree operations
         """
         children = (self.scale, self.amax_history)
-        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout)
+        aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout)
         return (children, aux_data)
 
     def _quantize_func(
@@ -592,12 +592,9 @@ class GroupedQuantizer(Quantizer):
 
     """
 
-    q_dtype: jnp.dtype
-    scaling_mode: ScalingMode
-    q_layout: QuantizeLayout
     data_layout: str = None
     n_groups: int = 1
-    quantizers: List[Quantizer] = None
+    quantizers: Tuple[Quantizer] = field(default_factory=lambda: (None,))
 
     def tree_flatten(self):
         """Flatten the quantizer for JAX tree operations.
@@ -607,10 +604,10 @@ class GroupedQuantizer(Quantizer):
         """
         children = (self.quantizers,)
         aux_data = (self.q_dtype, self.scaling_mode, self.q_layout, self.data_layout, self.n_groups)
-        return (aux_data, children)
+        return (children, aux_data)
 
     def __post_init__(self):
-        if not self.quantizers:
+        if self.quantizers[0] is None:
             self.quantizers = QuantizerFactory.create(
                 self.n_groups, self.scaling_mode, self.q_dtype, self.q_layout
             )
