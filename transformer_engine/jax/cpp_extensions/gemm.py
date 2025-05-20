@@ -490,21 +490,21 @@ def grouped_gemm(
     # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs
     # thus additional transpose is required
     if (
-        scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
+        scaling_mode.is_tensor_scaling()
         and not is_gemm_with_all_layouts_supported()
     ):
         lhs_is_trans = False
         rhs_is_trans = True
-        if lhs.data_layout == "T":
+        if not lhs_is_rowwise:
             lhs_contract_dim = tuple(
-                (lhs.data.ndim - 1 - i) % lhs.data.ndim for i in lhs_contract_dim
+                (lhs.ndim - 1 - i) % lhs.ndim for i in lhs_contract_dim
             )
-        if rhs.data_layout == "T":
+        if not rhs_is_rowwise:
             rhs_contract_dim = tuple(
-                (rhs.data.ndim - 1 - i) % rhs.data.ndim for i in rhs_contract_dim
+                (rhs.ndim - 1 - i) % rhs.ndim for i in rhs_contract_dim
             )
-        lhs_data = _shape_normalization(lhs.data, (lhs_contract_dim, ()), lhs.data_layout == "N")
-        rhs_data = _shape_normalization(rhs.data, (rhs_contract_dim), rhs.data_layout == "T")
+        lhs_data = _shape_normalization(lhs_q.data, (lhs_contract_dim, ()), lhs_is_rowwise)
+        rhs_data = _shape_normalization(rhs_q.data, (rhs_contract_dim, ()), not rhs_is_rowwise)
 
     # Calling GroupedGEMM Custom Call
     K_lhs = math.prod(lhs_shape[i] for i in lhs_contract_dim)
@@ -524,6 +524,7 @@ def grouped_gemm(
     assert not has_bias or bias.size == N
     bias = bias or jnp.empty((), jnp.float32)
 
+    # TODO(Phuong): support MXFP8_1D_SCALING
     assert scaling_mode != ScalingMode.MXFP8_1D_SCALING, "MXFP8_1D_SCALING is not yet supported"
 
     assert not (lhs_is_trans and rhs_is_trans), "Only NN, NT, TN modes are supported, TT mode is not supported"
