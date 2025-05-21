@@ -153,28 +153,28 @@ def _dense_bwd_rule(
 
     # GEMM NT
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
-    g_constracting_dim = tuple(
+    g_contracting_dim = tuple(
         range(grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
     )
     # k_non_contracting_dims
-    k_constracting_dim = tuple(
+    k_contracting_dim = tuple(
         dim for dim in range(len(kernel_shape)) if dim not in fwd_k_contracting_dims
     )
     dgrad = tex.gemm(
         casted_grad.get_rowwise_tensor(),
         rowwise_casted_kernel,
-        (g_constracting_dim, k_constracting_dim),
+        (g_contracting_dim, k_contracting_dim),
     )
     dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
 
     # GEMM TN
     # x_non_contracting_dims
-    g_constracting_dim = x_constracting_dim = tuple(
+    g_contracting_dim = x_contracting_dim = tuple(
         range(0, len(x_shape) - len(fwd_x_contracting_dims))
     )
 
     wgrad = tex.gemm(
-        colwise_casted_x, casted_grad.get_colwise_tensor(), (x_constracting_dim, g_constracting_dim)
+        colwise_casted_x, casted_grad.get_colwise_tensor(), (x_contracting_dim, g_contracting_dim)
     )
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 
@@ -304,7 +304,7 @@ def _grouped_dense_bwd_rule(
         rowwise_casted_kernel,
         x_shape,
         kernel_shape,
-        _,
+        _use_bias,
         quantizer_set,
         flatten_axis_k,
     ) = ctx
@@ -315,18 +315,18 @@ def _grouped_dense_bwd_rule(
 
     # GEMM NT
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
-    g_constracting_dim = tuple(
+    g_contracting_dim = tuple(
         range(grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
     )
     # k_non_contracting_dims
-    k_constracting_dim = tuple(
+    k_contracting_dim = tuple(
         dim for dim in range(len(kernel_shape)) if dim not in fwd_k_contracting_dims
     )
     dgrad = tex.grouped_gemm(
         casted_grad.get_rowwise_tensor(),
         rowwise_casted_kernel,
         group_sizes,
-        (g_constracting_dim, k_constracting_dim),
+        (g_contracting_dim, k_contracting_dim),
         precision=precision,
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
@@ -334,7 +334,7 @@ def _grouped_dense_bwd_rule(
 
     # GEMM TN
     # x_non_contracting_dims
-    g_constracting_dim = x_constracting_dim = tuple(
+    g_contracting_dim = x_contracting_dim = tuple(
         range(0, len(x_shape) - len(fwd_x_contracting_dims))
     )
 
@@ -342,7 +342,7 @@ def _grouped_dense_bwd_rule(
         colwise_casted_x,
         casted_grad.get_colwise_tensor(),
         group_sizes,
-        (x_constracting_dim, g_constracting_dim),
+        (x_contracting_dim, g_contracting_dim),
         precision=precision,
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
@@ -411,39 +411,46 @@ def _grouped_dense_no_quant_bwd_rule(
         kernel,
         x_shape,
         kernel_shape,
-        _,
+        _use_bias,
     ) = ctx
 
+    assert grad.ndim == 2, "Grouped dense backward expects a 2D grad tensor of shape (M, N)"
+    assert kernel.ndim == 3, "Grouped dense backward expects a 3D kernel tensor of shape (G, K, N)"
+
     # GEMM NT
-    # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
-    g_constracting_dim = tuple(
-        range(grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
+    # The 1 in range is for excluding the group dimension (shall we use the hardcoded results below?)
+    # g_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
+    g_contracting_dim = tuple(
+        range(1 + grad.ndim - len(kernel_shape) + len(fwd_k_contracting_dims), grad.ndim)
     )
     # k_non_contracting_dims
-    k_constracting_dim = tuple(
-        dim for dim in range(len(kernel_shape)) if dim not in fwd_k_contracting_dims
+    k_contracting_dim = tuple(
+        dim for dim in range(1, len(kernel_shape)) if dim not in fwd_k_contracting_dims
     )
+    #g_contracting_dim = (1, )
+    #k_contracting_dim = (2, )
     dgrad = tex.grouped_gemm(
         grad,
         kernel,
         group_sizes,
-        (g_constracting_dim, k_constracting_dim),
+        (g_contracting_dim, k_contracting_dim),
         precision=precision,
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,
     )
 
     # GEMM TN
-    # x_non_contracting_dims
-    g_constracting_dim = x_constracting_dim = tuple(
+    # g_non_contracting_dims and x_non_contracting_dims
+    g_contracting_dim = x_contracting_dim = tuple(
         range(0, len(x_shape) - len(fwd_x_contracting_dims))
     )
-
+    # g_contracting_dim = (0, )
+    # x_contracting_dim = (0, )
     wgrad = tex.grouped_gemm(
         x,
         grad,
         group_sizes,
-        (x_constracting_dim, g_constracting_dim),
+        (x_contracting_dim, g_contracting_dim),
         precision=precision,
         preferred_element_type=preferred_element_type,
         group_offset=group_offset,

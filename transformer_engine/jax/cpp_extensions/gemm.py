@@ -83,12 +83,16 @@ class GroupedGemmPrimitive(BasePrimitive):
         Returns:
            1D flattened array of Grouped GEMM outputs
         """
-        del scaling_mode
+        del lhs_data_aval, rhs_data_aval, bias_aval, group_offset_aval
+        del rhs_is_trans, scaling_mode, has_bias
         # TODO(Phuong): move some shape checks from Cpp to here
         workspace_size = get_cublas_workspace_size_bytes() * num_cublas_streams
         workspace_size += lhs_scale_inv_aval.size + rhs_scale_inv_aval.size
         workspace_aval = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
-        out_aval = jax.core.ShapedArray(shape=(M, N), dtype=out_dtype)
+        out_shape_lhs_N = (M, N)
+        out_shape_lhs_T = (group_sizes_aval.size, M, N)
+        out_shape = out_shape_lhs_N if not lhs_is_trans else out_shape_lhs_T
+        out_aval = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
         return (out_aval, workspace_aval)
 
     @staticmethod
@@ -434,8 +438,17 @@ def grouped_gemm(
     rhs_is_trans = rhs_contract_dim[0] != 1
     rhs_flatten_axis = -len(rhs_contract_dim) if rhs_is_trans else 1 + len(rhs_contract_dim)
 
-    if (lhs_is_trans or rhs_is_trans) and isinstance(lhs, jnp.ndarray):
-        raise NotImplementedError("Non FP8 types + other layout than NN is not yet supported")
+    is_computing_grouped_dense_wgrad = (
+        len(lhs_shape) == 2 and len(lhs_contract_dim) == 1 and lhs_contract_dim[0] == 0 and
+        len(rhs_shape) == 2 and len(rhs_contract_dim) == 1 and rhs_contract_dim[0] == 0
+    )
+
+    if is_computing_grouped_dense_wgrad:
+        lhs_is_trans = True
+        rhs_is_trans = False
+        # TODO(Hua): Are the follwing two lines correct?
+        lhs_flatten_axis = 1
+        rhs_flatten_axis = 1
 
     if (
         not isinstance(lhs, ScaledTensor)
@@ -499,7 +512,12 @@ def grouped_gemm(
     assert K_lhs == K_rhs
     M = math.prod(_calculate_remaining_shape(lhs_shape, lhs_contract_dim))
     N = math.prod(_calculate_remaining_shape(rhs_shape, rhs_contract_dim)[1:])  # Exclude G
-    assert group_sizes.size == rhs_shape[0]
+
+    if is_computing_grouped_dense_wgrad:
+        N = math.prod(_calculate_remaining_shape(rhs_shape, rhs_contract_dim))
+    else:
+        assert group_sizes.size == rhs_shape[0]
+
     assert group_offset.size == 1
 
     has_bias = bias is not None
@@ -507,6 +525,8 @@ def grouped_gemm(
     bias = bias or jnp.empty((), jnp.float32)
 
     assert scaling_mode != ScalingMode.MXFP8_1D_SCALING, "MXFP8_1D_SCALING is not yet supported"
+
+    assert not (lhs_is_trans and rhs_is_trans), "Only NN, NT, TN modes are supported, TT mode is not supported"
 
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,

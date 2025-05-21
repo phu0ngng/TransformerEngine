@@ -75,13 +75,36 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   NVTE_CHECK(lhs_dtype_bytes == rhs_dtype_bytes, "sizeof(lhs_dtype) != sizeof(rhs_dtype)");
   NVTE_CHECK(lhs_scale_dtype_bytes == rhs_scale_dtype_bytes,
              "sizeof(lhs_scale_dtype) != sizeof(rhs_scale_dtype)");
-  NVTE_CHECK(m * k == product(lhs_data.dimensions()), "Unexpected lhs size! Expect ", m * k,
-             ", got ", product(lhs_data.dimensions()));
-  NVTE_CHECK(n * k * num_gemms == product(rhs_data.dimensions()),
-             "Unexpected rhs size! Expect n * k * num_gemms = ", n, " * ", k, " * ", num_gemms,
-             " = ", n * k * num_gemms, ", got ", product(rhs_data.dimensions()));
-  NVTE_CHECK(n * m == product(output->dimensions()), "Unexpected output size! Expect ", n * m,
-             ", got ", product(output->dimensions()));
+
+  // 1. In both NN and NT mode, A has shape [M, K], B has shape [G, K, N], split on M-dim,
+  //    we only need to change the rhs_shape to [N, K] if rhs_is_trans.
+  // 2. In TN mode, A has shape [K, M], B has shape [K, N], and out has shape [G, M, N],
+  //    but now split on K-dim instead of M-dim, need to set {lhs, rhs}_shape carefully.
+  // 3. To make our life easier, we do not support TT mode.
+  size_t expected_lhs_size = m * k;
+  size_t expected_rhs_size = lhs_is_trans ? (k * n) : (num_gemms * k * n);
+  size_t expected_out_size = lhs_is_trans ? (num_gemms * m * n) : (m * n);
+  size_t actual_lhs_size = product(lhs_data.dimensions());
+  size_t actual_rhs_size = product(rhs_data.dimensions());
+  size_t actual_out_size = product(output->dimensions());
+  NVTE_CHECK(!(lhs_is_trans && rhs_is_trans), "TT (row-major) mode GEMM is not supported.");
+  NVTE_CHECK(expected_lhs_size == actual_lhs_size, "Unexpected lhs size! Expect ",
+             expected_lhs_size, ", got ", actual_lhs_size);
+  if (!lhs_is_trans) {
+    NVTE_CHECK(expected_rhs_size == actual_rhs_size,
+               "Unexpected rhs size! Expect num_gemms * n * k = ", num_gemms, " * ", n, " * ", k,
+               " = ", expected_rhs_size, ", got ", actual_rhs_size);
+    NVTE_CHECK(expected_out_size == actual_out_size,
+               "Unexpected output size! Expect m * n = ", m, " * ", n, " = ", expected_out_size,
+               ", got ", actual_out_size);
+  } else {
+    NVTE_CHECK(expected_rhs_size == actual_rhs_size,
+               "Unexpected rhs size! Expect k * n = ", k, " * ", n, " = ", expected_rhs_size,
+               ", got ", actual_rhs_size);
+    NVTE_CHECK(expected_out_size == actual_out_size,
+               "Unexpected output size! Expect num_gemms * m * n = ", num_gemms, " * ", m, " * ", n,
+               " = ", expected_out_size, ", got ", actual_out_size);
+  }
 
   size_t dim_list_bytes = sizeof(int32_t) * num_gemms;
   std::vector<int32_t> dim_list_host(num_gemms);
@@ -91,8 +114,14 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   // Note: This may break cudaGraph.
   cudaStreamSynchronize(stream);
   size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
-  NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M =", m,
-             ", got sum(group_sizes)=", sum_group_sizes);
+  if (!lhs_is_trans) {
+    NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
+               ", got sum(group_sizes)=", sum_group_sizes);
+  }
+  else {
+    NVTE_CHECK(k == sum_group_sizes, "Unexpected group_sizes! K = ", k,
+               ", got sum(group_sizes)=", sum_group_sizes);
+  }
 
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
   bool grad = false;
@@ -101,10 +130,11 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   auto bias_shape = std::vector<size_t>{has_bias ? n : 0};
   const int arch = cuda::sm_arch();
 
-  if (arch < 100 && is_fp8_dtype(lhs_dtype))
+  if (arch < 100 && is_fp8_dtype(lhs_dtype)) {
     NVTE_CHECK(!lhs_is_trans && rhs_is_trans,
-               "Only NT (row-major) GEMM is supported, got lhs_is_trans=", lhs_is_trans,
-               ", rhs_is_trans=", rhs_is_trans);
+               "For SM90 or older archs and FP8 input, only NT (row-major) GEMM is supported, ",
+               "got lhs_is_trans=", lhs_is_trans, ", rhs_is_trans=", rhs_is_trans);
+  }
 
   // These lists are to keep the TensorWrapper objects alive
   std::vector<TensorWrapper> lhs_wrapper_list;
@@ -127,27 +157,34 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   bool lhs_use_colwise = (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) && lhs_is_trans;
 
   for (size_t i = 0; i < num_gemms; i++) {
+    // The next 4 lines handle NN and NT modes
     size_t m_i = dim_list_host[i];
+    auto lhs_shape = std::vector<size_t>{m_i, k};
     auto rhs_shape = std::vector<size_t>{rhs_is_trans ? n : k, rhs_is_trans ? k : n};
-    auto lhs_shape = std::vector<size_t>{lhs_is_trans ? k : m_i, lhs_is_trans ? m_i : k};
-    // auto lhs_shape = std::vector<size_t>{lhs_is_trans ? m_i : k,
-    //                                     lhs_is_trans ? k : m_i};
-    // auto rhs_shape = std::vector<size_t>{rhs_is_trans ? k : n,
-    //                                      rhs_is_trans ? n : k};
-
     auto out_shape = std::vector<size_t>{m_i, n};
+    // Handle TN mode lhs_shape and rhs_shape
+    if (lhs_is_trans && !rhs_is_trans) {
+      size_t k_i = dim_list_host[i];
+      lhs_shape[0] = k_i;
+      lhs_shape[1] = m;
+      rhs_shape[0] = k_i;
+      rhs_shape[1] = n;
+      out_shape[0] = m;
+      out_shape[1] = n;
+    }
+
     auto lhs_scale_shape = std::vector<size_t>{1, 1};
     auto rhs_scale_shape = std::vector<size_t>{1, 1};
 
     auto lhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
     auto rhs_i = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
 
-    if (rhs_use_colwise)  // MatA
+    if (rhs_use_colwise)  // MatA to enter cuBLAS
       rhs_i.set_columnwise_data(static_cast<void *>(rhs_ptr), rhs_dtype, rhs_shape);
     else
       rhs_i.set_rowwise_data(static_cast<void *>(rhs_ptr), rhs_dtype, rhs_shape);
 
-    if (lhs_use_colwise)  // MatB
+    if (lhs_use_colwise)  // MatB to enter cuBLAS
       lhs_i.set_columnwise_data(static_cast<void *>(lhs_ptr), lhs_dtype, lhs_shape);
     else
       lhs_i.set_rowwise_data(static_cast<void *>(lhs_ptr), lhs_dtype, lhs_shape);
@@ -163,18 +200,17 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
       // Need to add swizzle here
     }
     if (is_fp8_dtype(lhs_dtype)) {
-      if (rhs_use_colwise)  // MatA
-        rhs_i.set_columnwise_scale_inv(static_cast<void *>(rhs_scale_ptr), rhs_scale_dtype,
-                                       rhs_scale_size);
+      void *rhs_scale_vptr = static_cast<void *>(rhs_scale_ptr);
+      if (rhs_use_colwise)  // MatA to enter cuBLAS
+        rhs_i.set_columnwise_scale_inv(rhs_scale_vptr, rhs_scale_dtype, rhs_scale_size);
       else
-        rhs_i.set_rowwise_scale_inv(static_cast<void *>(rhs_scale_ptr), rhs_scale_dtype,
-                                    rhs_scale_size);
-      if (lhs_use_colwise)  // MatB
-        lhs_i.set_columnwise_scale_inv(static_cast<void *>(lhs_scale_ptr), lhs_scale_dtype,
-                                       lhs_scale_size);
+        rhs_i.set_rowwise_scale_inv(rhs_scale_vptr, rhs_scale_dtype, rhs_scale_size);
+
+      void *lhs_scale_vptr = static_cast<void *>(lhs_scale_ptr);
+      if (lhs_use_colwise)  // MatB to enter cuBLAS
+        lhs_i.set_columnwise_scale_inv(lhs_scale_vptr, lhs_scale_dtype, lhs_scale_size);
       else
-        lhs_i.set_rowwise_scale_inv(static_cast<void *>(lhs_scale_ptr), lhs_scale_dtype,
-                                    lhs_scale_size);
+        lhs_i.set_rowwise_scale_inv(lhs_scale_vptr, lhs_scale_dtype, lhs_scale_size);
     } else {
       NVTE_CHECK(scaling_mode == JAXX_Scaling_Mode::NO_SCALING,
                  "Unsupported scaling mode: ", static_cast<int>(scaling_mode));
@@ -183,9 +219,9 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     rhs_wrapper_list.push_back(std::move(rhs_i));
 
     auto out_i = TensorWrapper(static_cast<void *>(out_ptr), out_shape, out_dtype);
-    lhs_ptr += m_i * k * lhs_dtype_bytes;
-    rhs_ptr += n * k * rhs_dtype_bytes;
-    out_ptr += m_i * n * out_dtype_bytes;
+    lhs_ptr += lhs_shape[0] * lhs_shape[1] * lhs_dtype_bytes;
+    rhs_ptr += rhs_shape[0] * rhs_shape[1] * rhs_dtype_bytes;
+    out_ptr += out_shape[0] * out_shape[1] * out_dtype_bytes;
     if (is_fp8_dtype(lhs_dtype)) {
       lhs_scale_ptr += lhs_scale_size[0] * lhs_scale_dtype_bytes;
       rhs_scale_ptr += rhs_scale_size[0] * rhs_scale_dtype_bytes;
