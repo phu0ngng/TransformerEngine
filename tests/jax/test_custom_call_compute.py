@@ -1302,8 +1302,10 @@ class TestGroupedDense:
         )
 
         # quantizer_set.x and quantizer_set.kernel has fwd_dtype, while quantizer_set.grad has bwd_dtype
-        # We want to test E4M3 * E5M2
-        quantizer_set.kernel = quantizer_set.dgrad
+        # We want to test E4M3 * E5M2, manually set the quantizer_set.kernel.q_dtype to bwd_dtype
+        quantizer_set.kernel.q_dtype = bwd_dtype
+        for quantizer in quantizer_set.kernel.quantizers:
+            quantizer.q_dtype = bwd_dtype
 
         out_dtype = jnp.bfloat16
         lhs, rhs, group_sizes, contracting_dims = self._generate_grouped_gemm_input(
