@@ -427,8 +427,8 @@ def _grouped_dense_no_quant_bwd_rule(
     k_contracting_dim = tuple(
         dim for dim in range(1, len(kernel_shape)) if dim not in fwd_k_contracting_dims
     )
-    #g_contracting_dim = (1, )
-    #k_contracting_dim = (2, )
+    # g_contracting_dim = (1, )
+    # k_contracting_dim = (2, )
     dgrad = tex.grouped_gemm(
         grad,
         kernel,

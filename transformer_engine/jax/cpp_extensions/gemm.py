@@ -439,8 +439,12 @@ def grouped_gemm(
     rhs_flatten_axis = -len(rhs_contract_dim) if rhs_is_trans else 1 + len(rhs_contract_dim)
 
     is_computing_grouped_dense_wgrad = (
-        len(lhs_shape) == 2 and len(lhs_contract_dim) == 1 and lhs_contract_dim[0] == 0 and
-        len(rhs_shape) == 2 and len(rhs_contract_dim) == 1 and rhs_contract_dim[0] == 0
+        len(lhs_shape) == 2
+        and len(lhs_contract_dim) == 1
+        and lhs_contract_dim[0] == 0
+        and len(rhs_shape) == 2
+        and len(rhs_contract_dim) == 1
+        and rhs_contract_dim[0] == 0
     )
 
     if is_computing_grouped_dense_wgrad:
@@ -489,20 +493,13 @@ def grouped_gemm(
 
     # Only support FP8 GEMM with NT layout on Hopper and other earlier GPUs
     # thus additional transpose is required
-    if (
-        scaling_mode.is_tensor_scaling()
-        and not is_gemm_with_all_layouts_supported()
-    ):
+    if scaling_mode.is_tensor_scaling() and not is_gemm_with_all_layouts_supported():
         lhs_is_trans = False
         rhs_is_trans = True
         if not lhs_is_rowwise:
-            lhs_contract_dim = tuple(
-                (lhs.ndim - 1 - i) % lhs.ndim for i in lhs_contract_dim
-            )
+            lhs_contract_dim = tuple((lhs.ndim - 1 - i) % lhs.ndim for i in lhs_contract_dim)
         if not rhs_is_rowwise:
-            rhs_contract_dim = tuple(
-                (rhs.ndim - 1 - i) % rhs.ndim for i in rhs_contract_dim
-            )
+            rhs_contract_dim = tuple((rhs.ndim - 1 - i) % rhs.ndim for i in rhs_contract_dim)
         lhs_data = _shape_normalization(lhs_q.data, (lhs_contract_dim, ()), lhs_is_rowwise)
         rhs_data = _shape_normalization(rhs_q.data, (rhs_contract_dim, ()), not rhs_is_rowwise)
 
@@ -527,7 +524,9 @@ def grouped_gemm(
     # TODO(Phuong): support MXFP8_1D_SCALING
     assert scaling_mode != ScalingMode.MXFP8_1D_SCALING, "MXFP8_1D_SCALING is not yet supported"
 
-    assert not (lhs_is_trans and rhs_is_trans), "Only NN, NT, TN modes are supported, TT mode is not supported"
+    assert not (
+        lhs_is_trans and rhs_is_trans
+    ), "Only NN, NT, TN modes are supported, TT mode is not supported"
 
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,

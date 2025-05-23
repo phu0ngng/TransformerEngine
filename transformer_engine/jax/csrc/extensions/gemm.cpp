@@ -94,13 +94,11 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
     NVTE_CHECK(expected_rhs_size == actual_rhs_size,
                "Unexpected rhs size! Expect num_gemms * n * k = ", num_gemms, " * ", n, " * ", k,
                " = ", expected_rhs_size, ", got ", actual_rhs_size);
-    NVTE_CHECK(expected_out_size == actual_out_size,
-               "Unexpected output size! Expect m * n = ", m, " * ", n, " = ", expected_out_size,
-               ", got ", actual_out_size);
+    NVTE_CHECK(expected_out_size == actual_out_size, "Unexpected output size! Expect m * n = ", m,
+               " * ", n, " = ", expected_out_size, ", got ", actual_out_size);
   } else {
-    NVTE_CHECK(expected_rhs_size == actual_rhs_size,
-               "Unexpected rhs size! Expect k * n = ", k, " * ", n, " = ", expected_rhs_size,
-               ", got ", actual_rhs_size);
+    NVTE_CHECK(expected_rhs_size == actual_rhs_size, "Unexpected rhs size! Expect k * n = ", k,
+               " * ", n, " = ", expected_rhs_size, ", got ", actual_rhs_size);
     NVTE_CHECK(expected_out_size == actual_out_size,
                "Unexpected output size! Expect num_gemms * m * n = ", num_gemms, " * ", m, " * ", n,
                " = ", expected_out_size, ", got ", actual_out_size);
@@ -117,8 +115,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   if (!lhs_is_trans) {
     NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
                ", got sum(group_sizes)=", sum_group_sizes);
-  }
-  else {
+  } else {
     NVTE_CHECK(k == sum_group_sizes, "Unexpected group_sizes! K = ", k,
                ", got sum(group_sizes)=", sum_group_sizes);
   }
