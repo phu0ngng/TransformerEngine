@@ -33,15 +33,16 @@ class Dequantizer(ABC):
     @staticmethod
     @abstractmethod
     def dequantize(scaled_tensor):
-        pass
+        """Dequantizing given tensor to higher precision."""
 
 
 class TensorScaleDequantizer(Dequantizer):
-    """Encapsulation class for dequantization helpers.
+    """
+    TensorScaling Dequantizer Class
 
     This class provides static methods for dequantizing tensors that have been
-    quantized using different scaling modes. It supports both delayed scaling
-    and block scaling modes.
+    quantized using different tensor scaling modes. It supports both delayed scaling
+    and current scaling modes.
     """
 
     @staticmethod
@@ -71,9 +72,27 @@ class TensorScaleDequantizer(Dequantizer):
 
 
 class BlockScaleDequantizer(Dequantizer):
+    """BlockScaling Dequantizer Class.
+
+    This class provides static methods for dequantizing tensors that have been
+    quantized using block scaling modes.
+    """
 
     @staticmethod
     def _dequantize_func(data, scale_inv, dq_dtype, scaling_mode, is_colwise, flatten_axis):
+        """Dequantize a tensor using block scaling.
+
+        Args:
+            data: The quantized tensor data
+            scale_inv: The inverse scaling factors
+            dq_dtype: The data type for dequantized values
+            scaling_mode: The scaling mode used for quantization
+            is_colwise: Whether the scaling is column-wise
+            flatten_axis: The axis along which the tensor could be flattened to 2D
+
+        Returns:
+            The dequantized tensor
+        """
 
         data = data.astype(jnp.float32)
         scale_inv = scale_inv.view(jnp.uint8).astype(jnp.float32)
@@ -133,18 +152,23 @@ ScalingModeToDequantizerMap = {
 
 @staticmethod
 def _grouped_dequantize(grouped_scaled_tensor):
+    """Dequantize a grouped tensor.
+
+    Args:
+        grouped_scaled_tensor: The grouped scaled tensor to dequantize
+
+    Returns:
+        List of dequantized tensors for each group
+    """
     data = grouped_scaled_tensor.data
     scale_inv = grouped_scaled_tensor.scale_inv
     group_sizes = grouped_scaled_tensor.group_sizes
-    other_sizes = grouped_scaled_tensor.other_sizes
     flatten_axis = grouped_scaled_tensor.flatten_axis
     scaling_mode = grouped_scaled_tensor.scaling_mode
     original_shape = grouped_scaled_tensor.original_shape
     group_axis = grouped_scaled_tensor.group_axis
 
-    data_ndim = 1 + len(other_sizes)
-
-    flatten_axis = data_ndim + flatten_axis if flatten_axis < 0 else flatten_axis
+    flatten_axis = len(original_shape) + flatten_axis if flatten_axis < 0 else flatten_axis
 
     output = []
     non_group_shape = tuple(
@@ -156,7 +180,11 @@ def _grouped_dequantize(grouped_scaled_tensor):
 
     scale_inv_ptr = 0
     for i, data_i in enumerate(data):
-        data_shape_i = (group_sizes[i], *other_sizes)
+        data_shape_i = (
+            *original_shape[:group_axis],
+            group_sizes[i],
+            *original_shape[group_axis + 1 :],
+        )
         assert math.prod(data_shape_i) == data_i.size, (
             f"math.prod({data_shape_i}) = {math.prod(data_shape_i)} which is not equal to"
             f" {data_i.size}"

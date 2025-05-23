@@ -5,8 +5,8 @@
 import operator
 from functools import reduce
 from typing import Tuple, Optional
-from packaging import version
 import math
+from packaging import version
 
 import jax
 import jax.numpy as jnp
@@ -790,7 +790,9 @@ class GroupedQuantizePrimitive(BasePrimitive):
             colwise_out_shape = (1,)
             colwise_scale_inv_shape = (1,)
         colwise_out_aval = jax.core.ShapedArray(shape=colwise_out_shape, dtype=out_dtype)
-        scale_inv_aval = jax.core.ShapedArray(shape=rowwise_scale_inv_shape, dtype=scale_dtype)
+        rowwise_scale_inv_aval = jax.core.ShapedArray(
+            shape=rowwise_scale_inv_shape, dtype=scale_dtype
+        )
         colwise_scale_inv_aval = jax.core.ShapedArray(
             shape=colwise_scale_inv_shape, dtype=scale_dtype
         )
@@ -798,7 +800,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
         return (
             rowwise_out_aval,
             colwise_out_aval,
-            scale_inv_aval,
+            rowwise_scale_inv_aval,
             colwise_scale_inv_aval,
             amax_aval,
         )
@@ -810,13 +812,15 @@ class GroupedQuantizePrimitive(BasePrimitive):
         """
         # Phuong: keeping outer abstract so that we can add fuse dbias later
         (
-            out,
+            rowwise_out,
             colwise_out,
             scale_inv,
             colwise_scale_inv,
             updated_amax,
+            _dbias,
+            _wkspace,
         ) = DBiasQuantizePrimitive.abstract(*args, **kwargs)
-        return out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
+        return rowwise_out, colwise_out, scale_inv, colwise_scale_inv, updated_amax
 
     @staticmethod
     def lowering(
@@ -868,9 +872,9 @@ class GroupedQuantizePrimitive(BasePrimitive):
         """
         assert GroupedQuantizePrimitive.inner_primitive is not None
         (
-            out,
+            rowwise_out,
             colwise_out,
-            scale_inv,
+            rowwise_scale_inv,
             colwise_scale_inv,
             updated_amax,
         ) = GroupedQuantizePrimitive.inner_primitive.bind(
@@ -884,7 +888,7 @@ class GroupedQuantizePrimitive(BasePrimitive):
             group_axis=group_axis,
             scale_dtype=scale_dtype,
         )
-        return (out, colwise_out, scale_inv, colwise_scale_inv, updated_amax)
+        return (rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax)
 
 
 register_primitive(GroupedQuantizePrimitive)
@@ -896,13 +900,36 @@ def grouped_quantize(
     group_sizes: jnp.ndarray = None,
     flatten_axis: int = -1,
 ) -> GroupedScaledTensor1x:
+    """Quantize a tensor in grouped manner.
+
+    This function quantizes a tensor by splitting it into groups along a specified axis
+    and applying quantization to each group separately. The groups can be either specified
+    explicitly through group_sizes or automatically split along the group_axis.
+
+    Args:
+        x: Input tensor to quantize
+        quantizer: The quantizer to use for quantization
+        group_sizes: Array of ints containing the size of each group (default: None)
+        flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
+
+    Returns:
+        A GroupedScaledTensor1x containing the quantized data
+
+    Note:
+        - If group_sizes is not provided, the tensor will be split into equal-sized groups
+          along the group_axis
+        - The group_axis is currently fixed to 0
+        - The quantizer's q_layout determines whether row-wise, column-wise, or both
+          quantization is applied
+    """
 
     if quantizer is None:
         return x
 
     # TODO(Phuong): add support for flatten_axis = -2
-    assert (
-        flatten_axis == -1 or flatten_axis == x.ndim - 1
+    assert flatten_axis in (
+        -1,
+        x.ndim - 1,
     ), f"Only flatten_axis = -1 is supported for now, got {flatten_axis}"
     group_axis = 0
 
@@ -924,11 +951,22 @@ def grouped_quantize(
         for i, quantizer_i in enumerate(quantizer.quantizers):
             scale = scale.at[i].set(quantizer_i.scale[0])
 
-    # WAR for DelayedScaling COLWISE
-    apply_colwise_war = (
-        quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
-        and quantizer.q_layout == QuantizeLayout.COLWISE
+    # TODO(Phuong): for CurrentScaling, move this amax reduction to C++ so that the amax is
+    # calculated for each individual matrix in the group
+    if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
+        amax = jnp.amax(jnp.abs(x), keepdims=True).astype(jnp.float32)
+        tmp_scale = compute_scale_from_amax(amax, quantizer.q_dtype)
+        tmp_scale = tmp_scale.reshape(())
+        for i in range(n_groups):
+            scale = scale.at[i].set(tmp_scale)
+
+    is_tensor_scaling = quantizer.scaling_mode in (
+        ScalingMode.DELAYED_TENSOR_SCALING,
+        ScalingMode.CURRENT_TENSOR_SCALING,
     )
+    # WAR for tensor_scaling as TE/Common does not support q_layout = COLWISE yet
+    # So we performance ROWWISE_COLWISE and use the colwise_tensor_output
+    apply_colwise_war = is_tensor_scaling and quantizer.q_layout == QuantizeLayout.COLWISE
     q_layout = QuantizeLayout.ROWWISE_COLWISE if apply_colwise_war else quantizer.q_layout
     (
         rowwise_casted_output,
@@ -948,12 +986,9 @@ def grouped_quantize(
         scale_dtype=quantizer.get_scale_dtype(),
     )
 
-    # For DelayedScaling2x, the scale buffer is shared between rowwise and colwise
-    if (
-        quantizer.scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING
-        and quantizer.is_2x2x()
-        or apply_colwise_war
-    ):
+    # For DelayedScaling2x and CurrentScaling2x, the scale buffer
+    # is shared between rowwise and colwise
+    if is_tensor_scaling and quantizer.is_2x2x() or apply_colwise_war:
         colwise_scale_inv = rowwise_scale_inv
 
     # TODO(Phuong): store the whole updated_amax in the grouped_quantize instead?
@@ -972,7 +1007,7 @@ def grouped_quantize(
         data_layout=quantizer.get_data_layout(),
         flatten_axis=flatten_axis,
         group_sizes=group_sizes,
-        group_axis=group_axis,
         original_shape=original_shape,
+        group_axis=group_axis,
     )
     return out
