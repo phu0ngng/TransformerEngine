@@ -433,7 +433,7 @@ def grouped_gemm(
         rhs_shape = rhs.shape
         lhs_data = lhs
         rhs_data = rhs
-        lhs_scale_inv = rhs_scale_inv = jnp.empty((1,), jnp.float32)
+        lhs_scale_inv = rhs_scale_inv = jnp.empty((0,), jnp.float32)
         scaling_mode = ScalingMode.NO_SCALING
     elif isinstance(lhs, GroupedScaledTensor1x):
         assert isinstance(rhs, GroupedScaledTensor1x)

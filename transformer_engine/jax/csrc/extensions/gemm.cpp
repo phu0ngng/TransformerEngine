@@ -60,14 +60,13 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   auto out_ptr = reinterpret_cast<uint8_t *>(output->untyped_data());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
   auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
-  auto workspace_total_size = product(workspace->dimensions()) / num_streams;
+  auto workspace_total_size = product(workspace->dimensions());
 
   auto lhs_sinv_size = product(lhs_sinv.dimensions());
   auto rhs_sinv_size = product(rhs_sinv.dimensions());
   auto workspace_size = (workspace_total_size - lhs_sinv_size - rhs_sinv_size) / num_streams;
-  auto swizzled_lhs_sinv_ptr = workspace_ptr;
-  auto swizzled_rhs_sinv_ptr = workspace_ptr + lhs_sinv_size;
-  workspace_ptr += lhs_sinv_size + rhs_sinv_size;
+  auto swizzled_lhs_sinv_ptr = workspace_ptr + workspace_size * num_streams;
+  auto swizzled_rhs_sinv_ptr = swizzled_lhs_sinv_ptr + lhs_sinv_size;
 
   size_t lhs_dtype_bytes = te_dtype_bytes(lhs_dtype);
   size_t rhs_dtype_bytes = te_dtype_bytes(rhs_dtype);
