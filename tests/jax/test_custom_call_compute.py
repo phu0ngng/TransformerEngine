@@ -1214,10 +1214,11 @@ fwd_bwd_dtypes = [
 
 GROUPED_DENSE_INPUT_SHAPES = [
     # (n_groups, m, n, k), the actual m will be multiplied by 32
-    (5, 32, 128, 64),    # Test the case where n_groups is not a multiple of 4
+    (5, 32, 128, 64),  # Test the case where n_groups is not a multiple of 4
     (8, 64, 32, 128),
     (8, 64, 128, 256),
 ]
+
 
 @pytest_parametrize_wrapper("input_shape", GROUPED_DENSE_INPUT_SHAPES)
 class TestGroupedDense:
