@@ -1212,9 +1212,14 @@ fwd_bwd_dtypes = [
     [jnp.float8_e5m2, jnp.float8_e4m3fn],
 ]
 
+GROUPED_DENSE_INPUT_SHAPES = [
+    # (n_groups, m, n, k), the actual m will be multiplied by 32
+    (5, 32, 128, 64),    # Test the case where n_groups is not a multiple of 4
+    (8, 64, 32, 128),
+    (8, 64, 128, 256),
+]
 
-@pytest_parametrize_wrapper("input_shape", [(8, 64, 32, 128)])
-# @pytest_parametrize_wrapper("input_shape", [(2, 2, 32, 2)])
+@pytest_parametrize_wrapper("input_shape", GROUPED_DENSE_INPUT_SHAPES)
 class TestGroupedDense:
     def _ref_grouped_dense(self, lhs, rhs, bias, group_sizes, contracting_dims):
         lhs_contract_dim, _ = contracting_dims
