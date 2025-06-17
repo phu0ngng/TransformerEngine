@@ -559,13 +559,14 @@ def grouped_gemm(
     assert not has_bias or bias.shape == (group_sizes.size, N)
     bias = jnp.empty((), jnp.float32) if bias is None else bias
 
+    group_sizes_host = jax.device_get(group_sizes)
     (out,) = GroupedGemmPrimitive.outer_primitive.bind(
         lhs_data,
         lhs_scale_inv,
         rhs_data,
         rhs_scale_inv,
         bias,
-        group_sizes,
+        group_sizes_host,
         group_offset,
         M=M,
         N=N,

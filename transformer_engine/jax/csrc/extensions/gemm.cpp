@@ -112,21 +112,25 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
                " = ", expected_out_size, ", got ", actual_out_size);
   }
 
-  size_t dim_list_bytes = sizeof(int32_t) * num_gemms;
-  std::vector<int32_t> dim_list_host(num_gemms);
-  auto dim_list_ptr = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
-  cudaMemcpyAsync(dim_list_host.data(), dim_list_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
-                  stream);
-  // Note: This may break cudaGraph.
-  cudaStreamSynchronize(stream);
-  size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
-  if (!is_grouped_dense_wgrad) {
-    NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
-               ", got sum(group_sizes)=", sum_group_sizes);
-  } else {
-    NVTE_CHECK(k == sum_group_sizes, "Unexpected group_sizes! K = ", k,
-               ", got sum(group_sizes)=", sum_group_sizes);
-  }
+  // size_t dim_list_bytes = sizeof(int32_t) * num_gemms;
+  // std::vector<int32_t> dim_list_host(num_gemms);
+  // auto dim_list_ptr = reinterpret_cast<int32_t *>(group_sizes.untyped_data());
+  // cudaMemcpyAsync(dim_list_host.data(), dim_list_ptr, dim_list_bytes, cudaMemcpyDeviceToHost,
+  //                 stream);
+  // // Note: This may break cudaGraph.
+  // cudaStreamSynchronize(stream);
+  std::cerr << "Successfully lowering \n" << std::flush;
+  auto dim_list_host = reinterpret_cast<int32_t*>(group_sizes.untyped_data());
+  std::cerr << "Successfully untyped_data() \n" << std::flush;
+
+  // size_t sum_group_sizes = std::accumulate(dim_list_host.begin(), dim_list_host.end(), 0);
+  // if (!is_grouped_dense_wgrad) {
+  //   NVTE_CHECK(m == sum_group_sizes, "Unexpected group_sizes! M = ", m,
+  //              ", got sum(group_sizes)=", sum_group_sizes);
+  // } else {
+  //   NVTE_CHECK(k == sum_group_sizes, "Unexpected group_sizes! K = ", k,
+  //              ", got sum(group_sizes)=", sum_group_sizes);
+  // }
 
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
   bool grad = false;
@@ -177,7 +181,9 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   for (size_t i = 0; i < num_gemms; i++) {
     // Matrix data shapes
+    std::cerr << "Before dim_list_host[i] \n" << std::flush;
     size_t m_i = dim_list_host[i];
+    std::cerr << "After dim_list_host[i] \n" << std::flush;
     auto lhs_shape_i = std::vector<size_t>{m_i, k};
     auto rhs_shape_i = std::vector<size_t>{rhs_is_trans ? n : k, rhs_is_trans ? k : n};
     auto out_shape_i = std::vector<size_t>{m_i, n};
