@@ -1642,6 +1642,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 warmup_jit_bias_gelu_all_dtypes(
                     self.size_per_partition, seq_length, micro_batch_size
                 )
+        if self.wgrad_store.delay_wgrad_compute():
+            for name, param in self.named_parameters():
+                if name in ["fc1_weight", "fc2_weight", "fc1_bias", "fc2_bias"]:
+                    param.skip_backward_post_hook = True
 
         # These many SMs are subtracted from the total SM count when calling forward
         # and backward LayerNorm C APIs. These envvars can be used to prevent the LN
@@ -1740,7 +1744,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if get_ub("fc2_fprop").is_fp8_ubuf():
                 fp8_output = True
 
-        with self.prepare_forward(inp, num_gemms=2) as inp:
+        with torch.cuda.device(
+            getattr(self, list(self.named_parameters())[0][0]).device
+        ), self.prepare_forward(inp, num_gemms=2) as inp:
 
             quantizers = (
                 self._get_quantizers(fp8_output)
@@ -2150,3 +2156,5 @@ class LayerNormMLP(TransformerEngineBaseModule):
             del fc2_wgrad
             del fc1_wgrad
             del fc1_bias_grad
+            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
+                wgrad_accumulation_and_reduce_hook()

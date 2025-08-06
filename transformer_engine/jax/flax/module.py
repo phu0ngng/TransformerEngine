@@ -31,7 +31,6 @@ from ..cpp_extensions import (
     jax_scaled_upper_triang_masked_softmax,
 )
 from ..quantize import QuantizerFactory, QuantizeConfig, QuantizeMeta, QuantizeMetaSet, ScalingMode
-from ..sharding import get_non_contracting_logical_axes
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -415,6 +414,8 @@ class DenseGeneral(TransformerEngineBase):
         Indicate the logical axes of sharding constraint to the input, like
         (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
         sharding constraint.
+    sequence_parallel_output: bool, default = False
+        Produce a sequence-parallel output with the first non-batch dimension sharded over
 
     Optimization parameters
     -----------------------
@@ -439,6 +440,7 @@ class DenseGeneral(TransformerEngineBase):
     dtype: DType = jnp.float32
     transpose_batch_sequence: bool = False
     input_axes: Tuple[str, ...] = ()
+    sequence_parallel_output: bool = False
 
     def __post_init__(self):
         if self.transpose_batch_sequence:
@@ -511,6 +513,7 @@ class DenseGeneral(TransformerEngineBase):
             input_axes=self.input_axes,
             kernel_axes=self.kernel_axes,
             quantizer_set=quantizer_set,
+            sequence_parallel_output=self.sequence_parallel_output,
         )
 
         if self.enable_low_rank_adaptation:
@@ -936,6 +939,11 @@ class LayerNormMLP(TransformerEngineBase):
         Indicate the logical axes of sharding constraint to the input of 2nd dot, like
         (BATCH_AXES, SEQLEN_AXES, HIDDEN_AXES). Default is None, which means not to insert
         sharding constraint.
+    ffn1_ckpt_name: str = "ffn1"
+        Checkpoint name for the output of the first fully-connected layer in the MLP block.
+    ffn2_ckpt_name: str = "ffn2"
+        Checkpoint name for the output of the second fully-connected layer in the MLP block.
+
 
     Optimization parameters
     -----------------------
@@ -977,6 +985,8 @@ class LayerNormMLP(TransformerEngineBase):
     layernorm_input_axes: Tuple[str, ...] = None
     dot_1_input_axes: Tuple[str, ...] = None
     dot_2_input_axes: Tuple[str, ...] = None
+    ffn1_ckpt_name: str = "ffn1"
+    ffn2_ckpt_name: str = "ffn2"
 
     def __post_init__(self):
         if self.transpose_batch_sequence:
@@ -1146,9 +1156,6 @@ class LayerNormMLP(TransformerEngineBase):
             bias_1 = None
             bias_2 = None
 
-        ffn1_ckpt_name = "ffn1"
-        ffn2_ckpt_name = "ffn2"
-
         if use_fused_layernorm_mlp:
             out = layernorm_mlp(
                 y,
@@ -1164,8 +1171,8 @@ class LayerNormMLP(TransformerEngineBase):
                 dot_2_input_axes=self.dot_2_input_axes,
                 kernel_1_axes=self.kernel_axes_1,
                 kernel_2_axes=self.kernel_axes_2,
-                ffn1_ckpt_name=ffn1_ckpt_name,
-                ffn2_ckpt_name=ffn2_ckpt_name,
+                ffn1_ckpt_name=self.ffn1_ckpt_name,
+                ffn2_ckpt_name=self.ffn2_ckpt_name,
                 activation_type=normalized_acts,
                 quantizer_sets=(ffn1_quantizer_set, ffn2_quantizer_set),
             )
@@ -1197,15 +1204,6 @@ class LayerNormMLP(TransformerEngineBase):
                     kernel_axes=self.kernel_axes_1,
                     quantizer_set=ffn1_quantizer_set,
                 )
-
-            if self.dot_1_input_axes is not None and self.kernel_axes_1 is not None:
-                dot_1_output_axes = (
-                    *get_non_contracting_logical_axes(y.ndim, self.dot_1_input_axes, axis),
-                    *get_non_contracting_logical_axes(
-                        kernel_1.ndim, self.kernel_axes_1, contract_ind
-                    ),
-                )
-                x = with_sharding_constraint_by_logical_axes(x, dot_1_output_axes)
 
             if self.enable_low_rank_adaptation:
                 wi_lora_a_kernel_each_shape = (
@@ -1247,7 +1245,7 @@ class LayerNormMLP(TransformerEngineBase):
             if self.use_bias:
                 x += jnp.reshape(bias_1, bias_1_shape)
 
-            x = checkpoint_name(x, ffn1_ckpt_name)
+            x = checkpoint_name(x, self.ffn1_ckpt_name)
             if is_act_implemented:
                 z = activation(x, normalized_acts)
             else:
@@ -1310,7 +1308,7 @@ class LayerNormMLP(TransformerEngineBase):
             if self.use_bias:
                 out += jnp.reshape(bias_2, (1,) * (out.ndim - 1) + (-1,))
 
-            out = checkpoint_name(out, ffn2_ckpt_name)
+            out = checkpoint_name(out, self.ffn2_ckpt_name)
 
         assert out.dtype == input_dtype
         return out, ln_output  # Output, layner_norm_output
