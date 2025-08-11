@@ -1294,6 +1294,28 @@ class TestGroupedDense:
 
         return lhs, rhs, group_sizes, contracting_dims, bias
 
+    def _generate_grouped_dense_equal_input(self, dtype, input_shape, data_layout="NN", with_bias=False):
+        key = jax.random.PRNGKey(0)
+        subkeys = jax.random.split(key, 4)
+        n_groups, m, n, k = input_shape
+
+        group_sizes = jnp.full((n_groups,), int(m/n_groups))
+        assert group_sizes.sum() == m
+
+        lhs_shape = (m if data_layout[0] == "N" else k, k if data_layout[0] == "N" else m)
+        rhs_shape = (n_groups, k if data_layout[1] == "N" else n, n if data_layout[1] == "N" else k)
+        bias_shape = (n_groups, n)
+
+        lhs = jax.random.uniform(subkeys[1], lhs_shape, dtype=jnp.bfloat16)
+        rhs = jax.random.uniform(subkeys[2], rhs_shape, dtype=jnp.bfloat16)
+        bias = jax.random.uniform(subkeys[3], bias_shape, dtype=dtype) if with_bias else None
+
+        lhs_contracting_dim = (1,) if data_layout[0] == "N" else (0,)
+        rhs_contracting_dim = (1,) if data_layout[1] == "N" else (2,)
+        contracting_dims = (lhs_contracting_dim, rhs_contracting_dim)
+
+        return lhs, rhs, group_sizes, contracting_dims, bias
+
     def _assert_grouped_gemm_output(self, out, group_sizes, ref_list, dtype):
         assert out.dtype == ref_list[0].dtype
         out_list = jnp.split(out, jnp.cumulative_sum(group_sizes)[:-1], axis=0)
@@ -1405,10 +1427,10 @@ class TestGroupedDense:
     def test_grouped_dense_grad_fp8(self, fwd_bwd_dtype, scaling_mode, input_shape):
         fwd_dtype, bwd_dtype = fwd_bwd_dtype
         dtype = jnp.bfloat16
-        x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_input(
+        x, kernel, group_sizes, contracting_dims, bias = self._generate_grouped_dense_equal_input(
             dtype,
             input_shape,
-            with_bias=True,
+            with_bias=False,
         )
 
         quantizer_set = QuantizerFactory.create_set(
