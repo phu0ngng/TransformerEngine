@@ -46,6 +46,7 @@ if is_fp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.Float8CurrentScaling(), id="CurrentScaling"))
 if is_mxfp8_supported:
     SUPPORTED_RECIPES.append(pytest.param(recipe.MXFP8BlockScaling(), id="MXFP8BlockScaling"))
+SUPPORTED_RECIPES_WITH_SHARDY = SUPPORTED_RECIPES[:-1] if is_mxfp8_supported else SUPPORTED_RECIPES
 
 DTYPES = [jnp.bfloat16, jnp.float16]
 INPUT_SHAPE = [[4, 64, 128]]  # [batch, seqlen, hidden_in]
@@ -74,6 +75,15 @@ def generate_fsdp_and_tp_configs():
             [4, (2, 2), ("fsdp", "tp"), MeshResource(fsdp_resource="fsdp", tp_resource="tp")]
         )
     return configs
+
+
+def use_jax_fp8_gemm(enabled=False):
+    import os
+
+    if enabled:
+        os.environ["NVTE_JAX_CUSTOM_CALLS_RE"] = "^(?!GemmPrimitive$).+$"
+    elif "NVTE_JAX_CUSTOM_CALLS_RE" in os.environ:
+        os.environ.pop("NVTE_JAX_CUSTOM_CALLS_RE")
 
 
 class TestDistributedLayernormMLP:
@@ -158,6 +168,7 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
+        use_jax_fp8_gemm(enabled=with_jax_gemm)
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
@@ -318,6 +329,7 @@ class TestDistributedLayernormMLP:
         use_shardy,
         with_jax_gemm,
     ):
+        use_jax_fp8_gemm(enabled=with_jax_gemm)
         jax.config.update("jax_use_shardy_partitioner", use_shardy)
         batch, seqlen, hidden_in = input_shape
         layernorm_type = "rmsnorm"

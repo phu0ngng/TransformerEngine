@@ -30,6 +30,8 @@ def dense(
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (0,)),
     input_axes: Tuple[str, ...] = None,
     kernel_axes: Tuple[str, ...] = None,
+    batch_first: bool = True,
+    comm_overlaps: tex.CommOverlapHelperSet = tex.CommOverlapHelperSet(),
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ):
     """Perform dense layer transformation with optional quantization.
@@ -43,6 +45,8 @@ def dense(
         kernel: Weight matrix for the dense layer transformation
         bias: Optional bias tensor to add after the transformation
         contracting_dims: Tuple of sequences specifying which dimensions to contract
+        batch_first: Assume that X is batched in the first dimension.
+        comm_overlaps: A set of CommOverlapHelper objecst for FPROP, DGRAD and WGRAD GEMMs.
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
 
     Returns:
@@ -63,19 +67,13 @@ def dense(
             contracting_dims,
             input_axes,
             kernel_axes,
+            comm_overlaps,
             quantizer_set,
         )
     return output
 
 
-@partial(
-    jax.custom_vjp,
-    nondiff_argnums=(
-        3,
-        4,
-        5,
-    ),
-)
+@partial(jax.custom_vjp, nondiff_argnums=( 3, 4, 5,))
 def _dense(
     x,
     kernel,
@@ -83,6 +81,7 @@ def _dense(
     contracting_dims,
     input_axes,
     kernel_axes,
+    comm_overlaps,
     quantizer_set,
 ):
     """Internal implementation of dense layer transformation with custom VJP.
@@ -97,6 +96,8 @@ def _dense(
         contracting_dims: Contracting dimensions specification
         input_axes: Logical axes for sharding the activation input
         kernel_axes: Logical axes for sharding the weight matrix
+        batch_first: Assume that X is batched in the first dimension.
+        comm_overlaps: A set of CommOverlapHelper objecst for FPROP, DGRAD and WGRAD GEMMs.
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
 
     Returns:
@@ -109,6 +110,7 @@ def _dense(
         contracting_dims,
         input_axes,
         kernel_axes,
+        comm_overlaps,
         quantizer_set,
     )
     return output
@@ -121,6 +123,7 @@ def _dense_fwd_rule(
     contracting_dims,
     input_axes,
     kernel_axes,
+    comm_overlaps,
     quantizer_set,
 ):
     """Forward pass rule for dense layer transformation.
@@ -163,6 +166,7 @@ def _dense_fwd_rule(
         contracting_dims=(x_contracting_dims, k_contracting_dims),
         bias=bias if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
+        comm_overlap=comm_overlaps.fprop,
     )
 
     if use_bias and tex.gemm_uses_jax_dot():
@@ -177,12 +181,13 @@ def _dense_fwd_rule(
         use_bias,
         quantizer_set,
         flatten_axis_k,
+        x_bdim,
     )
     return output, ctx
 
 
 def _dense_bwd_rule(
-    contracting_dims, input_axes, kernel_axes, ctx, grad
+    contracting_dims, input_axes, kernel_axes, batch_first, comm_overlaps, ctx, grad
 ):  # pylint: disable=unused-argument
     """Backward pass rule for dense layer transformation.
 
@@ -197,6 +202,7 @@ def _dense_bwd_rule(
         use_bias,
         quantizer_set,
         flatten_axis_k,
+        x_bdim,
     ) = ctx
 
     fwd_x_contracting_dims, fwd_k_contracting_dims = map(
@@ -210,6 +216,27 @@ def _dense_bwd_rule(
         quantizer=quantizer_set.dgrad,
         noop_scaled_tensor=True,
     )
+    casted_grad = with_sharding_constraint_by_logical_axes(
+        casted_grad,
+        comm_overlaps.fprop.get_logical_output_axes(
+            input_axes, kernel_axes, (contracting_dims, ((x_bdim,), ()))
+        ),
+    )
+
+    # If casted_x has transposed data-layout, we need to untranspose it here, and then transpose
+    # it back after the bulk-AG. This should ideally never be necessary if the data layouts are
+    # handled correctly in the tensor usages.
+    dgrad_aux_in = None
+    dgrad_aux_transposed_axes = (
+        *tuple(range(casted_x_lhs.flatten_axis, casted_x_lhs.ndim)),
+        *tuple(range(casted_x_lhs.flatten_axis)),
+    )
+    if comm_overlaps.dgrad.is_bulk() and not comm_overlaps.fprop.output_all_gathered_lhs:
+        dgrad_aux_in = (
+            casted_x_lhs.data.transpose(dgrad_aux_transposed_axes)
+            if casted_x_lhs.data_layout == "T"
+            else casted_x_lhs.data
+        )
 
     # GEMM NT
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
@@ -225,8 +252,9 @@ def _dense_bwd_rule(
         casted_grad.get_tensor(usage=TensorUsage.LHS),
         casted_kernel_rhs,
         contracting_dims=(g_contracting_dim, k_contracting_dim),
+        comm_overlap=comm_overlaps.dgrad,
+        aux_in=dgrad_aux_in,
     )
-    dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
 
     # GEMM TN
     # x_non_contracting_dims
@@ -234,13 +262,42 @@ def _dense_bwd_rule(
         range(0, len(x_shape) - len(fwd_x_contracting_dims))
     )
 
+    casted_grad_rhs = casted_grad.get_tensor(usage=TensorUsage.RHS)
+    if comm_overlaps.dgrad.is_bulk() and not comm_overlaps.fprop.output_all_gathered_lhs:
+        # LHS was bulk all-gathered during DGRAD and returned as auxiliary input
+        casted_x_lhs.data = (
+            dgrad[-1].transpose(dgrad_aux_transposed_axes)
+            if casted_x_lhs.data_layout == "T"
+            else dgrad[-1]
+        )
+        # DGRAD output will need to be bulk reduce-scattered during WGRAD
+        dgrad = dgrad[0]
+    elif comm_overlaps.dgrad.is_all_gather() and comm_overlaps.dgrad.output_all_gathered_lhs:
+        # GRAD was all-gathered for DGRAD and a copy of the gathered GRAD is in the auxiliary output
+        casted_grad_rhs.data = (
+            dgrad[-1].transpose(
+                *range(casted_grad_rhs.flatten_axis, casted_grad_rhs.ndim),
+                *range(casted_grad_rhs.flatten_axis),
+            )
+            if casted_grad_rhs.data_layout == "T"
+            else dgrad[-1]
+        )
+        dgrad = dgrad[0]
+
     wgrad = tex.gemm(
         casted_x_lhs,
-        casted_grad.get_tensor(usage=TensorUsage.RHS),
+        casted_grad_rhs,
         contracting_dims=(x_contracting_dim, g_contracting_dim),
+        comm_overlap=comm_overlaps.wgrad,
+        aux_in=(dgrad if comm_overlaps.wgrad.is_bulk() else None),
     )
-    wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
+    if comm_overlaps.wgrad.is_bulk():
+        # DGRAD was bulk reduce-scattered during WGRAD and returned as auxiliary output
+        dgrad = wgrad[-1]
+        wgrad = wgrad[0]
 
+    dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
+    wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
     return dgrad, wgrad, dbias, quantizer_set
 
 
