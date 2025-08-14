@@ -313,14 +313,14 @@ def _layernorm_mlp_fwd_rule(
         fuse_bias=use_bias_1 if not tex.gemm_uses_jax_dot() else False,
         comm_overlap=ffn1_comm_overlaps.fprop,
     )
-    dot_1_output = with_sharding_constraint_by_logical_axes(
-        dot_1_output,
-        ffn1_comm_overlaps.fprop.get_logical_output_axes(
-            dot_1_input_axes,
-            kernel_1_axes,
-            ((x_contracting_dims, k_contracting_dims), ((x_bdim,), ())),
-        ),
-    )
+    # dot_1_output = with_sharding_constraint_by_logical_axes(
+    #     dot_1_output,
+    #     ffn1_comm_overlaps.fprop.get_logical_output_axes(
+    #         dot_1_input_axes,
+    #         kernel_1_axes,
+    #         ((x_contracting_dims, k_contracting_dims), ((x_bdim,), ())),
+    #     ),
+    # )
 
     if use_bias_1 and tex.gemm_uses_jax_dot():
         bias_1_shape = bias_1.shape
@@ -444,14 +444,14 @@ def _layernorm_mlp_bwd_rule(
     casted_grad, dbias_2 = tex.quantize_dbias(
         grad, is_dbias=use_bias_2, quantizer=ffn1_quantizer_set.dgrad, noop_scaled_tensor=True
     )
-    casted_grad = with_sharding_constraint_by_logical_axes(
-        casted_grad,
-        ffn2_comm_overlaps.fprop.get_logical_output_axes(
-            dot_2_input_axes,
-            kernel_2_axes,
-            ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim,), ())),
-        ),
-    )
+    # casted_grad = with_sharding_constraint_by_logical_axes(
+    #     casted_grad,
+    #     ffn2_comm_overlaps.fprop.get_logical_output_axes(
+    #         dot_2_input_axes,
+    #         kernel_2_axes,
+    #         ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim,), ())),
+    #     ),
+    # )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
     g_contracting_dims_2 = tuple(
@@ -511,14 +511,14 @@ def _layernorm_mlp_bwd_rule(
         quantizer=ffn2_quantizer_set.dgrad,
         noop_scaled_tensor=True,
     )
-    casted_dact_out = with_sharding_constraint_by_logical_axes(
-        casted_dact_out,
-        ffn1_comm_overlaps.fprop.get_logical_output_axes(
-            dot_1_input_axes,
-            kernel_1_axes,
-            ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim,), ())),
-        ),
-    )
+    # casted_dact_out = with_sharding_constraint_by_logical_axes(
+    #     casted_dact_out,
+    #     ffn1_comm_overlaps.fprop.get_logical_output_axes(
+    #         dot_1_input_axes,
+    #         kernel_1_axes,
+    #         ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim,), ())),
+    #     ),
+    # )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
     dact_out_ndim = casted_dact_out.get_tensor(TensorUsage.LHS).data.ndim
@@ -541,6 +541,7 @@ def _layernorm_mlp_bwd_rule(
         *tuple(range(casted_ln_out.flatten_axis)),
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
+
     if ffn1_comm_overlaps.dgrad.is_bulk() and not ffn1_comm_overlaps.fprop.output_all_gathered_lhs:
         dgrad_1_aux_in = (
             casted_ln_out.data.transpose(ln_out_transposed_dims)

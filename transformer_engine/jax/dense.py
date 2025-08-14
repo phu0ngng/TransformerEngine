@@ -216,12 +216,12 @@ def _dense_bwd_rule(
         quantizer=quantizer_set.dgrad,
         noop_scaled_tensor=True,
     )
-    casted_grad = with_sharding_constraint_by_logical_axes(
-        casted_grad,
-        comm_overlaps.fprop.get_logical_output_axes(
-            input_axes, kernel_axes, (contracting_dims, ((x_bdim,), ()))
-        ),
-    )
+    # casted_grad = with_sharding_constraint_by_logical_axes(
+    #     casted_grad,
+    #     comm_overlaps.fprop.get_logical_output_axes(
+    #         input_axes, kernel_axes, (contracting_dims, ((x_bdim,), ()))
+    #     ),
+    # )
 
     # If casted_x has transposed data-layout, we need to untranspose it here, and then transpose
     # it back after the bulk-AG. This should ideally never be necessary if the data layouts are

@@ -1281,7 +1281,6 @@ class GemmPrimitive(BasePrimitive):
         grad,
         use_split_accumulator,
         comm_overlap
-        comm_overlap,
     ):
         assert GemmPrimitive.outer_primitive is not None
         lhs_bdims, _, rhs_bdims, aux_in_bdims = batch_dims
@@ -1445,6 +1444,7 @@ class GemmPrimitive(BasePrimitive):
         # TODO
         dimension_numbers = (contracting_dims, ((), ()))
         lhs_specs, _, rhs_specs, *_, aux_in_specs = map(get_padded_spec, arg_infos)
+
         (_, (out_specs, bias_grad_specs, pre_gelu_specs, aux_out_specs), *_) = (
             comm_overlap.get_partitioning_rules(
                 lhs_specs, rhs_specs, aux_in_specs, dimension_numbers

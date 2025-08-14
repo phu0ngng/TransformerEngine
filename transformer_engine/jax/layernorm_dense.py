@@ -249,7 +249,6 @@ def _layernorm_dense_fwd_rule(
         )
         output = output[0]
 
->>>>>>> jax/collective-gemm-api
     if use_bias and tex.gemm_uses_jax_dot():
         bias_new_shape = (1,) * (output.ndim - bias.ndim) + bias.shape
         output += jnp.reshape(bias, bias_new_shape)
@@ -325,14 +324,14 @@ def _layernorm_dense_bwd_rule(
         noop_scaled_tensor=True,
     )
     # TODO: double check if this sharding constraints is correct
-    casted_grad = with_sharding_constraint_by_logical_axes(
-        casted_grad,
-        comm_overlaps.fprop.get_logical_output_axes(
-            dot_input_axes,
-            kernel_axes,
-            ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim,), ())),
-        ),
-    )
+    # casted_grad = with_sharding_constraint_by_logical_axes(
+    #     casted_grad,
+    #     comm_overlaps.fprop.get_logical_output_axes(
+    #         dot_input_axes,
+    #         kernel_axes,
+    #         ((x_contracting_dims_in_fwd, k_contracting_dims_in_fwd), ((x_bdim,), ())),
+    #     ),
+    # )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel.ndim
     g_constracting_dim = tuple(
