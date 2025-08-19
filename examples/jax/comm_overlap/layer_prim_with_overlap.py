@@ -61,7 +61,7 @@ def _te_layer_prim(prim_name):
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-dp", "--dp-size", type=int, default=1)
-parser.add_argument("-zp", "--fsdp-size", type=int, default=2)
+parser.add_argument("-fsdp", "--fsdp-size", type=int, default=2)
 parser.add_argument("-tp", "--tp-size", type=int, default=numranks // 2)
 parser.add_argument("-np", "--num-gpus", type=int, default=numranks)
 parser.add_argument("--batch-size", type=int, default=2)
@@ -168,7 +168,7 @@ with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
     output_serial, grads_serial = fwd_bwd_serial(x, gamma, beta, kernel_1, bias_1, kernel_2, bias_2)
 
 # Device mesh and logical axis resources
-DEVICE_FSDP_AXIS = "zp"
+DEVICE_FSDP_AXIS = "fsdp"
 DEVICE_DP_AXIS = "dp"
 DEVICE_TP_AXIS = "tp"
 mesh_shape = {DEVICE_TP_AXIS: args.tp_size}
