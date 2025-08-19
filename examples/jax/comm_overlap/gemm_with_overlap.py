@@ -32,7 +32,7 @@ jax.distributed.initialize(cluster_detection_method="mpi4py")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-dp", "--dp-size", type=int, default=1)
-parser.add_argument("-zp", "--fsdp-size", type=int, default=2)
+parser.add_argument("-fsdp", "--fsdp-size", type=int, default=2)
 parser.add_argument("-tp", "--tp-size", type=int, default=numranks // 2)
 parser.add_argument("-np", "--num-gpus", type=int, default=numranks)
 parser.add_argument("--batch-size", type=int, default=2)
@@ -66,16 +66,16 @@ weight_specs = [None] * len(rhs_shape)
 if batched:
     lhs_shape = [args.batch_size] + lhs_shape
     if fsdp:
-        mesh_shape = {"dp": args.dp_size, "zp": args.fsdp_size, "tp": args.tp_size}
+        mesh_shape = {"dp": args.dp_size, "fsdp": args.fsdp_size, "tp": args.tp_size}
         mesh_resource = te.MeshResource(
-            dp_resource="dp", tp_resource="tp", cp_resource="tp", fsdp_resource="zp"
+            dp_resource="dp", tp_resource="tp", cp_resource="tp", fsdp_resource="fsdp"
         )
         if args.comm_type == "AG":
-            input_specs = [("dp", "zp"), "tp", None]
-            weight_specs = ["zp", "tp"]
+            input_specs = [("dp", "fsdp"), "tp", None]
+            weight_specs = ["fsdp", "tp"]
         elif args.comm_type == "RS":
-            input_specs = [("dp", "zp"), None, "tp"]
-            weight_specs = ["tp", "zp"]
+            input_specs = [("dp", "fsdp"), None, "tp"]
+            weight_specs = ["tp", "fsdp"]
     else:
         mesh_shape = {"dp": args.dp_size, "tp": args.tp_size}
         mesh_resource = te.MeshResource(
@@ -91,14 +91,14 @@ if batched:
             weight_specs = ["tp", None]
 else:
     if fsdp:
-        mesh_shape = {"zp": args.fsdp_size, "tp": args.tp_size}
-        mesh_resource = te.MeshResource(fsdp_resource="zp", tp_resource="tp", cp_resource="cp")
+        mesh_shape = {"fsdp": args.fsdp_size, "tp": args.tp_size}
+        mesh_resource = te.MeshResource(fsdp_resource="fsdp", tp_resource="tp", cp_resource="cp")
         if args.comm_type == "AG":
             input_specs = ["tp", None]
-            weight_specs = ["zp", "tp"]
+            weight_specs = ["fsdp", "tp"]
         elif args.comm_type == "RS":
             input_specs = [None, "tp"]
-            weight_specs = ["tp", "zp"]
+            weight_specs = ["tp", "fsdp"]
     else:
         mesh_shape = {"tp": args.tp_size}
         mesh_resource = te.MeshResource(tp_resource="tp", cp_resource="cp")
