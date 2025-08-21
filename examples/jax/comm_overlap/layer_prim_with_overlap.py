@@ -71,8 +71,8 @@ parser.add_argument("--batch-size", type=int, default=2)
 parser.add_argument("--seq-length", type=int, default=8192)
 parser.add_argument("--hidden-size", type=int, default=16384)
 parser.add_argument("--activation-size", type=int, default=53248)
-parser.add_argument("--no-batch", action="store_true")
-parser.add_argument("--no-fsdp", action="store_true")
+parser.add_argument("--no-batch", type=bool, default=True)
+parser.add_argument("--no-fsdp", type=bool, default=True)
 parser.add_argument("--layer-type", type=_te_layer_prim, default=dense, choices=_supported_prims)
 parser.add_argument(
     "--fp8-recipe", type=str.lower, default="none", choices=["none", "current", "delayed", "mxfp8"]
@@ -178,17 +178,20 @@ with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
 DEVICE_FSDP_AXIS = "fsdp"
 DEVICE_DP_AXIS = "dp"
 DEVICE_TP_AXIS = "tp"
-mesh_shape = {DEVICE_TP_AXIS: args.tp_size}
-if not args.no_batch:
+mesh_shape = {}
+
+if args.tp_size != 1:
+    mesh_shape[DEVICE_TP_AXIS] = args.tp_size
+if args.dp_size != 1:
     mesh_shape[DEVICE_DP_AXIS] = args.dp_size
-if not args.no_fsdp:
+if args.fsdp_size != 1:
     mesh_shape[DEVICE_FSDP_AXIS] = args.fsdp_size
 devices = mesh_utils.create_device_mesh((n_gpus,), devices=jax.devices()[: n_gpus])
 mesh = Mesh(np.array(devices).reshape(tuple(mesh_shape.values())), tuple(mesh_shape.keys()))
 mesh_resource = MeshResource(
-    dp_resource=None if args.no_batch else DEVICE_DP_AXIS,
-    fsdp_resource=None if args.no_fsdp else DEVICE_FSDP_AXIS,
-    tp_resource=DEVICE_TP_AXIS,
+    dp_resource=None if args.dp_size == 1 else DEVICE_DP_AXIS,
+    fsdp_resource=None if args.fsdp_size == 1 else DEVICE_FSDP_AXIS,
+    tp_resource=None if args.tp_size == 1 else DEVICE_TP_AXIS,
 )
 if myrank == 0:
     print(f"[{myrank}|{numranks}] Device mesh: {mesh}\n")
