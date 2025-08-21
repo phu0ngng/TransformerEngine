@@ -39,6 +39,8 @@ from transformer_engine.jax.cpp_extensions import CommOverlapHelper, CommOverlap
 
 import transformer_engine_jax as tex
 
+from common import assert_allclose
+
 # This script needs to be launched via `mpirun` with 1 process per GPU
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 myrank = MPI.COMM_WORLD.Get_rank()
@@ -262,7 +264,7 @@ def _eval_layer_sharded(
             "ffn2_comm_overlaps": comm_overlaps_[1],
         }
 
-    return jnp.mean(layer_type_(*layer_args, **layer_kwargs))
+    return jnp.mean(layer_type_(*layer_args, **layer_kwargs).astype(jnp.float32))
 
 
 with (
@@ -343,18 +345,8 @@ with (
     )
 
 if args.check_result:
-    diff = jnp.abs(output_serial - output_sharded)
-    if myrank == 0:
-        print(
-            f"[{myrank}|{numranks}] Output: serial = {output_serial} | sharded = {output_sharded}"
-        )
-    rel_err = diff / max(abs(diff), 1e-5)
-    if rel_err > 0.02 and diff > 0.001:
-        if myrank == 0:
-            print("NUMERICAL CHECK_FAILED: Output not close enough!\n")
-    else:
-        if myrank == 0:
-            print("NUMERICAL CHECK PASSED\n")
+    assertion_dtype = jnp.bfloat16
+    assert_allclose(output_sharded, output_serial, dtype=assertion_dtype)
 
     labels = ("dX", "dGamma", "dBeta", "dKernel_1", "dBias_1", "dKernel_2", "dBias_2")
     for i, (serial, sharded) in enumerate(zip(grads_serial, grads_sharded)):
@@ -368,34 +360,5 @@ if args.check_result:
                 sharded, NamedSharding(mesh, PartitionSpec(None))
             )
             jax.block_until_ready(gathered)
-            diff = jnp.abs(serial - gathered).flatten()
-            if myrank == 0:
-                print(f"{myrank}: Global {labels[i]} difference: {diff}\n", flush=True)
-
-            m = jnp.argmax(diff).item()
-            abs_err = diff[m].item()
-            rel_err = abs_err / max(abs(output_serial.flatten()[m]), 1e-5)
-
-            rtol = 0.02
-            atol = 0.001
-            if rel_err > rtol and abs_err > atol:
-                numerics_info = (
-                    "NUMERICAL CHECK FAILED: "
-                    + f"{labels[i]} not close enough at index {m} "
-                    + f"with {gathered.flatten()[m].item()} vs {serial.flatten()[m].item()} "
-                    + f"| rel. error = {rel_err} (tol = {rtol}) "
-                    + f"| abs. error = {abs_err} (tol = {atol})"
-                )
-            else:
-                numerics_info = "NUMERICAL CHECK PASSED: "
-                if rel_err <= rtol:
-                    numerics_info += f"rel. error = {rel_err} (tol = {rtol})" + (
-                        " | " if abs_err < atol else ""
-                    )
-                if abs_err <= atol:
-                    numerics_info += f"abs. error = {abs_err} (tol = {atol})"
-
-            if myrank == 0:
-                print(numerics_info + "\n", end="", flush=True)
-
+            assert_allclose(serial, gathered, dtype=assertion_dtype)
 tex.destroy_all_comm_overlap_buffers()
