@@ -114,10 +114,12 @@ int64_t CreateCommOverlapBuffer(CommOverlapType comm_type, CommOverlapMethod met
                num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
                set_sm_margin, use_ce, atomic_gemm, rs_overlap_first_gemm, aggregate_ag);
 
+  // TODO(This should be implemented in TE/Common)
   auto it = comm_overlaps.find(unique_id);
   if (it == comm_overlaps.end()) {
     if (method == CommOverlapMethod::RING_EXCHANGE) {
       comm_overlaps[unique_id] = reinterpret_cast<CommOverlapCore *>(
+        // TODO: should use smart pointer here
           new CommOverlapP2PBase(buffer_shape, buffer_dtype, tp_size, comm_type, num_max_streams,
                                  comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
                                  set_sm_margin, use_ce, atomic_gemm, aggregate_ag));

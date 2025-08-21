@@ -864,6 +864,7 @@ class CommOverlapHelperSet:
         self._sanity_check()
 
         if self.fprop is None:
+            # TODO: Why CommOverlapHelper is init with empty buffer size here
             object.__setattr__(self, "fprop", CommOverlapHelper())
 
         # Column-parallel layers: QKV projection and MLP FFN1
