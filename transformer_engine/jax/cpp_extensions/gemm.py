@@ -204,6 +204,65 @@ class CommOverlapHelper:
     gather_dim: int = field(default=-2, init=False, compare=False)
     scatter_dim: int = field(default=-2, init=False, compare=False)
 
+    def __hash__(self):
+        """Compute hash based on the hashable fields of CommOverlapHelper."""
+        # Include all fields that are used for comparison, excluding internal state fields
+        # Ensure all items are hashable by handling None values and converting sequences to tuples
+        hashable_fields = (
+            self.comm_type,
+            self.method,
+            tuple(self.buffer_shape) if self.buffer_shape is not None else None,
+            str(self.buffer_dtype) if self.buffer_dtype is not None else None,  # Convert dtype to string
+            self.tp_size,
+            self.num_splits,
+            self.num_max_streams,
+            self.comm_cga_size,
+            self.gemm_priority,
+            self.comm_priority,
+            self.num_comm_sm,
+            self.set_sm_margin,
+            self.use_ce,
+            self.atomic_gemm,
+            self.rs_overlap_first_gemm,
+            self.aggregate_ag,
+            str(self.tp_resource) if self.tp_resource is not None else None,  # Convert to string
+            str(self.logical_tp_axis) if self.logical_tp_axis is not None else None,  # Convert to string
+            str(self.logical_sp_axis) if self.logical_sp_axis is not None else None,  # Convert to string
+            self.output_all_gathered_lhs,
+            self.flatten_axis,
+        )
+        return hash(hashable_fields)
+
+    def __eq__(self, other):
+        """Compare two CommOverlapHelper objects for equality."""
+        if not isinstance(other, CommOverlapHelper):
+            return False
+        
+        # Compare all fields that define the configuration
+        return (
+            self.comm_type == other.comm_type and
+            self.method == other.method and
+            self.buffer_shape == other.buffer_shape and
+            self.buffer_dtype == other.buffer_dtype and
+            self.tp_size == other.tp_size and
+            self.num_splits == other.num_splits and
+            self.num_max_streams == other.num_max_streams and
+            self.comm_cga_size == other.comm_cga_size and
+            self.gemm_priority == other.gemm_priority and
+            self.comm_priority == other.comm_priority and
+            self.num_comm_sm == other.num_comm_sm and
+            self.set_sm_margin == other.set_sm_margin and
+            self.use_ce == other.use_ce and
+            self.atomic_gemm == other.atomic_gemm and
+            self.rs_overlap_first_gemm == other.rs_overlap_first_gemm and
+            self.aggregate_ag == other.aggregate_ag and
+            self.tp_resource == other.tp_resource and
+            self.logical_tp_axis == other.logical_tp_axis and
+            self.logical_sp_axis == other.logical_sp_axis and
+            self.output_all_gathered_lhs == other.output_all_gathered_lhs and
+            self.flatten_axis == other.flatten_axis
+        )
+
     def __post_init__(self):
         # Update global min/max CUDA stream priority values if not already done
         global CUDA_STREAM_PRIORITY_LOWEST, CUDA_STREAM_PRIORITY_HIGHEST
@@ -783,6 +842,19 @@ class CommOverlapHelperSet:
     fprop: CommOverlapHelper = field(default=None)
     dgrad: CommOverlapHelper = field(default=None)
     wgrad: CommOverlapHelper = field(default=None)
+
+    def __hash__(self):
+        """Compute hash based on the hash of individual CommOverlapHelper objects."""
+        # Use a tuple of hashes for consistent hashing
+        return hash((hash(self.fprop), hash(self.dgrad), hash(self.wgrad)))
+
+    def __eq__(self, other):
+        """Compare two CommOverlapHelperSet objects for equality."""
+        if not isinstance(other, CommOverlapHelperSet):
+            return False
+        return (self.fprop == other.fprop and 
+                self.dgrad == other.dgrad and 
+                self.wgrad == other.wgrad)
 
     def _sanity_check(self):
         # Require any argument that exists to be a `CommOverlapHelper` instance
