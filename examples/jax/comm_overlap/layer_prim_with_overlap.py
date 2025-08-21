@@ -61,9 +61,10 @@ def _te_layer_prim(prim_name):
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-dp", "--dp-size", type=int, default=1)
-parser.add_argument("-fsdp", "--fsdp-size", type=int, default=2)
-parser.add_argument("-tp", "--tp-size", type=int, default=numranks // 2)
-parser.add_argument("-np", "--num-gpus", type=int, default=numranks)
+# parser.add_argument("-fsdp", "--fsdp-size", type=int, default=2)
+parser.add_argument("-fsdp", "--fsdp-size", type=int, default=1)
+# parser.add_argument("-tp", "--tp-size", type=int, default=numranks // 2)
+parser.add_argument("-tp", "--tp-size", type=int, default=1)
 parser.add_argument("--batch-size", type=int, default=2)
 parser.add_argument("--seq-length", type=int, default=8192)
 parser.add_argument("--hidden-size", type=int, default=16384)
@@ -74,9 +75,13 @@ parser.add_argument("--layer-type", type=_te_layer_prim, default=dense, choices=
 parser.add_argument(
     "--fp8-recipe", type=str.lower, default="none", choices=["none", "current", "delayed", "mxfp8"]
 )
-parser.add_argument("--check-result", action="store_true")
+# parser.add_argument("--check-result", action="store_true")
+parser.add_argument("--check-result", type=bool, default=True)
 parser.add_argument("--seed", type=int, default=42)
 args = parser.parse_args()
+
+n_gpus = args.dp_size * args.fsdp_size * args.tp_size
+assert n_gpus == numranks, f"We need {n_gpus} processes for {n_gpus} GPUs, got {numranks}!"
 
 # FP8 recipe
 fp8_recipe = None
@@ -176,7 +181,7 @@ if not args.no_batch:
     mesh_shape[DEVICE_DP_AXIS] = args.dp_size
 if not args.no_fsdp:
     mesh_shape[DEVICE_FSDP_AXIS] = args.fsdp_size
-devices = mesh_utils.create_device_mesh((args.num_gpus,), devices=jax.devices()[: args.num_gpus])
+devices = mesh_utils.create_device_mesh((n_gpus,), devices=jax.devices()[: n_gpus])
 mesh = Mesh(np.array(devices).reshape(tuple(mesh_shape.values())), tuple(mesh_shape.keys()))
 mesh_resource = MeshResource(
     dp_resource=None if args.no_batch else DEVICE_DP_AXIS,
