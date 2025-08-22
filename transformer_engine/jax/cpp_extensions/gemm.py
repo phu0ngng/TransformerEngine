@@ -196,7 +196,6 @@ class CommOverlapHelper:
     tp_resource: str = field(default_factory=lambda: global_mesh_resource().tp_resource)
     logical_tp_axis: str = field(default=W_TP_AXES, kw_only=True)
     logical_sp_axis: str = field(default=SEQLEN_TP_AXES, kw_only=True)
-    output_all_gathered_lhs: bool = field(default=False, kw_only=True)
     flatten_axis: int = field(default=-1, kw_only=True)
 
     # Internal attributes
@@ -314,9 +313,7 @@ class CommOverlapHelper:
 
     def has_aux_output(self):
         """Check if the comm+GEMM overlap has an auxiliary output."""
-        return self.is_enabled and (
-            self.is_bulk() or (self.is_all_gather() and self.output_all_gathered_lhs)
-        )
+        return self.is_enabled and self.is_bulk()
 
     def get_bootstrap_args_kwargs(self):
         """Generate positional and keyword arguments to bootstrap Userbuffers."""
@@ -614,10 +611,6 @@ class CommOverlapHelper:
 
         # Auxiliary input/output specs depend on bulk vs. non-bulk overlap
         aux_out_specs = (None,)
-        if self.output_all_gathered_lhs:
-            # Auxiliary output is the same as the LHS spec, except the gathered dimension unsharded
-            aux_out_specs = list(lhs_specs).copy()
-            aux_out_specs[self.gather_dim] = None
 
         return (
             (lhs_specs, rhs_specs, bias_specs, gelu_specs, aux_in_specs),
@@ -813,10 +806,6 @@ class CommOverlapHelperSet:
         if self.fprop.is_all_gather():
             if self.dgrad is not None and self.dgrad.is_enabled:
                 if self.dgrad.is_bulk() and self.dgrad.is_all_gather():
-                    assert not self.fprop.output_all_gathered_lhs, (
-                        "CommOverlapHelperSet: AG->GEMM FPROP does not support BULK-AG overlap for "
-                        "DGRAD when the all-gathered LHS is already saved in the forward pass."
-                    )
                     assert (
                         self.wgrad is not None
                         and self.wgrad.is_enabled
@@ -889,7 +878,7 @@ class CommOverlapHelperSet:
         if self.dgrad is None:
             dgrad_overlap = None
 
-            if self.fprop.is_all_gather() and not self.fprop.output_all_gathered_lhs:
+            if self.fprop.is_all_gather():
                 # FPROP AG->GEMM and DGRAD GEMM->RS
                 dgrad_overlap = CommOverlapHelper(
                     method=tex.CommOverlapMethod.RING_EXCHANGE,
@@ -911,7 +900,6 @@ class CommOverlapHelperSet:
                     tp_size=self.fprop.tp_size,
                     logical_tp_axis=self.fprop.logical_tp_axis,
                     logical_sp_axis=self.fprop.logical_sp_axis,
-                    output_all_gathered_lhs=True,
                 )
 
             else:
@@ -1040,49 +1028,14 @@ class GemmPrimitive(BasePrimitive):
         output = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
 
         # Auxiliary output for comm+GEMM overlap
-        aux_out_shape = (0,)
-        aux_out_dtype = jnp.bfloat16
         if comm_overlap.is_enabled:
-            if comm_overlap.is_bulk():
-                # Bulk overlap will all-gather or reduce-scatter the tensor in the auxiliary input
-                # and return the result of the collective in the auxiliary output
-                assert (
-                    aux_in.size > 0
-                ), "cuBLAS GEMM w/ bulk collective overlap requires an auxiliary input."
-                assert aux_in.ndim > 1, (
-                    "cuBLAS GEMM w/ bulk collective overlap only supports multidimensional "
-                    "auxiliary inputs."
-                )
-
-                aux_out_shape = list(aux_in.shape).copy()
-                aux_out_dtype = aux_in.dtype
-                if comm_overlap.sharded_impl:
-                    if comm_overlap["comm_type"] == tex.CommOverlapType.AG:
-                        aux_out_shape[comm_overlap.gather_dim] *= comm_overlap.tp_size
-                    else:
-                        assert aux_in.shape[comm_overlap.scatter_dim] % comm_overlap.tp_size, (
-                            "cuBLAS GEMM w/ bulk reduce-scatter overlap requires the auxiliary "
-                            "input to be divisible by tensor-parallel size in dimension index "
-                            f"{comm_overlap.scatter_dim}."
-                        )
-                        aux_out_shape[comm_overlap.scatter_dim] = (
-                            aux_out_shape[comm_overlap.scatter_dim] // comm_overlap.tp_size
-                        )
-
-            elif comm_overlap.is_all_gather():
-                # Sharded abstract multiplies gathered dimension by TP size
+            if comm_overlap.is_all_gather():
+                # Inner abstract
+                # TODO: remove sharded_impl and gather_dim
                 if comm_overlap.sharded_impl:
                     out_shape[comm_overlap.gather_dim] *= comm_overlap.tp_size
                     output = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
 
-                # AG->GEMM overlap can copy all-gathered LHS into the auxiliary buffer
-                if comm_overlap.output_all_gathered_lhs:
-                    aux_out_shape = list(lhs.shape).copy()
-                    aux_out_dtype = lhs.dtype
-
-                    # Sharded abstract multiplies gathered dimension by TP size
-                    if comm_overlap.sharded_impl:
-                        aux_out_shape[comm_overlap.gather_dim] *= comm_overlap.tp_size
             elif comm_overlap.is_reduce_scatter():
                 # GEMM->RS auxiliary output is the reduce-scattered output
                 rs_out_shape = list(out_shape).copy()
@@ -1094,10 +1047,11 @@ class GemmPrimitive(BasePrimitive):
                     )
 
                 output = jax.core.ShapedArray(shape=rs_out_shape, dtype=out_dtype)
+            else:
+                raise NotImplementedError("This method is not implemented yet.")
 
-        aux_out = jax.core.ShapedArray(shape=aux_out_shape, dtype=aux_out_dtype)
-
-        # Validate bias -- shape always depends on pure GEMM output even for GEMM->RS overlap
+        # Validate bias -- shape always depends on pure GEMM output even for GEMM->RS overlap <--
+        # (Phuong) This is not true for TP + Hidden
         bias_shape = (0,)
         bias_dtype = out_dtype
         if fuse_bias:
@@ -1305,16 +1259,6 @@ class GemmPrimitive(BasePrimitive):
         pre_gelu_bdims = (None,)
         if fuse_gelu and not grad:
             pre_gelu_bdims = out_bdims
-
-        aux_out_bdims = (None,)
-        if comm_overlap.is_enabled:
-            if comm_overlap.is_bulk():
-                # Bulk overlap auxiliary output must have the same batch dims as the auxiliary input
-                aux_out_bdims = aux_in_bdims
-            elif comm_overlap.is_all_gather() and comm_overlap.output_all_gathered_lhs:
-                # AG->GEMM overlap with all-gathered LHS output must have same batch dims as
-                # sharded LHS input
-                aux_out_bdims = arg_lhs_bdims
 
         return (
             GemmPrimitive.outer_primitive.bind(
@@ -1577,6 +1521,7 @@ class GemmPrimitive(BasePrimitive):
         )
 
         def _sharded_impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, aux_in):
+            # Why do we need this?
             comm_overlap._set_sharded_impl(True)
 >>>>>>> jax/collective-gemm-api
             outputs = GemmPrimitive.impl(
