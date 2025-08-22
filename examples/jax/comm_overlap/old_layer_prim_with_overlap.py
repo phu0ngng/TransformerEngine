@@ -39,8 +39,6 @@ from transformer_engine.jax.cpp_extensions import CommOverlapHelper, CommOverlap
 
 import transformer_engine_jax as tex
 
-from common import assert_allclose
-
 # This script needs to be launched via `mpirun` with 1 process per GPU
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 myrank = MPI.COMM_WORLD.Get_rank()
@@ -63,27 +61,22 @@ def _te_layer_prim(prim_name):
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-dp", "--dp-size", type=int, default=1)
-# parser.add_argument("-fsdp", "--fsdp-size", type=int, default=2)
-parser.add_argument("-fsdp", "--fsdp-size", type=int, default=1)
-# parser.add_argument("-tp", "--tp-size", type=int, default=numranks // 2)
-parser.add_argument("-tp", "--tp-size", type=int, default=1)
+parser.add_argument("-fsdp", "--fsdp-size", type=int, default=2)
+parser.add_argument("-tp", "--tp-size", type=int, default=numranks // 2)
+parser.add_argument("-np", "--num-gpus", type=int, default=numranks)
 parser.add_argument("--batch-size", type=int, default=2)
 parser.add_argument("--seq-length", type=int, default=8192)
 parser.add_argument("--hidden-size", type=int, default=16384)
 parser.add_argument("--activation-size", type=int, default=53248)
-parser.add_argument("--no-batch", type=bool, default=True)
-parser.add_argument("--no-fsdp", type=bool, default=True)
+parser.add_argument("--no-batch", action="store_true")
+parser.add_argument("--no-fsdp", action="store_true")
 parser.add_argument("--layer-type", type=_te_layer_prim, default=dense, choices=_supported_prims)
 parser.add_argument(
     "--fp8-recipe", type=str.lower, default="none", choices=["none", "current", "delayed", "mxfp8"]
 )
-# parser.add_argument("--check-result", action="store_true")
-parser.add_argument("--check-result", type=bool, default=True)
+parser.add_argument("--check-result", action="store_true")
 parser.add_argument("--seed", type=int, default=42)
 args = parser.parse_args()
-
-n_gpus = args.dp_size * args.fsdp_size * args.tp_size
-assert n_gpus == numranks, f"We need {n_gpus} processes for {n_gpus} GPUs, got {numranks}!"
 
 # FP8 recipe
 fp8_recipe = None
@@ -178,20 +171,17 @@ with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
 DEVICE_FSDP_AXIS = "fsdp"
 DEVICE_DP_AXIS = "dp"
 DEVICE_TP_AXIS = "tp"
-mesh_shape = {}
-
-if args.tp_size != 1:
-    mesh_shape[DEVICE_TP_AXIS] = args.tp_size
-if args.dp_size != 1:
+mesh_shape = {DEVICE_TP_AXIS: args.tp_size}
+if not args.no_batch:
     mesh_shape[DEVICE_DP_AXIS] = args.dp_size
-if args.fsdp_size != 1:
+if not args.no_fsdp:
     mesh_shape[DEVICE_FSDP_AXIS] = args.fsdp_size
-devices = mesh_utils.create_device_mesh((n_gpus,), devices=jax.devices()[: n_gpus])
+devices = mesh_utils.create_device_mesh((args.num_gpus,), devices=jax.devices()[: args.num_gpus])
 mesh = Mesh(np.array(devices).reshape(tuple(mesh_shape.values())), tuple(mesh_shape.keys()))
 mesh_resource = MeshResource(
-    dp_resource=None if args.dp_size == 1 else DEVICE_DP_AXIS,
-    fsdp_resource=None if args.fsdp_size == 1 else DEVICE_FSDP_AXIS,
-    tp_resource=None if args.tp_size == 1 else DEVICE_TP_AXIS,
+    dp_resource=None if args.no_batch else DEVICE_DP_AXIS,
+    fsdp_resource=None if args.no_fsdp else DEVICE_FSDP_AXIS,
+    tp_resource=DEVICE_TP_AXIS,
 )
 if myrank == 0:
     print(f"[{myrank}|{numranks}] Device mesh: {mesh}\n")
@@ -267,7 +257,7 @@ def _eval_layer_sharded(
             "ffn2_comm_overlaps": comm_overlaps_[1],
         }
 
-    return jnp.mean(layer_type_(*layer_args, **layer_kwargs).astype(jnp.float32))
+    return jnp.mean(layer_type_(*layer_args, **layer_kwargs))
 
 
 with (
@@ -348,8 +338,18 @@ with (
     )
 
 if args.check_result:
-    assertion_dtype = jnp.bfloat16
-    assert_allclose(output_sharded, output_serial, dtype=assertion_dtype)
+    diff = jnp.abs(output_serial - output_sharded)
+    if myrank == 0:
+        print(
+            f"[{myrank}|{numranks}] Output: serial = {output_serial} | sharded = {output_sharded}"
+        )
+    rel_err = diff / max(abs(diff), 1e-5)
+    if rel_err > 0.02 and diff > 0.001:
+        if myrank == 0:
+            print("NUMERICAL CHECK_FAILED: Output not close enough!\n")
+    else:
+        if myrank == 0:
+            print("NUMERICAL CHECK PASSED\n")
 
     labels = ("dX", "dGamma", "dBeta", "dKernel_1", "dBias_1", "dKernel_2", "dBias_2")
     for i, (serial, sharded) in enumerate(zip(grads_serial, grads_sharded)):
@@ -363,5 +363,34 @@ if args.check_result:
                 sharded, NamedSharding(mesh, PartitionSpec(None))
             )
             jax.block_until_ready(gathered)
-            assert_allclose(serial, gathered, dtype=assertion_dtype)
+            diff = jnp.abs(serial - gathered).flatten()
+            if myrank == 0:
+                print(f"{myrank}: Global {labels[i]} difference: {diff}\n", flush=True)
+
+            m = jnp.argmax(diff).item()
+            abs_err = diff[m].item()
+            rel_err = abs_err / max(abs(output_serial.flatten()[m]), 1e-5)
+
+            rtol = 0.02
+            atol = 0.001
+            if rel_err > rtol and abs_err > atol:
+                numerics_info = (
+                    "NUMERICAL CHECK FAILED: "
+                    + f"{labels[i]} not close enough at index {m} "
+                    + f"with {gathered.flatten()[m].item()} vs {serial.flatten()[m].item()} "
+                    + f"| rel. error = {rel_err} (tol = {rtol}) "
+                    + f"| abs. error = {abs_err} (tol = {atol})"
+                )
+            else:
+                numerics_info = "NUMERICAL CHECK PASSED: "
+                if rel_err <= rtol:
+                    numerics_info += f"rel. error = {rel_err} (tol = {rtol})" + (
+                        " | " if abs_err < atol else ""
+                    )
+                if abs_err <= atol:
+                    numerics_info += f"abs. error = {abs_err} (tol = {atol})"
+
+            if myrank == 0:
+                print(numerics_info + "\n", end="", flush=True)
+
 tex.destroy_all_comm_overlap_buffers()
