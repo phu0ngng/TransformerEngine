@@ -274,6 +274,7 @@ class MeshResource:
     Attributes:
         dp_resource: Axis name for data parallelism (batch sharding), default is None
         tp_resource: Axis name for tensor parallelism (hidden dimension sharding), default is None
+        sp_resource: Axis name for sequence parallelism, default is None
         fsdp_resource: Axis name for full-sharded data parallelism, default is None
         pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
         cp_resource: Axis name for context parallelism (sequence sharding), default is None
@@ -281,6 +282,7 @@ class MeshResource:
 
     dp_resource: str = None
     tp_resource: str = None
+    sp_resource: str = None
     fsdp_resource: str = None
     pp_resource: str = None
     cp_resource: str = None
