@@ -34,15 +34,11 @@ from ..quantize import (
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
-    remove_padding_from_scale_inv,
 )
 from .misc import get_padded_spec, jax_dtype_to_te_dtype
 from ..sharding import (
     global_mesh_resource,
-    get_mesh_axis_size,
-    generate_pspec,
-    W_TP_AXES,
-    SEQLEN_TP_AXES,
+    tp_axis_size,
 )
 
 
@@ -59,6 +55,8 @@ __all__ = [
 
 
 num_cublas_streams = tex.get_num_compute_streams()
+gsr = global_mesh_resource()
+
 
 CUDA_STREAM_PRIORITY_LOWEST = None
 CUDA_STREAM_PRIORITY_HIGHEST = None
@@ -175,9 +173,9 @@ class CommOverlapHelper:
     method: tex.CommOverlapMethod = field(default=tex.CommOverlapMethod.NONE)
     buffer_shape: Sequence[int] = field(default=None)
     buffer_dtype: jnp.dtype = field(default=jnp.bfloat16)
-    tp_size: int = field(
-        default_factory=lambda: get_mesh_axis_size(global_mesh_resource().tp_resource)
-    )
+    # tp_size: int = field(
+    #     default_factory=lambda: get_mesh_axis_size(global_mesh_resource().tp_resource)
+    # )
 
     # Userbuffers bootstrap kwargs
     num_splits: int = field(default=None, kw_only=True)
@@ -193,15 +191,15 @@ class CommOverlapHelper:
     aggregate_ag: bool = field(default=False, kw_only=True)
 
     # Other kwargs not passed to Userbuffers
-    tp_resource: str = field(default_factory=lambda: global_mesh_resource().tp_resource)
+    # tp_resource: str = field(default_factory=lambda: global_mesh_resource().tp_resource)
     # logical_tp_axis: str = field(default=W_TP_AXES, kw_only=True)
     # logical_sp_axis: str = field(default=SEQLEN_TP_AXES, kw_only=True)
-    flatten_axis: int = field(default=-1, kw_only=True)
+    # flatten_axis: int = field(default=-1, kw_only=True)
 
     # Internal attributes
     is_enabled: bool = field(default=False, init=False)
     unique_id: int = field(default=-1, init=False, compare=False)
-    sharded_impl: bool = field(default=False, init=False, compare=False)
+    # sharded_impl: bool = field(default=False, init=False, compare=False)
     # gather_dim: int = field(default=-2, init=False, compare=False)
     # scatter_dim: int = field(default=-2, init=False, compare=False)
     # sequence_dim: int = field(default=1, init=False, compare=False)
@@ -220,9 +218,8 @@ class CommOverlapHelper:
         #     object.__setattr__(self, "gemm_priority", CUDA_STREAM_PRIORITY_LOWEST)
         #     object.__setattr__(self, "comm_priority", CUDA_STREAM_PRIORITY_HIGHEST)
 
-        assert self.method != tex.CommOverlapMethod.NONE, (
-            f"CommOverlapHelper: {self.comm_type} is not a valid collective type for "
-                f"{self.method}."
+        assert self.method != tex.CommOverlapMethod.RING_EXCHANGE, (
+            f"CommOverlapHelper: {self.comm_type} is not supported for {self.method}."
         )
         assert self.comm_type != tex.CommOverlapType.NONE, (
             f"CommOverlapHelper: {self.method} is not a valid overlap method for "
@@ -231,78 +228,48 @@ class CommOverlapHelper:
         assert (
             self.buffer_shape is not None and len(self.buffer_shape) >= 2
         ), f"CommOverlapHelper: {self.buffer_shape} is not a valid buffer shape."
-        assert self.tpsp_resource is not None, (
-            "CommOverlapHelper: Communication + GEMM overlap requires a valid TP resource. "
-                "This must either be specified via the `tp_resource=` keyword, or "
-                "`CommOverlapHelper` needs to be initialized under a "
-                "`te.sharding.global_shard_guard()` using a `te.sharding.MeshResource()` with a "
-                "valid tensor-parallel mesh axis name."
+        assert tp_axis_size() > 1, (
+            f"CommOverlapHelper: Communication + GEMM overlap requires a valid TP axis size. Got TP axis size {tp_axis_size()}."
         )
-        assert (
-            self.tp_size % 2 == 0
-        ), f"CommOverlapHelper: Tensor-parallel axis of {self.tp_size} is not divisible by 2."
-        if not self.is_bulk() and not self.is_p2p():
-            # Pipelined overlap is only for reduce-scatter
-            assert not self.is_all_gather(), (
-                f"CommOverlapHelper: {self.method} is not a valid overlap method for "
-                    f"{self.comm_type}."
+
+        # TODO: Why do we need this?
+        # assert (
+        #     self.tp_size % 2 == 0
+        # ), f"CommOverlapHelper: Tensor-parallel axis of {self.tp_size} is not divisible by 2."
+
+        # Collapse buffer shape to 2D
+        if len(self.buffer_shape) > 2:
+            if self.flatten_axis < 0:
+                object.__setattr__(
+                    self, "flatten_axis", self.flatten_axis + len(self.buffer_shape)
+                )
+            object.__setattr__(
+                self,
+                "buffer_shape",
+                (
+                    reduce(operator.mul, self.buffer_shape[: self.flatten_axis]),
+                    reduce(operator.mul, self.buffer_shape[self.flatten_axis :]),
+                ),
             )
 
-            # Collapse buffer shape to 2D
-            if len(self.buffer_shape) > 2:
-                if self.flatten_axis < 0:
-                    object.__setattr__(
-                        self, "flatten_axis", self.flatten_axis + len(self.buffer_shape)
-                    )
-                object.__setattr__(
-                    self,
-                    "buffer_shape",
-                    (
-                        reduce(operator.mul, self.buffer_shape[: self.flatten_axis]),
-                        reduce(operator.mul, self.buffer_shape[self.flatten_axis :]),
-                    ),
-                )
+        # Num splits for P2P overlap is always fixed to TP size
+        if self.num_splits is None:
+            object.__setattr__(self, "num_splits", tp_axis_size())
 
-            # Num splits for P2P overlap is always fixed to TP size
-            if self.is_p2p():
-                object.__setattr__(self, "num_splits", self.tp_size)
-            elif self.num_splits is None:
-                object.__setattr__(self, "num_splits", self.tp_size)
+        # Set conditional defaults for config options not specified at init time
+        if self.comm_cga_size is None:
+            object.__setattr__(self, "comm_cga_size", 1)
+        if self.num_comm_sm is None:
+            object.__setattr__(self, "num_comm_sm", 1)
+        if self.set_sm_margin is None:
+            object.__setattr__(self, "set_sm_margin", False)
+        if self.use_ce is None:
+            object.__setattr__(self, "use_ce", True)
 
-            # Set conditional defaults for config options not specified at init time
-            if self.comm_cga_size is None:
-                object.__setattr__(self, "comm_cga_size", 1 if self.is_p2p() else 2)
-            if self.num_comm_sm is None:
-                object.__setattr__(self, "num_comm_sm", 1 if self.is_p2p() else 16)
-            if self.set_sm_margin is None:
-                object.__setattr__(self, "set_sm_margin", not self.is_p2p())
-            if self.use_ce is None:
-                object.__setattr__(self, "use_ce", self.is_p2p())
-
-            # Allocate the communication buffer
-            args, kwargs = self.get_bootstrap_args_kwargs()
-            object.__setattr__(self, "unique_id", tex.create_comm_overlap_buffer(*args, **kwargs))
-            object.__setattr__(self, "is_enabled", True)
-
-    def _set_sharded_impl(self, value):
-        assert isinstance(value, bool)
-        object.__setattr__(self, "sharded_impl", value)
-
-    def _set_gather_dim(self, value):
-        assert isinstance(value, int)
-        object.__setattr__(self, "gather_dim", value)
-
-    def _set_scatter_dim(self, value):
-        assert isinstance(value, int)
-        object.__setattr__(self, "scatter_dim", value)
-
-    def is_bulk(self):
-        """Check if this is a bulk overlap."""
-        return self.method == tex.CommOverlapMethod.BULK
-
-    def is_p2p(self):
-        """Check if this is a peer-to-peer (ring-exchange) overlap."""
-        return self.method == tex.CommOverlapMethod.RING_EXCHANGE
+        # Allocate the communication buffer
+        args, kwargs = self.get_bootstrap_args_kwargs()
+        object.__setattr__(self, "unique_id", tex.create_comm_overlap_buffer(*args, **kwargs))
+        object.__setattr__(self, "is_enabled", True)
 
     def is_all_gather(self):
         """Check if the overlapped collective is an all-gather."""
@@ -311,10 +278,6 @@ class CommOverlapHelper:
     def is_reduce_scatter(self):
         """Check if the overlapped collective is a reduce-scatter."""
         return self.comm_type == tex.CommOverlapType.RS
-
-    def has_aux_output(self):
-        """Check if the comm+GEMM overlap has an auxiliary output."""
-        return self.is_enabled and self.is_bulk()
 
     def get_bootstrap_args_kwargs(self):
         """Generate positional and keyword arguments to bootstrap Userbuffers."""
@@ -335,15 +298,16 @@ class CommOverlapHelper:
             "set_sm_margin": self.set_sm_margin,
             "use_ce": self.use_ce,
             "atomic_gemm": self.atomic_gemm,
-            "rs_overlap_first_gemm": self.rs_overlap_first_gemm,
+            "rs_overlap_first_gemm": self.rs_overlap_first_gemm, # TODO: What is this?
             "aggregate_ag": self.aggregate_ag,
         }
         return args, kwargs
 
+    # TODO
     def get_lowering_kwargs(self):
         """Generate a dictionary of keyword arguments used in GemmPrimitive.lowering()."""
         aux_axis_boundary = -1
-        if self.is_enabled and self.sharded_impl:
+        if self.is_enabled:
             if self.is_all_gather():
                 assert self.gather_dim >= 0, (
                     "Internal TE error: CommOverlapHelper.gather_dim is not set correctly in "
@@ -683,169 +647,169 @@ class CommOverlapHelper:
     #     return impl_map[self.comm_type](lhs_specs, rhs_specs, aux_in_specs, dimension_numbers)
 
 
-@dataclass(frozen=True)
-class CommOverlapHelperSet:
-    """
-    A set of CommOverlapHelper objects that provide complementary comm+GEMM overlap configurations
-    for FPROP, DGRAD and WGRAD GEMMs in FWD/BWD passes through Dense-layers.
-    """
+# @dataclass(frozen=True)
+# class CommOverlapHelperSet:
+#     """
+#     A set of CommOverlapHelper objects that provide complementary comm+GEMM overlap configurations
+#     for FPROP, DGRAD and WGRAD GEMMs in FWD/BWD passes through Dense-layers.
+#     """
 
-    fprop: CommOverlapHelper = field(default=None)
-    dgrad: CommOverlapHelper = field(default=None)
-    wgrad: CommOverlapHelper = field(default=None)
+#     fprop: CommOverlapHelper = field(default=None)
+#     dgrad: CommOverlapHelper = field(default=None)
+#     wgrad: CommOverlapHelper = field(default=None)
 
-    def _sanity_check(self):
-        # Require any argument that exists to be a `CommOverlapHelper` instance
-        for overlap, name in zip((self.fprop, self.dgrad, self.wgrad), ("fprop", "dgrad", "wgrad")):
-            if overlap is not None:
-                assert isinstance(overlap, CommOverlapHelper), (
-                    f"CommOverlapHelperSet: Expected `{name}` to be a {CommOverlapHelper} but got "
-                    f"{type(overlap)} instead."
-                )
+#     def _sanity_check(self):
+#         # Require any argument that exists to be a `CommOverlapHelper` instance
+#         for overlap, name in zip((self.fprop, self.dgrad, self.wgrad), ("fprop", "dgrad", "wgrad")):
+#             if overlap is not None:
+#                 assert isinstance(overlap, CommOverlapHelper), (
+#                     f"CommOverlapHelperSet: Expected `{name}` to be a {CommOverlapHelper} but got "
+#                     f"{type(overlap)} instead."
+#                 )
 
-        # If FPROP overlap is not defined or not enabled, require DGRAD and WGRAD to also not be
-        # be defined or not enabled
-        if self.fprop is None or not self.fprop.is_enabled:
-            assert (self.dgrad is None or not self.dgrad.is_enabled) and (
-                self.wgrad is None or not self.wgrad.is_enabled
-            ), (
-                "CommOverlapHelperSet: Cannot do communication overlap for DGRAD and/or WGRAD when "
-                "there is no communication overlap for FPROP."
-            )
-            return
+#         # If FPROP overlap is not defined or not enabled, require DGRAD and WGRAD to also not be
+#         # be defined or not enabled
+#         if self.fprop is None or not self.fprop.is_enabled:
+#             assert (self.dgrad is None or not self.dgrad.is_enabled) and (
+#                 self.wgrad is None or not self.wgrad.is_enabled
+#             ), (
+#                 "CommOverlapHelperSet: Cannot do communication overlap for DGRAD and/or WGRAD when "
+#                 "there is no communication overlap for FPROP."
+#             )
+#             return
 
-        assert (
-            not self.fprop.is_bulk()
-        ), "CommOverlapHelperSet: Cannot overlap bulk collectives with FPROP."
+#         assert (
+#             not self.fprop.is_bulk()
+#         ), "CommOverlapHelperSet: Cannot overlap bulk collectives with FPROP."
 
-        if self.fprop.is_all_gather():
-            if self.dgrad is not None and self.dgrad.is_enabled:
-                if self.dgrad.is_bulk() and self.dgrad.is_all_gather():
-                    assert (
-                        self.wgrad is not None
-                        and self.wgrad.is_enabled
-                        and self.wgrad.is_bulk()
-                        and self.wgrad.is_reduce_scatter()
-                    ), (
-                        "CommOverlapHelperSet: AG->GEMM FPROP with BULK-AG overlap for DGRAD "
-                        "requires BULK-RS overlap for WGRAD."
-                    )
+#         if self.fprop.is_all_gather():
+#             if self.dgrad is not None and self.dgrad.is_enabled:
+#                 if self.dgrad.is_bulk() and self.dgrad.is_all_gather():
+#                     assert (
+#                         self.wgrad is not None
+#                         and self.wgrad.is_enabled
+#                         and self.wgrad.is_bulk()
+#                         and self.wgrad.is_reduce_scatter()
+#                     ), (
+#                         "CommOverlapHelperSet: AG->GEMM FPROP with BULK-AG overlap for DGRAD "
+#                         "requires BULK-RS overlap for WGRAD."
+#                     )
 
-                elif not self.dgrad.is_bulk() and self.dgrad.is_reduce_scatter():
-                    assert self.wgrad is None or not self.wgrad.is_enabled, (
-                        "CommOverlapHelperSet: AG->GEMM FPROP with GEMM->RS DGRAD does not support "
-                        "communication overlap for WGRAD."
-                    )
+#                 elif not self.dgrad.is_bulk() and self.dgrad.is_reduce_scatter():
+#                     assert self.wgrad is None or not self.wgrad.is_enabled, (
+#                         "CommOverlapHelperSet: AG->GEMM FPROP with GEMM->RS DGRAD does not support "
+#                         "communication overlap for WGRAD."
+#                     )
 
-                else:
-                    raise AssertionError(
-                        "CommOverlapHelperSet: AG->GEMM FPROP requires communication overlap for "
-                        "DGRAD to be either BULK-AG or GEMM->RS."
-                    )
-            else:
-                assert self.wgrad is None or not self.wgrad.is_enabled, (
-                    "CommOverlapHelperSet: AG->GEMM FPROP with no communication overlap for DGRAD"
-                    "does not support communication overlap for WGRAD."
-                )
+#                 else:
+#                     raise AssertionError(
+#                         "CommOverlapHelperSet: AG->GEMM FPROP requires communication overlap for "
+#                         "DGRAD to be either BULK-AG or GEMM->RS."
+#                     )
+#             else:
+#                 assert self.wgrad is None or not self.wgrad.is_enabled, (
+#                     "CommOverlapHelperSet: AG->GEMM FPROP with no communication overlap for DGRAD"
+#                     "does not support communication overlap for WGRAD."
+#                 )
 
-        elif self.fprop.is_reduce_scatter():
-            if self.dgrad is not None and self.dgrad.is_enabled:
-                assert not self.dgrad.is_bulk() and self.dgrad.is_all_gather(), (
-                    "CommOverlapHelperSet: GEMM->RS FPROP requires communication overlap for DGRAD "
-                    "to be AG->GEMM."
-                )
+#         elif self.fprop.is_reduce_scatter():
+#             if self.dgrad is not None and self.dgrad.is_enabled:
+#                 assert not self.dgrad.is_bulk() and self.dgrad.is_all_gather(), (
+#                     "CommOverlapHelperSet: GEMM->RS FPROP requires communication overlap for DGRAD "
+#                     "to be AG->GEMM."
+#                 )
 
-            assert self.wgrad is None or not self.wgrad.is_enabled, (
-                "CommOverlapHelperSet: GEMM->RS FPROP does not support communication overlap "
-                "for WGRAD."
-            )
+#             assert self.wgrad is None or not self.wgrad.is_enabled, (
+#                 "CommOverlapHelperSet: GEMM->RS FPROP does not support communication overlap "
+#                 "for WGRAD."
+#             )
 
-        else:
-            raise RuntimeError(
-                "CommOverlapHelperSet: Internal TE error, unrecognized collective type "
-                f"{self.fprop.comm_type} in communication overlap for FPROP."
-            )
+#         else:
+#             raise RuntimeError(
+#                 "CommOverlapHelperSet: Internal TE error, unrecognized collective type "
+#                 f"{self.fprop.comm_type} in communication overlap for FPROP."
+#             )
 
-    def __post_init__(self):
-        self._sanity_check()
+#     def __post_init__(self):
+#         self._sanity_check()
 
-        if self.fprop is None:
-            # TODO: Why CommOverlapHelper is init with empty buffer size here
-            object.__setattr__(self, "fprop", CommOverlapHelper())
+#         if self.fprop is None:
+#             # TODO: Why CommOverlapHelper is init with empty buffer size here
+#             object.__setattr__(self, "fprop", CommOverlapHelper())
 
-        # Column-parallel layers: QKV projection and MLP FFN1
-        #   FPROP with AG->GEMM:
-        #     LHS:(B, M, None)--(AG)->(B, None, None) x RHS:(None, N) = OUT:(B, None, N)
-        #   DGRAD w/ BULK-AG for LHS:
-        #     GRAD:(B, None, N) x RHS:(None, N)^T = DGRAD:(B, None, None)
-        #     LHS:(B, M, None)--(BULK-AG)->(B, None, None)
-        #   WGRAD w/ BULK-RS for DGRAD:
-        #     LHS:(B, None, None)^T x GRAD:(B, None, N) = WGRAD:(None, N)
-        #     DGRAD:(B, None, None)--(BULK-RS)->(B, M, None)
-        #
-        # Row-parallel layers: Post-attention projection and MLP FFN2
-        #   FPROP with GEMM->RS:
-        #     LHS:(B, None, K) x RHS:(K, None) = (B, None, None)--(RS)->(B, M, None)
-        #   DGRAD with AG->GEMM (all-gathered GRAD saved for WGRAD):
-        #     GRAD:(B, M, None)--(AG)->(B, None, None) x RHS:(K, None)^T = (B, None, K)
-        #   WGRAD with NO OVERLAP:
-        #     LHS:(B, None, K)^T x GRAD:(B, None, None) = (K, None)
-        if self.dgrad is None:
-            dgrad_overlap = None
+#         # Column-parallel layers: QKV projection and MLP FFN1
+#         #   FPROP with AG->GEMM:
+#         #     LHS:(B, M, None)--(AG)->(B, None, None) x RHS:(None, N) = OUT:(B, None, N)
+#         #   DGRAD w/ BULK-AG for LHS:
+#         #     GRAD:(B, None, N) x RHS:(None, N)^T = DGRAD:(B, None, None)
+#         #     LHS:(B, M, None)--(BULK-AG)->(B, None, None)
+#         #   WGRAD w/ BULK-RS for DGRAD:
+#         #     LHS:(B, None, None)^T x GRAD:(B, None, N) = WGRAD:(None, N)
+#         #     DGRAD:(B, None, None)--(BULK-RS)->(B, M, None)
+#         #
+#         # Row-parallel layers: Post-attention projection and MLP FFN2
+#         #   FPROP with GEMM->RS:
+#         #     LHS:(B, None, K) x RHS:(K, None) = (B, None, None)--(RS)->(B, M, None)
+#         #   DGRAD with AG->GEMM (all-gathered GRAD saved for WGRAD):
+#         #     GRAD:(B, M, None)--(AG)->(B, None, None) x RHS:(K, None)^T = (B, None, K)
+#         #   WGRAD with NO OVERLAP:
+#         #     LHS:(B, None, K)^T x GRAD:(B, None, None) = (K, None)
+#         if self.dgrad is None:
+#             dgrad_overlap = None
 
-            if self.fprop.is_all_gather():
-                # FPROP AG->GEMM and DGRAD GEMM->RS
-                dgrad_overlap = CommOverlapHelper(
-                    method=tex.CommOverlapMethod.RING_EXCHANGE,
-                    comm_type=tex.CommOverlapType.RS,
-                    buffer_shape=self.fprop.buffer_shape,
-                    buffer_dtype=self.fprop.buffer_dtype,
-                    tp_size=self.fprop.tp_size,
-                    # logical_tp_axis=self.fprop.logical_tp_axis,
-                    # logical_sp_axis=self.fprop.logical_sp_axis,
-                )
+#             if self.fprop.is_all_gather():
+#                 # FPROP AG->GEMM and DGRAD GEMM->RS
+#                 dgrad_overlap = CommOverlapHelper(
+#                     method=tex.CommOverlapMethod.RING_EXCHANGE,
+#                     comm_type=tex.CommOverlapType.RS,
+#                     buffer_shape=self.fprop.buffer_shape,
+#                     buffer_dtype=self.fprop.buffer_dtype,
+#                     tp_size=self.fprop.tp_size,
+#                     # logical_tp_axis=self.fprop.logical_tp_axis,
+#                     # logical_sp_axis=self.fprop.logical_sp_axis,
+#                 )
 
-            elif self.fprop.is_reduce_scatter():
-                # FPROP GEMM->RS and DGRAD AG->GEMM
-                dgrad_overlap = CommOverlapHelper(
-                    method=tex.CommOverlapMethod.RING_EXCHANGE,
-                    comm_type=tex.CommOverlapType.AG,
-                    buffer_shape=self.fprop.buffer_shape,
-                    buffer_dtype=self.fprop.buffer_dtype,
-                    tp_size=self.fprop.tp_size,
-                    # logical_tp_axis=self.fprop.logical_tp_axis,
-                    # logical_sp_axis=self.fprop.logical_sp_axis,
-                )
+#             elif self.fprop.is_reduce_scatter():
+#                 # FPROP GEMM->RS and DGRAD AG->GEMM
+#                 dgrad_overlap = CommOverlapHelper(
+#                     method=tex.CommOverlapMethod.RING_EXCHANGE,
+#                     comm_type=tex.CommOverlapType.AG,
+#                     buffer_shape=self.fprop.buffer_shape,
+#                     buffer_dtype=self.fprop.buffer_dtype,
+#                     tp_size=self.fprop.tp_size,
+#                     # logical_tp_axis=self.fprop.logical_tp_axis,
+#                     # logical_sp_axis=self.fprop.logical_sp_axis,
+#                 )
 
-            else:
-                dgrad_overlap = CommOverlapHelper()
+#             else:
+#                 dgrad_overlap = CommOverlapHelper()
 
-            object.__setattr__(self, "dgrad", dgrad_overlap)
+#             object.__setattr__(self, "dgrad", dgrad_overlap)
 
-        if self.wgrad is None:
-            wgrad_overlap = self.wgrad
+#         if self.wgrad is None:
+#             wgrad_overlap = self.wgrad
 
-            if (
-                self.fprop.is_all_gather()
-                and self.dgrad.is_enabled
-                and self.dgrad.is_bulk()
-                and self.dgrad.is_all_gather()
-            ):
-                # FPROP AG->GEMM, DGRAD BULK-AG for LHS and WGRAD BULK-RS for DGRAD
-                wgrad_overlap = CommOverlapHelper(
-                    method=tex.CommOverlapMethod.BULK,
-                    comm_type=tex.CommOverlapType.RS,
-                    buffer_shape=self.fprop.buffer_shape,
-                    buffer_dtype=self.fprop.buffer_dtype,
-                    tp_size=self.fprop.tp_size,
-                    # logical_tp_axis=self.fprop.logical_tp_axis,
-                    # logical_sp_axis=self.fprop.logical_sp_axis,
-                )
+#             if (
+#                 self.fprop.is_all_gather()
+#                 and self.dgrad.is_enabled
+#                 and self.dgrad.is_bulk()
+#                 and self.dgrad.is_all_gather()
+#             ):
+#                 # FPROP AG->GEMM, DGRAD BULK-AG for LHS and WGRAD BULK-RS for DGRAD
+#                 wgrad_overlap = CommOverlapHelper(
+#                     method=tex.CommOverlapMethod.BULK,
+#                     comm_type=tex.CommOverlapType.RS,
+#                     buffer_shape=self.fprop.buffer_shape,
+#                     buffer_dtype=self.fprop.buffer_dtype,
+#                     tp_size=self.fprop.tp_size,
+#                     # logical_tp_axis=self.fprop.logical_tp_axis,
+#                     # logical_sp_axis=self.fprop.logical_sp_axis,
+#                 )
 
-            else:
-                wgrad_overlap = CommOverlapHelper()
+#             else:
+#                 wgrad_overlap = CommOverlapHelper()
 
-            object.__setattr__(self, "wgrad", wgrad_overlap)
+#             object.__setattr__(self, "wgrad", wgrad_overlap)
 
 
 class GemmPrimitive(BasePrimitive):
@@ -855,7 +819,7 @@ class GemmPrimitive(BasePrimitive):
 
     name = "te_gemm_ffi"
     multiple_results = True
-    impl_static_args = (6, 7, 8, 9, 10, 11, 12)
+    impl_static_args = 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
     inner_primitive = None
     outer_primitive = None
 
@@ -867,7 +831,6 @@ class GemmPrimitive(BasePrimitive):
         rhs_scale_inv,
         bias,
         gelu_input,
-        aux_in,
         out_dtype,
         contracting_dims,
         scaling_mode,
@@ -875,6 +838,9 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        transpose_batch_sequence,
+        sequence_dim,
+        is_outer,
         comm_overlap,
     ):
         del use_split_accumulator
@@ -942,30 +908,20 @@ class GemmPrimitive(BasePrimitive):
         out_shape = (*lhs_non_contracting_shape, *rhs_non_contracting_shape)
         output = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
 
-        # Auxiliary output for comm+GEMM overlap
-        if comm_overlap.is_enabled:
+        # Adjust output shape for comm+GEMM overlap
+        if comm_overlap.is_enabled and not is_outer: # Inner abstract
             if comm_overlap.is_all_gather():
-                # Inner abstract
-                # TODO: remove sharded_impl and gather_dim
-                if comm_overlap.sharded_impl:
-                    out_shape[comm_overlap.gather_dim] *= comm_overlap.tp_size
-                    output = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
+                out_shape[sequence_dim] *= tp_axis_size()
+                output = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
 
             elif comm_overlap.is_reduce_scatter():
-                # GEMM->RS auxiliary output is the reduce-scattered output
                 rs_out_shape = list(out_shape).copy()
-
-                # Sharded abstract divides scattered dimension by TP size
-                if comm_overlap.sharded_impl:
-                    rs_out_shape[comm_overlap.scatter_dim] = (
-                        rs_out_shape[comm_overlap.scatter_dim] // comm_overlap.tp_size
-                    )
-
+                rs_out_shape[sequence_dim] = (
+                    rs_out_shape[sequence_dim] // tp_axis_size()
+                )
                 output = jax.core.ShapedArray(shape=rs_out_shape, dtype=out_dtype)
-            else:
-                raise NotImplementedError("This method is not implemented yet.")
 
-        # Validate bias -- shape always depends on pure GEMM output even for GEMM->RS overlap <--
+        # Validate bias -- shape always depends on pure GEMM output 
         # (Phuong) This is not true for TP + Hidden
         bias_shape = (0,)
         bias_dtype = out_dtype
@@ -985,7 +941,7 @@ class GemmPrimitive(BasePrimitive):
                 bias_shape = rhs_non_contracting_shape
         bias_grad = jax.core.ShapedArray(shape=bias_shape, dtype=bias_dtype)
 
-        # Validate pre-GeLU -- shape always depends on pure GEMM output even for GEMM->RS overlap
+        # Validate pre-GeLU -- shape always depends on pure GEMM output 
         pre_gelu_shape = (0,)
         pre_gelu_dtype = out_dtype
         if fuse_gelu:
@@ -1024,7 +980,7 @@ class GemmPrimitive(BasePrimitive):
         workspace_size += 256
         workspace = jax.core.ShapedArray(shape=(workspace_size,), dtype=jnp.uint8)
 
-        return output, bias_grad, pre_gelu_out, aux_out, lhs_swizzle, rhs_swizzle, workspace
+        return output, bias_grad, pre_gelu_out, lhs_swizzle, rhs_swizzle, workspace
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
@@ -1040,7 +996,6 @@ class GemmPrimitive(BasePrimitive):
         rhs_scale_inv,
         bias,
         gelu_input,
-        aux_in,
         out_dtype,
         contracting_dims,
         scaling_mode,
@@ -1048,9 +1003,12 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        transpose_batch_sequence,
+        sequence_dim,
+        is_outer,
         comm_overlap,
     ):
-        del out_dtype
+        del out_dtype, transpose_batch_sequence, sequence_dim, is_outer
 
         lhs_aval, _, rhs_aval, *_ = ctx.avals_in
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_aval.ndim, rhs_aval.ndim), contracting_dims)
@@ -1058,10 +1016,10 @@ class GemmPrimitive(BasePrimitive):
             (lhs_aval.ndim, rhs_aval.ndim), (lhs_cdims, rhs_cdims)
         )
 
-        args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, aux_in)
+        args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input)
         kwargs = {
             "scaling_mode": int(scaling_mode.value),
-            "lhs_axis_boundary": max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
+            "lhs_axis_boundary": max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims), 
             "rhs_axis_boundary": min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
             "lhs_transposed": lhs_transposed,
             "rhs_transposed": rhs_transposed,
@@ -1091,7 +1049,6 @@ class GemmPrimitive(BasePrimitive):
         rhs_scale_inv,
         bias,
         gelu_input,
-        aux_in,
         out_dtype,
         contracting_dims,
         scaling_mode,
@@ -1099,8 +1056,12 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        transpose_batch_sequence,
+        sequence_dim,
+        is_outer,
         comm_overlap,
     ):
+        del is_outer
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
         lhs_transposed, rhs_transposed = _get_gemm_layout(
             (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
@@ -1127,7 +1088,6 @@ class GemmPrimitive(BasePrimitive):
             rhs_scale_inv,
             bias,
             gelu_input,
-            aux_in,
             out_dtype=out_dtype,
             contracting_dims=contracting_dims,
             scaling_mode=scaling_mode,
@@ -1136,6 +1096,9 @@ class GemmPrimitive(BasePrimitive):
             grad=grad,
             use_split_accumulator=use_split_accumulator,
             comm_overlap=comm_overlap,
+            transpose_batch_sequence=transpose_batch_sequence,
+            sequence_dim=sequence_dim,
+            is_outer=False,
         )
         return outputs[:-3]  # discard workspace arrays
 
@@ -1150,10 +1113,13 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        comm_overlap
+        comm_overlap,
+        transpose_batch_sequence,
+        sequence_dim,
+        is_outer,
     ):
         assert GemmPrimitive.outer_primitive is not None
-        lhs_bdims, _, rhs_bdims, aux_in_bdims = batch_dims
+        lhs_bdims, _, rhs_bdims = batch_dims
 
         # Batched GEMM is not supported
         assert (
@@ -1187,13 +1153,15 @@ class GemmPrimitive(BasePrimitive):
                 use_split_accumulator=use_split_accumulator,
                 comm_overlap=comm_overlap,
             ),
-            (out_bdims, bias_bdims, pre_gelu_bdims, aux_out_bdims),
+            (out_bdims, bias_bdims, pre_gelu_bdims),
         )
 
     @staticmethod
     def _parse_operand_output_specs(
         arg_infos,
         contracting_dims,
+        transpose_batch_sequence,
+        comm_overlap,
     ):
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
@@ -1209,6 +1177,24 @@ class GemmPrimitive(BasePrimitive):
             (lhs_specs, lhs_specs, rhs_specs, rhs_specs),
             (lhs_non_cdims, lhs_cdims, rhs_non_cdims, rhs_cdims),
         )
+
+        sequence_dim = None
+        gsr = global_mesh_resource()
+        
+        # Find sequence dimension in lhs_specs if tensor sequence parallel is enabled
+        if gsr.tp_resource is not None:
+            batch_sequence_indices = [(i, i + 1) for i in range(len(lhs_specs) - 1) 
+                               if lhs_specs[i] == gsr.tp_resource and lhs_specs[i + 1] == gsr.tp_resource]
+            if batch_sequence_indices:
+                assert len(batch_sequence_indices) == 1, "Multiple batch-sequence dimensions are detected!"
+                sequence_dim = batch_sequence_indices[0][0] if transpose_batch_sequence else batch_sequence_indices[0][1]
+        
+        if comm_overlap.is_enabled:
+            assert sequence_dim is not None, "Sequence dimension is not found! Please check if tensor sequence parallel is enabled."
+
+        # TODO: Write down the logic for CommOverlap AG
+
+        # TODO: Write down the logic for CommOverlap RS
 
         reduce_spec = None
         for l in lhs_cspecs:
@@ -1263,7 +1249,8 @@ class GemmPrimitive(BasePrimitive):
         return (
             (lhs_specs, rhs_specs, bias_specs, gelu_specs),
             (out_specs, bias_specs, gelu_specs),
-            reduce_spec,
+            reduce_spec, 
+            sequence_dim,
         )
 
     @staticmethod
@@ -1275,6 +1262,9 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        transpose_batch_sequence,
+        sequence_dim,
+        is_outer,
         comm_overlap,
         mesh,
         arg_infos,
@@ -1285,11 +1275,11 @@ class GemmPrimitive(BasePrimitive):
             scaling_mode,
             grad,
         )
-        del use_split_accumulator, result_infos
+        del use_split_accumulator, result_infos, is_outer
 
-        # (_, (out_specs, dbias_specs, pre_gelu_specs), _) = (
-        #     GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims)
-        # )
+        (_, (out_specs, dbias_specs, pre_gelu_specs), _, _) = (
+            GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims, transpose_batch_sequence, comm_overlap)
+        )
         # out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
         #
         # # Discard bias gradient spec if there is no bias fusion
@@ -1306,9 +1296,9 @@ class GemmPrimitive(BasePrimitive):
 
         # TODO
         dimension_numbers = (contracting_dims, ((), ()))
-        lhs_specs, _, rhs_specs, *_, aux_in_specs = map(get_padded_spec, arg_infos)
+        lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
-        (_, (out_specs, bias_grad_specs, pre_gelu_specs, aux_out_specs), *_) = (
+        (_, (out_specs, bias_grad_specs, pre_gelu_specs), *_) = (
             comm_overlap.get_partitioning_rules(
                 lhs_specs, rhs_specs, aux_in_specs, dimension_numbers
             )
@@ -1339,6 +1329,9 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        transpose_batch_sequence,
+        sequence_dim,
+        is_outer,
         comm_overlap,
         mesh,
         arg_infos,
@@ -1346,7 +1339,6 @@ class GemmPrimitive(BasePrimitive):
     ):
         del result_infos
 
-<<<<<<< HEAD
         (
             (lhs_specs, rhs_specs, bias_input_specs, gelu_input_specs),
             (out_specs, dbias_specs, pre_gelu_specs),
@@ -1389,7 +1381,6 @@ class GemmPrimitive(BasePrimitive):
         out_shardings.append(NamedSharding(mesh, PartitionSpec(*pre_gelu_specs)))
 
         def _sharded_impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input):
-=======
         lhs_specs, _, rhs_specs, *_, aux_in_specs = map(get_padded_spec, arg_infos)
         (
             (lhs_specs, rhs_specs, bias_specs, gelu_input_specs, aux_in_specs),
@@ -1439,9 +1430,6 @@ class GemmPrimitive(BasePrimitive):
         )
 
         def _sharded_impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, aux_in):
-            # Why do we need this?
-            comm_overlap._set_sharded_impl(True)
->>>>>>> jax/collective-gemm-api
             outputs = GemmPrimitive.impl(
                 lhs,
                 lhs_scale_inv,
@@ -1449,7 +1437,6 @@ class GemmPrimitive(BasePrimitive):
                 rhs_scale_inv,
                 bias,
                 gelu_input,
-                aux_in,
                 out_dtype=out_dtype,
                 contracting_dims=contracting_dims,
                 scaling_mode=scaling_mode,
@@ -1457,10 +1444,11 @@ class GemmPrimitive(BasePrimitive):
                 fuse_gelu=fuse_gelu,
                 grad=grad,
                 use_split_accumulator=use_split_accumulator,
+                transpose_batch_sequence=transpose_batch_sequence,
+                sequence_dim=sequence_dim,
+                is_outer=False,
                 comm_overlap=comm_overlap,
             )
-
-            comm_overlap._set_sharded_impl(False)
 
             # All-Reduce/Reduce-Scatter GEMM output
             if all_reduce_spec is not None:
@@ -1559,19 +1547,6 @@ def gemm_uses_jax_dot() -> bool:
     return not GemmPrimitive.enabled()
 
 
-<<<<<<< HEAD
-=======
-def _get_scale_inv_without_padding(scaled_tensor):
-    return remove_padding_from_scale_inv(
-        scaled_tensor.scale_inv,
-        scaled_tensor.scaling_mode,
-        scaled_tensor.data.shape,
-        is_colwise=scaled_tensor.is_colwise,
-        flatten_axis=scaled_tensor.flatten_axis,
-    )
-
-
->>>>>>> jax/collective-gemm-api
 def _te_gemm(
     lhs: Union[jax.Array, ScaledTensor],
     rhs: Union[jax.Array, ScaledTensor],

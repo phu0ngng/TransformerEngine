@@ -20,6 +20,7 @@ import jax.numpy as jnp
 from jax.interpreters import pxla
 from jax.sharding import PartitionSpec, get_abstract_mesh
 import numpy as np
+from functools import lru_cache
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 
@@ -338,3 +339,12 @@ def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mes
         if axis != global_mesh_resource().pp_resource:
             x = lax_paral_op(x, jax.lax.pmax, axis, mesh)
     return x
+
+
+@lru_cache(maxsize=1)
+def tp_axis_size():
+    """
+    Get the size of the tensor parallelism axis.
+    Return 1 if no TP axis is set.
+    """
+    return get_mesh_axis_size(global_mesh_resource().tp_resource)
