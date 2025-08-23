@@ -42,22 +42,6 @@ def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
     assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
 
-def _validate_mesh_resource_configuration():
-    """Validate that the mesh resource configuration is consistent and conflict-free."""
-    gsr = global_mesh_resource()
-    physical_mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
-
-    is_dp_enabled = gsr.dp_resource is not None and physical_mesh.shape[gsr.dp_resource] > 1
-    is_tp_enabled = gsr.tp_resource is not None and physical_mesh.shape[gsr.tp_resource] > 1
-    is_tpsp_enabled = gsr.tpsp_resource is not None and physical_mesh.shape[gsr.tpsp_resource] > 1
-    is_fsdp_enabled = gsr.fsdp_resource is not None and physical_mesh.shape[gsr.fsdp_resource] > 1
-    
-    assert not (is_dp_enabled and is_fsdp_enabled), (
-        f"Data parallelism and full-sharded data parallelism cannot be enabled at the same time. Got dp_resource={gsr.dp_resource} and fsdp_resource={gsr.fsdp_resource}"
-    )
-    assert not (is_tp_enabled and is_tpsp_enabled), (
-        f"Tensor parallelism and tensor sequence parallelism cannot be enabled at the same time. Got tp_resource={gsr.tp_resource} and tpsp_resource={gsr.tpsp_resource}"
-    )
 
 def get_sharding_map_logic_axis_to_mesh_axis():
     """
@@ -65,18 +49,38 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     """
     gsr = global_mesh_resource()
 
+    IS_FSDP_OUTER = bool(int(os.environ.get("NVTE_OUTER_BATCH_FSDP_DIM", False)))
+
+    batch_resources = (
+        [gsr.fsdp_resource, gsr.dp_resource]
+        if IS_FSDP_OUTER
+        else [gsr.dp_resource, gsr.fsdp_resource]
+    )
+
+    batch_dim_rule = []
+    for resource in batch_resources:
+        if resource is not None and resource not in batch_dim_rule:
+            batch_dim_rule.append(resource)
+
+    if len(batch_dim_rule) <= 0:
+        batch_dim_rule = None
+    elif len(batch_dim_rule) == 1:
+        batch_dim_rule = batch_dim_rule[0]
+    else:
+        batch_dim_rule = tuple(batch_dim_rule)
+
     te_logical_axis_to_mesh_axis = {
-        BATCH_AXES: (gsr.dp_resource, gsr.fsdp_resource),
+        BATCH_AXES: batch_dim_rule,
         SEQLEN_AXES: None,
-        SEQLEN_TP_AXES: gsr.tpsp_resource,
+        SEQLEN_TP_AXES: gsr.tp_resource,
         SEQLEN_CP_AXES: gsr.cp_resource,
-        HEAD_AXES: (gsr.tp_resource, gsr.tpsp_resource),
+        HEAD_AXES: gsr.tp_resource,
         HIDDEN_AXES: None,
-        HIDDEN_TP_AXES: (gsr.tp_resource, gsr.tpsp_resource),
+        HIDDEN_TP_AXES: gsr.tp_resource,
         JOINED_AXES: None,
         W_NO_SHARD_AXES: None,
         W_FSDP_AXES: gsr.fsdp_resource,
-        W_TP_AXES: (gsr.tp_resource, gsr.tpsp_resource),
+        W_TP_AXES: gsr.tp_resource,
         W_JOINED_AXES: None,
     }
     return te_logical_axis_to_mesh_axis
@@ -270,7 +274,6 @@ class MeshResource:
     Attributes:
         dp_resource: Axis name for data parallelism (batch sharding), default is None
         tp_resource: Axis name for tensor parallelism (hidden dimension sharding), default is None
-        tpsp_resource: Axis name for tensor sequence parallelism, default is None
         fsdp_resource: Axis name for full-sharded data parallelism, default is None
         pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
         cp_resource: Axis name for context parallelism (sequence sharding), default is None
@@ -278,12 +281,12 @@ class MeshResource:
 
     dp_resource: str = None
     tp_resource: str = None
-    tpsp_resource: str = None
     fsdp_resource: str = None
     pp_resource: str = None
     cp_resource: str = None
 
-_GLOBAL_MESH_RESOURCE = MeshResource()
+
+_GLOBAL_MESH_RESOURCE = None
 
 
 @contextmanager
@@ -300,11 +303,7 @@ def global_shard_guard(resource: MeshResource):
     old_resources = _GLOBAL_MESH_RESOURCE
     try:
         _GLOBAL_MESH_RESOURCE = resource
-        _validate_mesh_resource_configuration()
         yield
-    except Exception as e:
-        _GLOBAL_MESH_RESOURCE = old_resources
-        raise e
     finally:
         _GLOBAL_MESH_RESOURCE = old_resources
 
@@ -315,6 +314,11 @@ def global_mesh_resource() -> MeshResource:
     Returns:
         The current MeshResource instance
     """
+    assert _GLOBAL_MESH_RESOURCE is not None, (
+        "Global mesh resource is not set. Please set the MeshResource via a global_shard_guard"
+        " context. If you are not using multiple GPUs, you can use an empty MeshResource by"
+        " wrapping your program in 'with global_shard_guard(MeshResource()):'"
+    )
     return _GLOBAL_MESH_RESOURCE
 
 
@@ -347,3 +351,52 @@ def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mes
         if axis != global_mesh_resource().pp_resource:
             x = lax_paral_op(x, jax.lax.pmax, axis, mesh)
     return x
+
+
+# Deprecating Items ---------------------------------------------------------------
+ShardingResource = MeshResource
+
+global_shard_resource = global_mesh_resource
+
+
+class MajorShardingType(Enum):
+    """Enumeration of major sharding types for distributed training.
+
+    This enum defines the basic sharding patterns available for distributed
+    training. Note that this class is deprecated and will be removed in the future.
+
+    Values:
+        SINGLE: Single process training
+        DP: Data parallel training
+        TP: Standard tensor parallel training
+        DPTP: Data and standard tensor parallel training
+    """
+
+    SINGLE = 0
+    DP = 1
+    TP = 2
+    DPTP = 3
+
+
+class ShardingType(Enum):
+    """Enumeration of detailed sharding types for distributed training.
+
+    This enum defines specific sharding patterns for distributed training,
+    including combinations of data parallelism and different tensor parallelism
+    strategies. Note that this class is deprecated and will be removed in the future.
+
+    Values:
+        SINGLE: No sharding
+        DP: Sharding along data parallelism
+        TP_COL: Sharding along column-split tensor parallelism
+        TP_ROW: Sharding along row-split tensor parallelism
+        DP_TP_COL: Sharding along data and column-split tensor parallelism
+        DP_TP_ROW: Sharding along data and row-split tensor parallelism
+    """
+
+    SINGLE = (MajorShardingType.SINGLE, "single")
+    DP = (MajorShardingType.DP, "dp")
+    TP_COL = (MajorShardingType.TP, "tp_col")
+    TP_ROW = (MajorShardingType.TP, "tp_row")
+    DP_TP_COL = (MajorShardingType.DPTP, "dp_tp_col")
+    DP_TP_ROW = (MajorShardingType.DPTP, "dp_tp_row")
