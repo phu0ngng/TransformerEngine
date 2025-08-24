@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import partial, reduce
 from typing import Tuple, Sequence, Union
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -38,7 +39,7 @@ from ..quantize import (
 from .misc import get_padded_spec, jax_dtype_to_te_dtype
 from ..sharding import (
     global_mesh_resource,
-    tp_axis_size,
+    tpsp_axis_size,
 )
 
 
@@ -228,8 +229,8 @@ class CommOverlapHelper:
         assert (
             self.buffer_shape is not None and len(self.buffer_shape) >= 2
         ), f"CommOverlapHelper: {self.buffer_shape} is not a valid buffer shape."
-        assert tp_axis_size() > 1, (
-            f"CommOverlapHelper: Communication + GEMM overlap requires a valid TP axis size. Got TP axis size {tp_axis_size()}."
+        assert tpsp_axis_size() > 1, (
+            f"CommOverlapHelper: Communication + GEMM overlap requires a valid TP axis size. Got TP axis size {tpsp_axis_size()}."
         )
 
         # TODO: Why do we need this?
@@ -254,7 +255,7 @@ class CommOverlapHelper:
 
         # Num splits for P2P overlap is always fixed to TP size
         if self.num_splits is None:
-            object.__setattr__(self, "num_splits", tp_axis_size())
+            object.__setattr__(self, "num_splits", tpsp_axis_size())
 
         # Set conditional defaults for config options not specified at init time
         if self.comm_cga_size is None:
@@ -286,7 +287,7 @@ class CommOverlapHelper:
             self.method,
             self.buffer_shape,
             jax_dtype_to_te_dtype(self.buffer_dtype),
-            self.tp_size,
+            tpsp_axis_size(),
         )
         kwargs = {
             "num_splits": self.num_splits,
@@ -911,13 +912,13 @@ class GemmPrimitive(BasePrimitive):
         # Adjust output shape for comm+GEMM overlap
         if comm_overlap.is_enabled and not is_outer: # Inner abstract
             if comm_overlap.is_all_gather():
-                out_shape[sequence_dim] *= tp_axis_size()
+                out_shape[sequence_dim] *= tpsp_axis_size()
                 output = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
 
             elif comm_overlap.is_reduce_scatter():
                 rs_out_shape = list(out_shape).copy()
                 rs_out_shape[sequence_dim] = (
-                    rs_out_shape[sequence_dim] // tp_axis_size()
+                    rs_out_shape[sequence_dim] // tpsp_axis_size()
                 )
                 output = jax.core.ShapedArray(shape=rs_out_shape, dtype=out_dtype)
 
@@ -1165,6 +1166,17 @@ class GemmPrimitive(BasePrimitive):
     ):
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
+        gsr = global_mesh_resource()
+
+        # Ensure that tensor sequence parallelism is not used via setting tp_resource
+        if gsr.tp_resource is not None:
+            for i in range(len(lhs_specs) - 1):
+                if (lhs_specs[i] == gsr.tp_resource and lhs_specs[i + 1] == gsr.tp_resource):
+                    warnings.warn(
+                        f"Tensor sequence parallelism is detected as tp_resource='{gsr.tp_resource}' appears twice consecutively in lhs_specs: {lhs_specs}. "
+                        f"Please setting MeshResource.tpsp_resource for tensor sequence parallelism to avoid potential issues."
+                    )
+
         lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_ndim, rhs_ndim), contracting_dims)
         lhs_non_cdims, rhs_non_cdims = map(
@@ -1222,7 +1234,8 @@ class GemmPrimitive(BasePrimitive):
 
             # Non-contracting dims of RHS always needs to be gathered along the FSDP axis
             rhs_non_cspecs = tuple(
-                None if spec is not None and "fsdp" in spec else spec for spec in rhs_non_cspecs
+                None if spec is not None and spec == gsr.fsdp_resource else spec
+                for spec in rhs_non_cspecs
             )
 
         # Non-contracting dims of LHS to be gathered along the SP axis.

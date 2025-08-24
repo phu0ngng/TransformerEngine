@@ -43,6 +43,22 @@ def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
     assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
 
+def _validate_mesh_resource_configuration():
+    """Validate that the mesh resource configuration is consistent and conflict-free."""
+    gsr = global_mesh_resource()
+    physical_mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+
+    is_dp_enabled = gsr.dp_resource is not None and physical_mesh.shape[gsr.dp_resource] > 1
+    is_tp_enabled = gsr.tp_resource is not None and physical_mesh.shape[gsr.tp_resource] > 1
+    is_tpsp_enabled = gsr.tpsp_resource is not None and physical_mesh.shape[gsr.tpsp_resource] > 1
+    is_fsdp_enabled = gsr.fsdp_resource is not None and physical_mesh.shape[gsr.fsdp_resource] > 1
+    
+    assert not (is_dp_enabled and is_fsdp_enabled), (
+        f"Data parallelism and full-sharded data parallelism cannot be enabled at the same time. Got dp_resource={gsr.dp_resource} and fsdp_resource={gsr.fsdp_resource}"
+    )
+    assert not (is_tp_enabled and is_tpsp_enabled), (
+        f"Tensor parallelism and tensor sequence parallelism cannot be enabled at the same time. Got tp_resource={gsr.tp_resource} and tpsp_resource={gsr.tpsp_resource}"
+    )
 
 def get_sharding_map_logic_axis_to_mesh_axis():
     """
@@ -50,6 +66,7 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     """
     gsr = global_mesh_resource()
 
+<<<<<<< HEAD
     physical_mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
     is_dp_enabled = gsr.dp_resource is not None and physical_mesh.shape[gsr.dp_resource] > 1
     is_fsdp_enabled = gsr.fsdp_resource is not None and physical_mesh.shape[gsr.fsdp_resource] > 1
@@ -59,16 +76,20 @@ def get_sharding_map_logic_axis_to_mesh_axis():
 
     te_logical_axis_to_mesh_axis = {
         BATCH_AXES: gsr.dp_resource if is_dp_enabled else gsr.fsdp_resource,
+=======
+    te_logical_axis_to_mesh_axis = {
+        BATCH_AXES: gsr.fsdp_resource or gsr.dp_resource,
+>>>>>>> tpsp_resource
         SEQLEN_AXES: None,
-        SEQLEN_TP_AXES: gsr.tp_resource,
+        SEQLEN_TP_AXES: gsr.tpsp_resource,
         SEQLEN_CP_AXES: gsr.cp_resource,
-        HEAD_AXES: gsr.tp_resource,
+        HEAD_AXES: gsr.tp_resource or gsr.tpsp_resource,
         HIDDEN_AXES: None,
-        HIDDEN_TP_AXES: gsr.tp_resource,
+        HIDDEN_TP_AXES: gsr.tp_resource or gsr.tpsp_resource,
         JOINED_AXES: None,
         W_NO_SHARD_AXES: None,
         W_FSDP_AXES: gsr.fsdp_resource,
-        W_TP_AXES: gsr.tp_resource,
+        W_TP_AXES: gsr.tp_resource or gsr.tpsp_resource,
         W_JOINED_AXES: None,
     }
     return te_logical_axis_to_mesh_axis
@@ -262,6 +283,7 @@ class MeshResource:
     Attributes:
         dp_resource: Axis name for data parallelism (batch sharding), default is None
         tp_resource: Axis name for tensor parallelism (hidden dimension sharding), default is None
+        tpsp_resource: Axis name for tensor sequence parallelism (hidden and sequence sharding), default is None
         fsdp_resource: Axis name for full-sharded data parallelism, default is None
         pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
         cp_resource: Axis name for context parallelism (sequence sharding), default is None
@@ -269,6 +291,7 @@ class MeshResource:
 
     dp_resource: str = None
     tp_resource: str = None
+    tpsp_resource: str = None
     fsdp_resource: str = None
     pp_resource: str = None
     cp_resource: str = None
@@ -291,7 +314,11 @@ def global_shard_guard(resource: MeshResource):
     old_resources = _GLOBAL_MESH_RESOURCE
     try:
         _GLOBAL_MESH_RESOURCE = resource
+        _validate_mesh_resource_configuration()
         yield
+    except Exception as e:
+        _GLOBAL_MESH_RESOURCE = old_resources
+        raise e
     finally:
         _GLOBAL_MESH_RESOURCE = old_resources
 
@@ -342,9 +369,9 @@ def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mes
 
 
 @lru_cache(maxsize=1)
-def tp_axis_size():
+def tpsp_axis_size():
     """
     Get the size of the tensor parallelism axis.
     Return 1 if no TP axis is set.
     """
-    return get_mesh_axis_size(global_mesh_resource().tp_resource)
+    return get_mesh_axis_size(global_mesh_resource().tpsp_resource)
