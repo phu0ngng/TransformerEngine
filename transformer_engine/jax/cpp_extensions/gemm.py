@@ -191,19 +191,8 @@ class CommOverlapHelper:
     rs_overlap_first_gemm: bool = field(default=False, kw_only=True)
     aggregate_ag: bool = field(default=False, kw_only=True)
 
-    # Other kwargs not passed to Userbuffers
-    # tp_resource: str = field(default_factory=lambda: global_mesh_resource().tp_resource)
-    # logical_tp_axis: str = field(default=W_TP_AXES, kw_only=True)
-    # logical_sp_axis: str = field(default=SEQLEN_TP_AXES, kw_only=True)
-    # flatten_axis: int = field(default=-1, kw_only=True)
-
     # Internal attributes
-    is_enabled: bool = field(default=False, init=False)
     unique_id: int = field(default=-1, init=False, compare=False)
-    # sharded_impl: bool = field(default=False, init=False, compare=False)
-    # gather_dim: int = field(default=-2, init=False, compare=False)
-    # scatter_dim: int = field(default=-2, init=False, compare=False)
-    # sequence_dim: int = field(default=1, init=False, compare=False)
 
 
     def __post_init__(self):
@@ -234,9 +223,9 @@ class CommOverlapHelper:
         )
 
         # TODO: Why do we need this?
-        # assert (
-        #     self.tp_size % 2 == 0
-        # ), f"CommOverlapHelper: Tensor-parallel axis of {self.tp_size} is not divisible by 2."
+        assert (
+            tpsp_axis_size() % 2 == 0
+        ), f"CommOverlapHelper: Tensor-parallel axis of {tpsp_axis_size()} is not divisible by 2."
 
         # Collapse buffer shape to 2D
         if len(self.buffer_shape) > 2:
@@ -270,7 +259,7 @@ class CommOverlapHelper:
         # Allocate the communication buffer
         args, kwargs = self.get_bootstrap_args_kwargs()
         object.__setattr__(self, "unique_id", tex.create_comm_overlap_buffer(*args, **kwargs))
-        object.__setattr__(self, "is_enabled", True)
+        # object.__setattr__(self, "is_enabled", True)
 
     def is_all_gather(self):
         """Check if the overlapped collective is an all-gather."""
@@ -308,6 +297,7 @@ class CommOverlapHelper:
     def get_lowering_kwargs(self):
         """Generate a dictionary of keyword arguments used in GemmPrimitive.lowering()."""
         aux_axis_boundary = -1
+        # TODO: remove is_enabled
         if self.is_enabled:
             if self.is_all_gather():
                 assert self.gather_dim >= 0, (
@@ -328,324 +318,6 @@ class CommOverlapHelper:
             "comm_type": int(self.comm_type.value),
             "aux_axis_boundary": aux_axis_boundary,
         }
-
-    # @staticmethod
-    # def _check_operand_specs(lhs_specs, rhs_specs, dimension_numbers):
-    #     (lhs_cdims, rhs_cdims), (lhs_bdims, rhs_bdims) = dimension_numbers
-    #     lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
-    #
-    #     def _split_specs(specs, contracting_dims, batch_dims):
-    #         ndims = len(specs)
-    #         cdims, bdims = map(sanitize_dims, (ndims, ndims), (contracting_dims, batch_dims))
-    #
-    #         # Batch specs
-    #         bspecs = tuple(specs[i] for i in bdims)
-    #
-    #         # Non-batch leading dimension specs
-    #         lspecs = tuple(specs[i] for i in range(ndims) if i not in cdims + bdims)
-    #
-    #         # Non-batch contracting dimension specs
-    #         cspecs = tuple(specs[i] for i in range(ndims) if i in cdims and i not in bdims)
-    #
-    #         return bspecs, lspecs, cspecs
-    #
-    #     (
-    #         (lhs_bspecs, lhs_lspecs, lhs_cspecs),
-    #         (rhs_bspecs, rhs_lspecs, rhs_cspecs),
-    #     ) = map(
-    #         _split_specs,
-    #         (lhs_specs, rhs_specs),
-    #         (lhs_cdims, rhs_cdims),
-    #         (lhs_bdims, rhs_bdims),
-    #     )
-    #
-    #     # Batched dimensions must have the same sharding
-    #     if len(lhs_bdims) > 0 and len(rhs_bdims) > 0:
-    #         assert all(
-    #             lhs_bspec == rhs_bspec for lhs_bspec, rhs_bspec in zip(lhs_bspecs, rhs_bspecs)
-    #         ), (
-    #             "cuBLAS GEMM operand batch dimensions must have the same sharding: "
-    #             f"{lhs_specs} @ idx {lhs_bdims} x {rhs_specs} @ idx {rhs_bdims}."
-    #         )
-    #
-    #     # Only one each of the non-batched leading dimensions and non-batched contracting
-    #     # dimensions can be sharded
-    #     lhs_ldims, rhs_ldims = map(
-    #         lambda ndim, exclude: tuple(dim for dim in range(ndim) if dim not in exclude),
-    #         (lhs_ndim, rhs_ndim),
-    #         (lhs_bdims + lhs_cdims, rhs_bdims + rhs_cdims),
-    #     )
-    #     (lhs_lspec_not_none, rhs_lspec_not_none, lhs_cspec_not_none, rhs_cspec_not_none) = map(
-    #         lambda specs: tuple(spec for spec in specs if spec is not None),
-    #         (lhs_lspecs, rhs_lspecs, lhs_cspecs, rhs_cspecs),
-    #     )
-    #     assert len(lhs_lspec_not_none) <= 1 and len(rhs_lspec_not_none) <= 1, (
-    #         "cuBLAS GEMM operands can have only one sharded non-batched leading dimension: "
-    #         f"{lhs_specs} @ idx {lhs_ldims} x {rhs_specs} @ idx {rhs_ldims}."
-    #     )
-    #     assert len(lhs_cspec_not_none) <= 1 and len(rhs_cspec_not_none) <= 1, (
-    #         "cuBLAS GEMM operands can have only one sharded non-batched contracting dimension: "
-    #         f"{lhs_specs} @ idx {lhs_cdims} x {rhs_specs} @ idx {rhs_cdims}."
-    #     )
-    #
-    #     # Extract single leading and contracting dimension specs
-    #     (lhs_lspec, rhs_lspec, lhs_cspec, rhs_cspec) = map(
-    #         lambda specs: None if len(specs) == 0 else specs[0],
-    #         (lhs_lspec_not_none, rhs_lspec_not_none, lhs_cspec_not_none, rhs_cspec_not_none),
-    #     )
-    #     return (lhs_lspec, lhs_cspec), (rhs_lspec, rhs_cspec)
-    #
-    # def _get_no_overlap_rules(self, lhs_specs, rhs_specs, aux_in_specs, dimension_numbers):
-    #     (lhs_cdims, rhs_cdims), (lhs_bdims, rhs_bdims) = dimension_numbers
-    #     lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
-    #
-    #     (lhs_lspec, lhs_cspec), (rhs_lspec, rhs_cspec) = self._check_operand_specs(
-    #         lhs_specs, rhs_specs, ((lhs_cdims, rhs_cdims), (lhs_bdims, rhs_bdims))
-    #     )
-    #
-    #     # Reproducing jax.nn.scaled_matmul() custom partitioning for arbitrary GEMM layouts
-    #     # with row-wise LHS:(B, M, K1) and row-wise RHS:(B, N, K2) operands.
-    #     # 1. K1 == K2 != None and N == None
-    #     #    LHS: (B, M, K)
-    #     #    RHS: (B, None, K)
-    #     #    OUT: (B, M, None) --(AR)-> (B, M, None)
-    #     # 2. K1 == K2 != None and M == N != None
-    #     #    LHS: (B, M, K)
-    #     #    RHS: (B, N, K)--(AG)->(B, None, K)
-    #     #    OUT: (B, M, None) --(RS)--> (B, M, N)
-    #     # 3. M == N
-    #     #    LHS: (B, M, K)--(AG)->(B, M, None)
-    #     #    RHS: (B, M, K)--(AG)->(B, None, None)
-    #     #    OUT: (B, M, None)
-    #     # 4. M != N
-    #     #    LHS: (B, M, K)--(AG)->(B, M, None)
-    #     #    RHS: (B, N, K)--(AG)->(B, N, None)
-    #     #    OUT: (B, M, N)
-    #     reduce_flag = lhs_cspec is not None and lhs_cspec == rhs_cspec
-    #     all_reduce_output = reduce_flag and rhs_lspec is None
-    #     reduce_scatter_output = reduce_flag and lhs_lspec is not None and lhs_lspec == rhs_lspec
-    #     all_reduce_spec = reduce_scatter_spec = scatter_dim = None
-    #
-    #     lhs_non_contracting_specs, rhs_non_contracting_specs = map(
-    #         lambda specs, cdims: tuple(specs[i] for i in range(len(specs)) if i not in cdims),
-    #         (lhs_specs, rhs_specs),
-    #         (lhs_cdims, rhs_cdims),
-    #     )
-    #     out_specs = (*lhs_non_contracting_specs, *rhs_non_contracting_specs)
-    #     if reduce_scatter_output:
-    #         # All-gather (if necessary) the non-batch non-contracting dimension of RHS
-    #         # LHS: (B, M, K)
-    #         # RHS: (B, N, K) --(AG)-> (B, None, K)
-    #         # OUT: (B, M, K) x (B, None, K)^T = (B, M, None) --(RS)-> (B, M, N)
-    #         rhs_spec = tuple(
-    #             rhs_spec[i] if i in set(rhs_bdims + rhs_cdims) else None for i in range(rhs_ndim)
-    #         )
-    #         reduce_scatter_spec = lhs_cspec
-    #         scatter_dim = out_specs.index(rhs_lspec)
-    #
-    #     elif all_reduce_output:
-    #         # Set all output trailing dimensions to zero
-    #         out_specs = (
-    #             *lhs_non_contracting_specs,
-    #             *[None for _ in range(len(rhs_non_contracting_specs))],
-    #         )
-    #         all_reduce_spec = lhs_cspec
-    #     else:
-    #         # All-gather (if necessary) the non-batch contracting dimensions
-    #         # LHS: (B, M, K) --(AG)-> (B, M, None)
-    #         # RHS: (B, N, K) --(AG)-> (B, N, None)
-    #         # OUT: (B, M, None) x (B, N, None)^T = (B, M, N)
-    #         lhs_specs = tuple(
-    #             None if i in lhs_cdims and i not in lhs_bdims else lhs_specs[i]
-    #             for i in range(lhs_ndim)
-    #         )
-    #         rhs_specs = tuple(
-    #             None if i in rhs_cdims and i not in rhs_bdims else rhs_specs[i]
-    #             for i in range(rhs_ndim)
-    #         )
-    #         # Check if RHS non-contracting spec also appears in the LHS non-contracting specs
-    #         if rhs_lspec is not None and rhs_lspec in tuple(
-    #             lhs_specs[i] for i in range(lhs_ndim) if i not in lhs_cdims
-    #         ):
-    #             # All-gather (if necessary) the non-batch non-contracting dimensions of RHS
-    #             # LHS: (B, M, None)
-    #             # RHS: (B, N, None) --(AG)-> (B, None, None)
-    #             # OUT: (B, M, None) x (B, None, None)^T = (B, M, None)
-    #             rhs_specs = tuple(
-    #                 None if i not in set(rhs_bdims + rhs_cdims) else rhs_specs[i]
-    #                 for i in range(rhs_ndim)
-    #             )
-    #             # Set all output trailing dimensions to zero
-    #             out_specs = (
-    #                 *lhs_non_contracting_specs,
-    #                 *[None for _ in range(len(rhs_non_contracting_specs))],
-    #             )
-    #
-    #     # Bias and Pre-GeLU sharding is based on GEMM output
-    #     bias_specs = out_specs[len(lhs_non_contracting_specs) :]
-    #     gelu_specs = out_specs
-    #
-    #     return (
-    #         (lhs_specs, rhs_specs, bias_specs, gelu_specs, aux_in_specs),
-    #         (out_specs, bias_specs, gelu_specs, (None,)),
-    #         (all_reduce_spec, reduce_scatter_spec, scatter_dim),
-    #     )
-    #
-    # def _get_bulk_overlap_rules(self, lhs_specs, rhs_specs, aux_in_specs, dimension_numbers):
-    #     assert self.tp_resource in aux_in_specs, (
-    #         "CommOverlapHelper: Auxiliary input for bulk all-gather overlap is not sharded "
-    #         f"over the tensor-parallel mesh resource '{self.tp_resource}' in any dimension."
-    #     )
-    #
-    #     aux_out_specs = (None,)
-    #     bulk_comm_dim = aux_in_specs.index(self.tp_resource)
-    #     aux_in_specs_batch = aux_in_specs[:bulk_comm_dim]
-    #     aux_in_specs_tail = aux_in_specs[bulk_comm_dim + 1 :]
-    #     if self.is_all_gather():
-    #         assert all(spec is None for spec in aux_in_specs_tail), (
-    #             "CommOverlapHelper: Trailing dimensions of the auxiliary input for bulk all-gather "
-    #             "overlap cannot be sharded."
-    #         )
-    #         self._set_gather_dim(bulk_comm_dim)
-    #         aux_out_specs = (
-    #             *aux_in_specs_batch,
-    #             None,  # all-gathered dimension
-    #             *[None for _ in range(len(aux_in_specs_tail))],
-    #         )
-    #     else:
-    #         assert all(spec is None for spec in aux_in_specs[bulk_comm_dim:]), (
-    #             "CommOverlapHelper: Non-batch dimensions of the auxiliary input for bulk "
-    #             "reduce-scatter overlap cannot be sharded."
-    #         )
-    #         self._set_scatter_dim(bulk_comm_dim)
-    #         aux_out_specs = (
-    #             *aux_in_specs_batch,
-    #             self.tp_resource,
-    #             *[None for _ in range(len(aux_in_specs_tail))],
-    #         )
-    #
-    #     # GEMM is independent of communication so specs are as if there is no overlap
-    #     operand_specs, output_specs, xla_reduce_info = self._get_no_overlap_rules(
-    #         lhs_specs, rhs_specs, aux_in_specs, dimension_numbers
-    #     )
-    #
-    #     return (
-    #         operand_specs,
-    #         (*output_specs[:-1], aux_out_specs),
-    #         xla_reduce_info,
-    #     )
-    #
-    # def _get_all_gather_rules(self, lhs_specs, rhs_specs, aux_in_specs, dimension_numbers):
-    #     contracting_dims, batch_dims = dimension_numbers
-    #     lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
-    #     lhs_cdims, rhs_cdims, lhs_bdims, rhs_bdims = map(
-    #         sanitize_dims, 2 * [lhs_ndim, rhs_ndim], contracting_dims + batch_dims
-    #     )
-    #
-    #     (lhs_lspec, _), _ = self._check_operand_specs(
-    #         lhs_specs, rhs_specs, ((lhs_cdims, rhs_cdims), (lhs_bdims, rhs_bdims))
-    #     )
-    #     assert lhs_lspec == self.tp_resource, (
-    #         "CommOverlapHelper: Non-batch leading dimension of the LHS operand for AG->GEMM "
-    #         f"overlap must be sharded over the tensor-parallel mesh resource {self.tp_resource}, "
-    #         f"but got {lhs_lspec} sharding instead."
-    #     )
-    #
-    #     # AG->GEMM overlap: Require non-batched contracting dimensions to be unsharded (e.g. FSDP)
-    #     # LHS: (B, M, None)
-    #     # RHS: (None, N)
-    #     # OUT: (B, M, None) --(AG)-> (B, None, None) x (None, N) = (B, None, N)
-    #     lhs_specs = tuple(
-    #         None if i in lhs_cdims and i not in lhs_bdims else lhs_specs[i] for i in range(lhs_ndim)
-    #     )
-    #     rhs_specs = tuple(
-    #         None if i in rhs_cdims and i not in rhs_bdims else rhs_specs[i] for i in range(rhs_ndim)
-    #     )
-    #
-    #     # GEMM output spec keeps LHS batch spec and RHS non-contracting specs, but is None
-    #     # in the non-batched leading dimensions.
-    #     lhs_non_cspecs_gathered = list(
-    #         lhs_specs[i] if i in lhs_bdims else None for i in range(lhs_ndim) if i not in lhs_cdims
-    #     )
-    #     rhs_non_cspecs = tuple(rhs_specs[i] for i in range(rhs_ndim) if i not in rhs_cdims)
-    #     out_specs = (*lhs_non_cspecs_gathered, *rhs_non_cspecs)
-    #     self._set_gather_dim(lhs_specs.index(lhs_lspec))
-    #
-    #     # Bias and Pre-GeLU sharding is based on GEMM output
-    #     bias_specs = out_specs[len(lhs_non_cspecs_gathered) :]
-    #     gelu_specs = out_specs
-    #
-    #     # Auxiliary input/output specs depend on bulk vs. non-bulk overlap
-    #     aux_out_specs = (None,)
-    #
-    #     return (
-    #         (lhs_specs, rhs_specs, bias_specs, gelu_specs, aux_in_specs),
-    #         (out_specs, bias_specs, gelu_specs, aux_out_specs),
-    #         (None, None, None),
-    #     )
-    #
-    # def _get_reduce_scatter_rules(self, lhs_specs, rhs_specs, aux_in_specs, dimension_numbers):
-    #     contracting_dims, batch_dims = dimension_numbers
-    #     lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
-    #     lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_ndim, rhs_ndim), contracting_dims)
-    #     lhs_bdims, rhs_bdims = map(sanitize_dims, (lhs_ndim, rhs_ndim), batch_dims)
-    #
-    #     (_, lhs_cspec), (_, rhs_cspec) = self._check_operand_specs(
-    #         lhs_specs, rhs_specs, ((lhs_cdims, rhs_cdims), (lhs_bdims, rhs_bdims))
-    #     )
-    #     assert lhs_cspec == rhs_cspec == self.tp_resource, (
-    #         "CommOverlapHelper: Non-batched contracting dimensions of LHS and RHS operands for "
-    #         "GEMM->RS overlap must be sharded over the tensor-parallel resource "
-    #         f"{self.tp_resource}, but got LHS:{lhs_cspec} and RHS:{rhs_cspec} sharding instead."
-    #     )
-    #
-    #     # GEMM->RS overlap: Require non-contracting non-batch dimensions to be unsharded (e.g. FSDP)
-    #     # LHS: (B, None, K)
-    #     # RHS: (K, None)
-    #     # OUT: (B, None, K) x (K, None) = (B, None, None) --(UB-RS)-> (B, M, None)
-    #     lhs_specs = tuple(
-    #         None if i not in lhs_bdims + lhs_cdims else lhs_specs[i] for i in range(lhs_ndim)
-    #     )
-    #     rhs_specs = tuple(
-    #         None if i not in rhs_bdims + rhs_cdims else rhs_specs[i] for i in range(rhs_ndim)
-    #     )
-    #
-    #     # GEMM output is the internal communication buffer, but we will use the XLA output buffer
-    #     # as the final reduce-scattered output so we shard it accordingly here.
-    #     lhs_bspecs = tuple(
-    #         lhs_specs[i] for i in range(lhs_ndim) if i in lhs_bdims and i not in lhs_cdims
-    #     )
-    #     lhs_lspecs = tuple(lhs_specs[i] for i in range(lhs_ndim) if i not in lhs_bdims + lhs_cdims)
-    #     rhs_non_cspecs = tuple(rhs_specs[i] for i in range(rhs_ndim) if i not in rhs_cdims)
-    #     out_specs = (
-    #         *lhs_bspecs,
-    #         self.tp_resource,
-    #         *[None for _ in range(len(lhs_lspecs) - 1)],
-    #         *rhs_non_cspecs,
-    #     )
-    #     self._set_scatter_dim(out_specs.index(self.tp_resource))
-    #
-    #     # Bias and Pre-GeLU sharding is based on GEMM output
-    #     bias_specs = out_specs[len(lhs_bspecs) + len(lhs_lspecs) :]
-    #     gelu_specs = out_specs
-    #
-    #     return (
-    #         (lhs_specs, rhs_specs, bias_specs, gelu_specs, aux_in_specs),
-    #         (out_specs, bias_specs, gelu_specs, (None,)),
-    #         (None, None, None),
-    #     )
-    #
-    # def get_partitioning_rules(self, lhs_specs, rhs_specs, aux_in_specs, dimension_numbers):
-    #     """
-    #     Correct operand specs to partititions suitable for the GemmPrimitive, and infer the
-    #     partition specs of the outputs.
-    #     """
-    #     impl_map = {
-    #         tex.CommOverlapType.NONE: self._get_no_overlap_rules,
-    #         tex.CommOverlapType.AG: self._get_all_gather_rules,
-    #         tex.CommOverlapType.RS: self._get_reduce_scatter_rules,
-    #     }
-    #     return impl_map[self.comm_type](lhs_specs, rhs_specs, aux_in_specs, dimension_numbers)
 
 
 # @dataclass(frozen=True)
@@ -844,7 +516,7 @@ class GemmPrimitive(BasePrimitive):
         is_outer,
         comm_overlap,
     ):
-        del use_split_accumulator
+        del use_split_accumulator, transpose_batch_sequence, sequence_dim, is_outer
 
         def _dims_are_consecutive(dims):
             if len(dims) <= 1:
@@ -1190,24 +862,6 @@ class GemmPrimitive(BasePrimitive):
             (lhs_non_cdims, lhs_cdims, rhs_non_cdims, rhs_cdims),
         )
 
-        sequence_dim = None
-        gsr = global_mesh_resource()
-        
-        # Find sequence dimension in lhs_specs if tensor sequence parallel is enabled
-        if gsr.tp_resource is not None:
-            batch_sequence_indices = [(i, i + 1) for i in range(len(lhs_specs) - 1) 
-                               if lhs_specs[i] == gsr.tp_resource and lhs_specs[i + 1] == gsr.tp_resource]
-            if batch_sequence_indices:
-                assert len(batch_sequence_indices) == 1, "Multiple batch-sequence dimensions are detected!"
-                sequence_dim = batch_sequence_indices[0][0] if transpose_batch_sequence else batch_sequence_indices[0][1]
-        
-        if comm_overlap.is_enabled:
-            assert sequence_dim is not None, "Sequence dimension is not found! Please check if tensor sequence parallel is enabled."
-
-        # TODO: Write down the logic for CommOverlap AG
-
-        # TODO: Write down the logic for CommOverlap RS
-
         reduce_spec = None
         for l in lhs_cspecs:
             for r in rhs_cspecs:
@@ -1215,10 +869,35 @@ class GemmPrimitive(BasePrimitive):
                     assert reduce_spec is None, "Multiple reduce dimension is detected!"
                     reduce_spec = l
 
+        sequence_dim = None
+        gsr = global_mesh_resource()
+
+        # Find sequence dimension in lhs_specs if tensor sequence parallel is enabled
+        # We only do CommOverlap AG on the x or dY and CommOverlap RS on the Y or dX thus they always the LHS and have sequence dim
+        if comm_overlap is not None:
+            if comm_overlap.is_all_gather():
+                # For all-gather: find consecutive pair of tpsp_resource
+                batch_sequence_pairs = [(i, i + 1) for i in range(len(lhs_specs) - 1) 
+                                      if lhs_specs[i] == gsr.tpsp_resource and lhs_specs[i + 1] == gsr.tpsp_resource]
+                assert len(batch_sequence_pairs) == 1, f"Unable to detect the sequence dim as tpsp_resource does not appear exactly twice consecutively in lhs_specs: {lhs_specs}"
+                sequence_dim = batch_sequence_pairs[0][0] if transpose_batch_sequence else batch_sequence_pairs[0][1]
+            else: # RS
+                # For reduce-scatter: find single tpsp_resource occurrence
+                try:
+                    tpsp_idx = lhs_specs.index(gsr.tpsp_resource)
+                except ValueError:
+                    raise ValueError(f"tpsp_resource '{gsr.tpsp_resource}' is not found in lhs_specs: {lhs_specs}. Please check your sharding configuration.")
+                assert reduce_spec == gsr.tpsp_resource, f"Only CommOverlap RS with the Reduction over the TPSP axis is supported! Got reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
+                sequence_dim = tpsp_idx if transpose_batch_sequence else tpsp_idx + 1
+
         if reduce_spec is not None:
             # Other non-reduce cdims (if exists) need to be unsharded
             lhs_cspecs = tuple(s if s == reduce_spec else None for s in lhs_cspecs)
-            rhs_cspecs = tuple(s if s == reduce_spec else None for s in rhs_cspecs)
+            # Only do AG Sequence dim if not Overlap
+            if comm_overlap is not None and comm_overlap.is_all_gather():
+                rhs_cspecs = tuple(s if s == reduce_spec or s == gsr.tpsp_resource else None for s in rhs_cspecs)
+            else:
+                rhs_cspecs = tuple(s if s == reduce_spec else None for s in rhs_cspecs)
 
             # Non-contracting dims of RHS always needs to be gathered, i.e. for TP + activation_hidden
             # No batch-dim check needed as `rhs_non_cspecs` never contains batch-dim.
@@ -1238,12 +917,19 @@ class GemmPrimitive(BasePrimitive):
                 for spec in rhs_non_cspecs
             )
 
-        # Non-contracting dims of LHS to be gathered along the SP axis.
-        # Minor note: This causes MaxText TP (= Megatron TP + activation_hidden sharding) gathering x for
-        # dW1 = x^T * dY1 which is unexpected. This is a known issue and no solution has found yet.
-        lhs_non_cspecs = tuple(None if spec in rhs_non_cspecs else spec for spec in lhs_non_cspecs)
+        # Only do AG Sequence dim if not Overlap
+        if comm_overlap is None or not comm_overlap.is_all_gather():
+            # Non-contracting dims of LHS to be gathered along the SP axis.
+            # Minor note: This causes MaxText TP (= Megatron TP + activation_hidden sharding) gathering x for
+            # dW1 = x^T * dY1 which is unexpected. This is a known issue and no solution has found yet.
+            lhs_non_cspecs = tuple(None if spec in rhs_non_cspecs else spec for spec in lhs_non_cspecs)
 
         out_specs = lhs_non_cspecs + rhs_non_cspecs
+
+        # Only do AG Sequence dim if not Overlap RS
+        if comm_overlap is not None and comm_overlap.is_reduce_scatter():
+            assert sequence_dim <= len(lhs_non_cspecs), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
+            out_specs = out_specs[:sequence_dim] + (gsr.tpsp_resource,) + out_specs[sequence_dim + 1:]
 
         # specs = merge(cspecs, non_cspecs)
         lhs_specs, rhs_specs = map(
@@ -1283,55 +969,25 @@ class GemmPrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-        del (
-            out_dtype,
-            scaling_mode,
-            grad,
-        )
-        del use_split_accumulator, result_infos, is_outer
+        del out_dtype, scaling_mode, grad, use_split_accumulator, result_infos, is_outer, sequence_dim
 
-        (_, (out_specs, dbias_specs, pre_gelu_specs), _, _) = (
+        (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
             GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims, transpose_batch_sequence, comm_overlap)
         )
-        # out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
-        #
-        # # Discard bias gradient spec if there is no bias fusion
-        # if not fuse_bias:
-        #     dbias_specs = (None,)
-        # dbias_sharding = NamedSharding(mesh, PartitionSpec(*dbias_specs))
-        #
-        # # Discard pre-GeLU output spec if there is no GeLU fusion
-        # if not fuse_gelu:
-        #     pre_gelu_specs = (None,)
-        # pre_gelu_sharding = NamedSharding(mesh, PartitionSpec(*pre_gelu_specs))
-        #
-        # return [out_sharding, dbias_sharding, pre_gelu_sharding]
-
-        # TODO
-        dimension_numbers = (contracting_dims, ((), ()))
-        lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
-
-        (_, (out_specs, bias_grad_specs, pre_gelu_specs), *_) = (
-            comm_overlap.get_partitioning_rules(
-                lhs_specs, rhs_specs, aux_in_specs, dimension_numbers
-            )
-        )
-
-        # Discard bias gradient and pre-GeLU output specs based on fusion choices
+        out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
+        
+        # Discard bias gradient spec if there is no bias fusion
         if not fuse_bias:
-            bias_grad_specs = (None,)
+            dbias_specs = (None,)
+        dbias_sharding = NamedSharding(mesh, PartitionSpec(*dbias_specs))
+        
+        # Discard pre-GeLU output spec if there is no GeLU fusion
         if not fuse_gelu:
             pre_gelu_specs = (None,)
+        pre_gelu_sharding = NamedSharding(mesh, PartitionSpec(*pre_gelu_specs))
+        
+        return [out_sharding, dbias_sharding, pre_gelu_sharding]
 
-        # Assemble output shardings
-        out_shardings = list(
-            map(
-                lambda specs: NamedSharding(mesh, PartitionSpec(*specs)),
-                (out_specs, bias_grad_specs, pre_gelu_specs, aux_out_specs),
-            )
-        )
-
-        return out_shardings
 
     @staticmethod
     def partition(
@@ -1350,16 +1006,15 @@ class GemmPrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-        del result_infos
+        del result_infos, is_outer, sequence_dim
 
         (
             (lhs_specs, rhs_specs, bias_input_specs, gelu_input_specs),
             (out_specs, dbias_specs, pre_gelu_specs),
-            reduce_spec,
-        ) = GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims)
+            reduce_spec, inferred_sequence_dim,
+        ) = GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims, transpose_batch_sequence, comm_overlap)
 
-        # Assemble argument shardings
-        # NOTE: Block scale inverses match their operands, but tensor scale inverses are unsharded.
+        # Block scale inverses match their operands, but tensor scale inverses are unsharded.
         none_sharding = NamedSharding(mesh, PartitionSpec(None))
         lhs_sharding = NamedSharding(mesh, PartitionSpec(*lhs_specs))
         rhs_sharding = NamedSharding(mesh, PartitionSpec(*rhs_specs))
@@ -1394,55 +1049,6 @@ class GemmPrimitive(BasePrimitive):
         out_shardings.append(NamedSharding(mesh, PartitionSpec(*pre_gelu_specs)))
 
         def _sharded_impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input):
-        lhs_specs, _, rhs_specs, *_, aux_in_specs = map(get_padded_spec, arg_infos)
-        (
-            (lhs_specs, rhs_specs, bias_specs, gelu_input_specs, aux_in_specs),
-            (out_specs, bias_grad_specs, pre_gelu_specs, aux_out_specs),
-            (all_reduce_spec, reduce_scatter_spec, scatter_dim),
-        ) = comm_overlap.get_partitioning_rules(
-            lhs_specs, rhs_specs, aux_in_specs, dimension_numbers
-        )
-
-        # Block scale inverses match their operands, but tensor scale inverses are unsharded.
-        lhs_scale_specs = (None,)
-        rhs_scale_specs = (None,)
-        if scaling_mode.is_1d_block_scaling() and not comm_overlap.is_enabled:
-            lhs_scale_specs = lhs_specs
-            rhs_scale_specs = rhs_specs
-
-        # Discard bias and pre-GeLU specs based on fusion choices
-        if not fuse_bias:
-            bias_specs = (None,)
-            bias_grad_specs = (None,)
-        if not fuse_gelu:
-            gelu_input_specs = (None,)
-            pre_gelu_specs = (None,)
-
-        # Assemble argument shardings
-        arg_shardings = tuple(
-            map(
-                lambda specs: NamedSharding(mesh, PartitionSpec(*specs)),
-                (
-                    lhs_specs,
-                    lhs_scale_specs,
-                    rhs_specs,
-                    rhs_scale_specs,
-                    bias_specs,
-                    gelu_input_specs,
-                    aux_in_specs,
-                ),
-            )
-        )
-
-        # Assemble output shardings
-        out_shardings = list(
-            map(
-                lambda specs: NamedSharding(mesh, PartitionSpec(*specs)),
-                (out_specs, bias_grad_specs, pre_gelu_specs, aux_out_specs),
-            )
-        )
-
-        def _sharded_impl(lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input, aux_in):
             outputs = GemmPrimitive.impl(
                 lhs,
                 lhs_scale_inv,
@@ -1458,21 +1064,13 @@ class GemmPrimitive(BasePrimitive):
                 grad=grad,
                 use_split_accumulator=use_split_accumulator,
                 transpose_batch_sequence=transpose_batch_sequence,
-                sequence_dim=sequence_dim,
+                sequence_dim=inferred_sequence_dim,
                 is_outer=False,
                 comm_overlap=comm_overlap,
             )
 
-            # All-Reduce/Reduce-Scatter GEMM output
-            if all_reduce_spec is not None:
+            if reduce_spec is not None and comm_overlap is not None and comm_overlap.is_reduce_scatter():
                 outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
-                # if fuse_gelu and not grad:
-                #     outputs[2] = jax.lax.psum(outputs[2], all_reduce_spec)
-                # if fuse_gelu and not grad:
-                #     outputs[2] = jax.lax.psum_scatter(
-                #         outputs[2], reduce_scatter_spec, scatter_dimension=scatter_dim, tiled=True
-                #     )
-
             return outputs
 
         return mesh, _sharded_impl, out_shardings, arg_shardings
@@ -1486,12 +1084,19 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        transpose_batch_sequence,
+        sequence_dim,
+        is_outer,
+        comm_overlap,
         mesh,
         operand_types,
         result_types,
     ):
         del out_dtype, grad, use_split_accumulator
-        del mesh, result_types
+        del mesh, result_types, transpose_batch_sequence, sequence_dim, is_outer, comm_overlap
+
+        if comm_overlap is not None:
+            raise NotImplementedError("CollectiveGEMM with Shardy propagation is not supported yet! Please turn off Shardy by exporting env var JAX_USE_SHARDY_PARTITIONER=false")
 
         prefix = "GemmPrimitive_"
 
