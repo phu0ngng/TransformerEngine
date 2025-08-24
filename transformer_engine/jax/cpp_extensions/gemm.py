@@ -247,9 +247,8 @@ class CollectiveGemmConfig:
             )
         buffer_shape = (buffer_shape[0] // dp_or_fsdp_axis_size(), buffer_shape[1])
 
-        # Allocate the communication buffer
-        # TODO: double check if this needs to happen in the FFI prepare phase
-        executor_id = tex.create_cgemm_config_buffer(
+        # Create the communication plan
+        plan_id = tex.create_collective_gemm_executor(
             collective_op,
             collective_algo,
             buffer_shape,
@@ -285,8 +284,7 @@ class CollectiveGemmConfig:
             atomic_gemm=atomic_gemm,
             rs_overlap_first_gemm=rs_overlap_first_gemm,
             aggregate_ag=aggregate_ag,
-            flatten_axis=flatten_axis,
-            executor_id=executor_id,
+            plan_id=plan_id,
         )
         
         return instance
@@ -308,7 +306,6 @@ class CollectiveGemmConfig:
         assert tpsp_axis_size() % 2 == 0, (
             f"Tensor-parallel axis of {tpsp_axis_size()} is not divisible by 2."
         )
-    
 
 
 def _is_collective_all_gather(cgemm_config: CollectiveGemmConfig) -> bool:
@@ -614,9 +611,15 @@ class GemmPrimitive(BasePrimitive):
         }
         if cgemm_config is not None:
             kwargs.update({
-                "cgemm_config_id": cgemm_config.unique_id,
-                "cgemm_config_method": int(cgemm_config.method.value),
-                "comm_type": int(cgemm_config.comm_type.value),
+                "collective_op": int(cgemm_config.collective_op.value),
+                "algo": int(cgemm_config.collective_algo.value),
+                "plan_id": cgemm_config.plan_id,
+            })
+        else:
+            kwargs.update({
+                "collective_op": int(tex.CollectiveOp.NONE.value),
+                "algo": int(tex.CollectiveAlgo.NONE.value),
+                "plan_id": -1,  # Invalid plan_id for no collective operation
             })
 
         operand_output_aliases = {}

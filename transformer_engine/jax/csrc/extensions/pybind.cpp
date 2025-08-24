@@ -88,8 +88,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
-  m.def("create_comm_overlap_buffer", &transformer_engine::jax::CreateCommOverlapBuffer,
-        pybind11::arg("comm_type"), pybind11::arg("method"), pybind11::arg("buffer_shape"),
+  m.def("create_collective_gemm_executor", &transformer_engine::jax::CreateUserBuffer,
+        pybind11::arg("collective_op"), pybind11::arg("collective_algo"), pybind11::arg("buffer_shape"),
         pybind11::arg("buffer_dtype"), pybind11::arg("tp_size"), pybind11::pos_only(),
         pybind11::kw_only(), pybind11::arg("num_splits") = 4, pybind11::arg("num_max_streams") = 3,
         pybind11::arg("comm_cga_size") = 2, pybind11::arg("gemm_priority") = 0,
@@ -98,9 +98,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         pybind11::arg("atomic_gemm") = false, pybind11::arg("rs_overlap_first_gemm") = false,
         pybind11::arg("aggregate_ag") = false,
         pybind11::call_guard<pybind11::gil_scoped_release>());
-  m.def("destroy_comm_overlap_buffer", &transformer_engine::jax::DestroyCommOverlapBuffer,
+  m.def("destroy_collective_gemm_executor", &transformer_engine::jax::DestroyCollectiveGemmExecutor,
         pybind11::call_guard<pybind11::gil_scoped_release>());
-  m.def("destroy_all_comm_overlap_buffers", &transformer_engine::jax::DestroyAllCommOverlapBuffers,
+  m.def("destroy_all_collective_gemm_executors", &transformer_engine::jax::DestroyAllCollectiveGemmExecutors,
         pybind11::call_guard<pybind11::gil_scoped_release>());
 
   pybind11::enum_<transformer_engine::jax::JAXX_Scaling_Mode>(m, "JAXX_Scaling_Mode",
