@@ -100,63 +100,64 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
   return std::make_tuple(std::move(input), input_shape);
 }
 
-static std::unordered_map<int64_t, CommOverlapCore *> comm_overlaps;
+static std::unordered_map<int64_t, CommOverlapCore *> executor_map;
 
-int64_t CreateCommOverlapBuffer(CommOverlapType comm_type, CommOverlapMethod method,
+int64_t CreateUserBuffer(JAXX_Collective_Op collective_op, JAXX_Collective_Algo algo,
                                 const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                                 int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
                                 int gemm_priority, int comm_priority, int num_comm_sm,
                                 int set_sm_margin, bool use_ce, bool atomic_gemm,
                                 bool rs_overlap_first_gemm, bool aggregate_ag) {
-  int64_t unique_id = 0;
-  hash_combine(unique_id, static_cast<int>(comm_type), static_cast<int>(method), buffer_shape[0],
+  int64_t executor_id = 0;
+  hash_combine(executor_id, static_cast<int>(collective_op), static_cast<int>(algo), buffer_shape[0],
                buffer_shape[0], static_cast<int>(buffer_dtype), tp_size, num_splits,
                num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
                set_sm_margin, use_ce, atomic_gemm, rs_overlap_first_gemm, aggregate_ag);
 
   // TODO(This should be implemented in TE/Common)
-  auto it = comm_overlaps.find(unique_id);
-  if (it == comm_overlaps.end()) {
-    if (method == CommOverlapMethod::RING_EXCHANGE) {
-      comm_overlaps[unique_id] = reinterpret_cast<CommOverlapCore *>(
+  auto it = executor_map.find(executor_id);
+  if (it == executor_map.end()) {
+    if (algo == JAXX_Collective_Algo::RING_EXCHANGE) {
+      executor_map[executor_id] = reinterpret_cast<CommOverlapCore *>(
         // TODO: should use smart pointer here
-          new CommOverlapP2PBase(buffer_shape, buffer_dtype, tp_size, comm_type, num_max_streams,
+          new CommOverlapP2PBase(buffer_shape, buffer_dtype, tp_size, collective_op, num_max_streams,
                                  comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
                                  set_sm_margin, use_ce, atomic_gemm, aggregate_ag));
     } else {
-      comm_overlaps[unique_id] = reinterpret_cast<CommOverlapCore *>(
+      // TODO: raise unimplemented error!!!
+      executor_map[executor_id] = reinterpret_cast<CommOverlapCore *>(
           new CommOverlapBase(buffer_shape, buffer_dtype, tp_size, num_splits, num_max_streams,
                               comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
                               set_sm_margin, atomic_gemm, rs_overlap_first_gemm));
     }
   }
 
-  return unique_id;
+  return executor_id;
 }
 
-void DestroyCommOverlapBuffer(size_t unique_id) {
-  auto it = comm_overlaps.find(unique_id);
-  if (it != comm_overlaps.end()) {
+void DestroyUserBuffer(size_t unique_id) {
+  auto it = executor_map.find(unique_id);
+  if (it != executor_map.end()) {
     delete it->second;
-    comm_overlaps.erase(it);
+    executor_map.erase(it);
   }
 }
 
-void DestroyAllCommOverlapBuffers() {
-  for (auto it = comm_overlaps.begin(); it != comm_overlaps.end();) {
+void DestroyAllUserBuffers() {
+  for (auto it = executor_map.begin(); it != executor_map.end();) {
     delete it->second;
-    it = comm_overlaps.erase(it);
+    it = executor_map.erase(it);
   }
 }
 
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
-                   Buffer_Type aux_in, Result_Type output, Result_Type bias_grad,
-                   Result_Type pre_gelu_out, Result_Type aux_out, Result_Type lhs_swizzle,
+                   Result_Type output, Result_Type bias_grad,
+                   Result_Type pre_gelu_out, Result_Type lhs_swizzle,
                    Result_Type rhs_swizzle, Result_Type workspace, JAXX_Scaling_Mode scaling_mode,
-                   CommOverlapMethod comm_overlap_method, CommOverlapType comm_type,
-                   int64_t comm_overlap_id, int64_t lhs_axis_boundary, int64_t rhs_axis_boundary,
-                   int64_t aux_axis_boundary, bool lhs_transposed, bool rhs_transposed,
+                   JAXX_Collective_Op collective_op, JAXX_Collective_Algo algo,
+                   int64_t lhs_axis_boundary, int64_t rhs_axis_boundary,
+                   bool lhs_transposed, bool rhs_transposed,
                    bool fuse_bias, bool fuse_gelu, bool grad, bool use_split_accumulator) {
   // Operands (this includes swizzling MXFP8 scaling factors)
   // NOTE: TensorWrapper operands are always rowwise for full-precision GEMM, or FP8 GEMM when
@@ -231,46 +232,9 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                      rhs_transposed, lhs_transposed, grad, workspace_.data(), false,
                      use_split_accumulator, num_math_sm, stream);
   } else {
-    auto executor = comm_overlaps[comm_overlap_id];
+    auto executor = executor_map[executor_id];
     auto tp_size = executor->get_tp_size();
-    if (comm_overlap_method == CommOverlapMethod::BULK) {
-      // Prepare the auxiliary output tensor
-      auto aux_out_dims = aux_out->dimensions();
-      std::vector<size_t> aux_out_shape = {0};
-      auto aux_out_dtype = convert_ffi_datatype_to_te_dtype(aux_out->element_type());
-      if ((comm_type == CommOverlapType::AG && aux_out->element_count() > 0) ||
-          comm_type == CommOverlapType::RS) {
-        std::vector<size_t> aux_out_shape = {
-            product(aux_out_dims, 0, aux_axis_boundary),
-            product(aux_out_dims, aux_axis_boundary, aux_out_dims.size())};
-      }
-      auto aux_out_ = TensorWrapper(aux_out->untyped_data(), aux_out_shape, aux_out_dtype);
-
-      // Copy the auxiliary data into the communications buffer
-      auto aux_in_dims = aux_in.dimensions();
-      std::vector<size_t> aux_in_shape = {
-          product(aux_in_dims, 0, aux_axis_boundary),
-          product(aux_in_dims, aux_axis_boundary, aux_in_dims.size())};
-      auto aux_in_dtype = convert_ffi_datatype_to_te_dtype(aux_in.element_type());
-      auto aux_in_ = TensorWrapper(aux_in.untyped_data(), aux_in_shape, aux_in_dtype);
-      if (comm_type == CommOverlapType::AG && aux_out->element_count() > 0) {
-        NVTE_CHECK(aux_in_shape[0] == tp_size * aux_out_shape[0],
-                   "cuBLAS GEMM w/ bulk AG overlap auxiliary output is sized incorrectly, ",
-                   "expected (", aux_in_shape[0] / tp_size, ",", aux_in_shape[1], ") but got ",
-                   to_string_like(aux_out_dims));
-      } else if (comm_type == CommOverlapType::RS) {
-        NVTE_CHECK(tp_size * aux_in_shape[0] == aux_out_shape[0],
-                   "cuBLAS GEMM w/ bulk RS overlap auxiliary output is sized incorrectly, ",
-                   "expected (", aux_in_shape[0] * tp_size, ",", aux_in_shape[1], ") but got ",
-                   to_string_like(aux_out_dims));
-      }
-      executor->copy_into_buffer(stream, aux_in_, (comm_type == CommOverlapType::AG));
-
-      // Launch GEMM w/ bulk overlap
-      executor->bulk_overlap(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
-                             workspace_, grad, false, use_split_accumulator, comm_type, aux_out_,
-                             stream);
-    } else if (comm_type == CommOverlapType::RS) {
+    if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
       // Prepare the auxiliary buffer for the reduce-scattered GEMM output
       auto rs_out_shape = std::vector<size_t>(out_shape);
       rs_out_shape.at(0) /= tp_size;
@@ -284,27 +248,18 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
       // Launch GEMM+RS
       executor->split_overlap_rs(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
                                  workspace_, grad, false, use_split_accumulator, rs_out_, stream);
-    } else if (comm_type == CommOverlapType::AG) {
-      // Prepare the auxiliary buffer for all-gathered LHS
-      std::vector<size_t> aux_out_shape = {0};
-      auto aux_out_dtype = convert_ffi_datatype_to_te_dtype(aux_out->element_type());
-      if (aux_out->element_count() > 0) {
-        aux_out_shape = std::vector<size_t>(lhs_shape);
-        aux_out_shape.at(0) *= tp_size;
-        auto aux_out_numel = aux_out_shape[0] * aux_out_shape[1];
-        NVTE_CHECK(aux_out_numel == aux_out->element_count(),
-                   "cuBLAS AG->GEMM overlap auxiliary buffer is sized incorrectly, expected ",
-                   aux_out_numel, " elements ", to_string_like(aux_out_shape), " but got ",
-                   aux_out->element_count(), " elements ", to_string_like(aux_out->dimensions()));
-      }
-      auto aux_out_ = TensorWrapper(aux_out->untyped_data(), aux_out_shape, aux_out_dtype);
+
+      // TODO: Don't we need to copy the output back to the original buffer?
+    } else if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
+      // auto aux_out_ = TensorWrapper();
 
       // Copy the distributed LHS operand into the local chunk of the communication buffer
       executor->copy_into_buffer(stream, lhs_, true, make_lhs_rowwise);
 
       // Launch AG+GEMM
       executor->split_overlap_ag(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
-                                 workspace_, grad, false, use_split_accumulator, aux_out_, stream);
+                                //  workspace_, grad, false, use_split_accumulator, aux_out_, stream);
+                                 workspace_, grad, false, use_split_accumulator, nullptr, stream);
     } else {
       NVTE_ERROR("cuBLAS GEMM w/ comm. overlap invoked with invalid collective type (",
                  static_cast<int64_t>(comm_type), ")");
@@ -323,21 +278,17 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Arg<Buffer_Type>()      // rhs_scale_inv
                                   .Arg<Buffer_Type>()      // bias
                                   .Arg<Buffer_Type>()      // gelu_input
-                                  .Arg<Buffer_Type>()      // aux_in
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // bias_grad
                                   .Ret<Buffer_Type>()      // pre_gelu_out
-                                  .Ret<Buffer_Type>()      // aux_out
                                   .Ret<Buffer_Type>()      // lhs_swizzled
                                   .Ret<Buffer_Type>()      // rhs_swizzled
                                   .Ret<Buffer_Type>()      // workspace
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<CommOverlapMethod>("comm_overlap_method")
-                                  .Attr<CommOverlapType>("comm_type")
-                                  .Attr<int64_t>("comm_overlap_id")
+                                  .Attr<JAXX_Collective_Op>("collective_op")
+                                  .Attr<JAXX_Collective_Algo>("algo")
                                   .Attr<int64_t>("lhs_axis_boundary")
                                   .Attr<int64_t>("rhs_axis_boundary")
-                                  .Attr<int64_t>("aux_axis_boundary")
                                   .Attr<bool>("lhs_transposed")
                                   .Attr<bool>("rhs_transposed")
                                   .Attr<bool>("fuse_bias")

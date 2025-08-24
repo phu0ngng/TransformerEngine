@@ -31,7 +31,7 @@ def dense(
     input_axes: Tuple[str, ...] = None,
     kernel_axes: Tuple[str, ...] = None,
     batch_first: bool = True,
-    comm_overlaps: tex.CommOverlapHelperSet = tex.CommOverlapHelperSet(),
+    comm_overlaps: tex.CollectiveGemmConfigSet = tex.noop_collective_gemm_config_set,
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ):
     """Perform dense layer transformation with optional quantization.
@@ -46,7 +46,7 @@ def dense(
         bias: Optional bias tensor to add after the transformation
         contracting_dims: Tuple of sequences specifying which dimensions to contract
         batch_first: Assume that X is batched in the first dimension.
-        comm_overlaps: A set of CommOverlapHelper objecst for FPROP, DGRAD and WGRAD GEMMs.
+        comm_overlaps: A set of CollectiveGemmConfig objects for forward and backward passes.
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
 
     Returns:
@@ -97,7 +97,7 @@ def _dense(
         input_axes: Logical axes for sharding the activation input
         kernel_axes: Logical axes for sharding the weight matrix
         batch_first: Assume that X is batched in the first dimension.
-        comm_overlaps: A set of CommOverlapHelper objecst for FPROP, DGRAD and WGRAD GEMMs.
+        comm_overlaps: A set of CollectiveGemmConfig objects for forward and backward passes.
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
 
     Returns:

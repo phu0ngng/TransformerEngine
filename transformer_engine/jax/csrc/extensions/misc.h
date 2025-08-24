@@ -93,5 +93,16 @@ void hash_combine(int64_t &seed, const T &v, Rest... rest) {
   (hash_combine(seed, rest), ...);
 }
 
+enum class JAXX_Collective_Op {
+  NONE = 0,
+  ALL_GATHER = 1,
+  REDUCE_SCATTER = 2,
+};
+
+enum class JAXX_Collective_Algo {
+  NONE = 0,
+  RING_EXCHANGE = 1,
+};
+
 }  // namespace jax
 }  // namespace transformer_engine

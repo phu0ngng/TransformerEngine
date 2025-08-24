@@ -40,18 +40,20 @@ from .misc import get_padded_spec, jax_dtype_to_te_dtype
 from ..sharding import (
     global_mesh_resource,
     tpsp_axis_size,
+    dp_or_fsdp_axis_size,
 )
 
 
 __all__ = [
-    "CommOverlapHelper",
-    "CommOverlapHelperSet",
+    "CollectiveGemmConfig",
+    "CollectiveGemmConfigSet",
+    "noop_collective_gemm_config_set",
     "gemm",
     "grouped_gemm",
     "gemm_uses_jax_dot",
-    "sanitize_dims",
-    "get_non_contracting_dims",
-    "transpose_dims",
+    # "sanitize_dims",
+    # "get_non_contracting_dims",
+    # "transpose_dims",
 ]
 
 
@@ -162,40 +164,60 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
 
 
 @dataclass(frozen=True)
-class CommOverlapHelper:
+class CollectiveGemmConfig:
     """
-    Helper object that carries comm+GEMM overlap configuration, initializes the internal
-    communication buffer, and generates lowering arguments and partitioning rules for
-    the GemmPrimitive.
+    Configuration object that carries collective GEMM configuration
     """
 
     # Core init arguments
-    comm_type: tex.CommOverlapType = field(default=tex.CommOverlapType.NONE)
-    method: tex.CommOverlapMethod = field(default=tex.CommOverlapMethod.NONE)
-    buffer_shape: Sequence[int] = field(default=None)
-    buffer_dtype: jnp.dtype = field(default=jnp.bfloat16)
-    # tp_size: int = field(
-    #     default_factory=lambda: get_mesh_axis_size(global_mesh_resource().tp_resource)
-    # )
+    collective_op: tex.CollectiveOp
+    collective_algo: tex.CollectiveAlgo 
+    buffer_shape: Sequence[int]
+    buffer_dtype: jnp.dtype
 
     # Userbuffers bootstrap kwargs
-    num_splits: int = field(default=None, kw_only=True)
-    num_max_streams: int = field(default=3, kw_only=True)
-    comm_cga_size: int = field(default=None, kw_only=True)
-    gemm_priority: int = field(default=CUDA_STREAM_PRIORITY_LOWEST, kw_only=True)
-    comm_priority: int = field(default=CUDA_STREAM_PRIORITY_HIGHEST, kw_only=True)
-    num_comm_sm: int = field(default=None, kw_only=True)
-    set_sm_margin: bool = field(default=None, kw_only=True)
-    use_ce: bool = field(default=None, kw_only=True)
-    atomic_gemm: bool = field(default=False, kw_only=True)
-    rs_overlap_first_gemm: bool = field(default=False, kw_only=True)
-    aggregate_ag: bool = field(default=False, kw_only=True)
+    # TODO: double check meaning of these values
+    num_splits: int
+    num_max_streams: int
+    comm_cga_size: int
+    gemm_priority: int
+    comm_priority: int
+    num_comm_sm: int
+    set_sm_margin: bool
+    use_ce: bool
+    atomic_gemm: bool
+    rs_overlap_first_gemm: bool
+    aggregate_ag: bool
 
     # Internal attributes
-    unique_id: int = field(default=-1, init=False, compare=False)
+    executor_id: int
 
+    @staticmethod
+    def create(
+        buffer_shape: Sequence[int],
+        buffer_dtype: jnp.dtype,
+        collective_op: tex.CollectiveOp,
+        collective_algo: tex.CollectiveAlgo = tex.CollectiveAlgo.RING_EXCHANGE,
+        num_splits: int = None,
+        num_max_streams: int = 3,
+        comm_cga_size: int = None,
+        gemm_priority: int = None,
+        comm_priority: int = None,
+        num_comm_sm: int = None,
+        set_sm_margin: bool = None,
+        use_ce: bool = None,
+        atomic_gemm: bool = False,
+        rs_overlap_first_gemm: bool = False,
+        aggregate_ag: bool = False,
+        flatten_axis: int = -1,
+    ):
+        """Create a CollectiveGemmConfig with all values properly set and initialize the Userbuffer"""
 
-    def __post_init__(self):
+        if collective_op is tex.CollectiveOp.NONE:
+            return None
+
+        assert len(buffer_shape) >= 2, f"{buffer_shape} is not a valid buffer shape."
+        
         # Update global min/max CUDA stream priority values if not already done
         global CUDA_STREAM_PRIORITY_LOWEST, CUDA_STREAM_PRIORITY_HIGHEST
         if CUDA_STREAM_PRIORITY_LOWEST is None or CUDA_STREAM_PRIORITY_HIGHEST is None:
@@ -203,286 +225,179 @@ class CommOverlapHelper:
                 CUDA_STREAM_PRIORITY_LOWEST,
                 CUDA_STREAM_PRIORITY_HIGHEST,
             ) = tex.get_stream_priority_range()
-        # TODO: Why do we need this?
-        # if self.gemm_priority is None:
-        #     object.__setattr__(self, "gemm_priority", CUDA_STREAM_PRIORITY_LOWEST)
-        #     object.__setattr__(self, "comm_priority", CUDA_STREAM_PRIORITY_HIGHEST)
+        
+        # Set default priorities if not provided
+        gemm_priority = gemm_priority or CUDA_STREAM_PRIORITY_LOWEST
+        comm_priority = comm_priority or CUDA_STREAM_PRIORITY_HIGHEST
 
-        assert self.method != tex.CommOverlapMethod.RING_EXCHANGE, (
-            f"CommOverlapHelper: {self.comm_type} is not supported for {self.method}."
-        )
-        assert self.comm_type != tex.CommOverlapType.NONE, (
-            f"CommOverlapHelper: {self.method} is not a valid overlap method for "
-                f"{self.comm_type}."
-        )
-        assert (
-            self.buffer_shape is not None and len(self.buffer_shape) >= 2
-        ), f"CommOverlapHelper: {self.buffer_shape} is not a valid buffer shape."
-        assert tpsp_axis_size() > 1, (
-            f"CommOverlapHelper: Communication + GEMM overlap requires a valid TP axis size. Got TP axis size {tpsp_axis_size()}."
-        )
+        # Set conditional defaults for config options not specified
+        num_splits = num_splits or tpsp_axis_size()
+        comm_cga_size = comm_cga_size or 1
+        num_comm_sm = num_comm_sm or 1
+        set_sm_margin = set_sm_margin or False
+        use_ce = use_ce or True
 
-        # TODO: Why do we need this?
-        assert (
-            tpsp_axis_size() % 2 == 0
-        ), f"CommOverlapHelper: Tensor-parallel axis of {tpsp_axis_size()} is not divisible by 2."
-
-        # Collapse buffer shape to 2D
-        if len(self.buffer_shape) > 2:
-            if self.flatten_axis < 0:
-                object.__setattr__(
-                    self, "flatten_axis", self.flatten_axis + len(self.buffer_shape)
-                )
-            object.__setattr__(
-                self,
-                "buffer_shape",
-                (
-                    reduce(operator.mul, self.buffer_shape[: self.flatten_axis]),
-                    reduce(operator.mul, self.buffer_shape[self.flatten_axis :]),
-                ),
+        # Handle buffer shape collapsing
+        if buffer_shape is not None and len(buffer_shape) > 2:
+            if flatten_axis < 0:
+                flatten_axis = flatten_axis + len(buffer_shape)
+            buffer_shape = (
+                reduce(operator.mul, buffer_shape[:flatten_axis]),
+                reduce(operator.mul, buffer_shape[flatten_axis:]),
             )
-
-        # Num splits for P2P overlap is always fixed to TP size
-        if self.num_splits is None:
-            object.__setattr__(self, "num_splits", tpsp_axis_size())
-
-        # Set conditional defaults for config options not specified at init time
-        if self.comm_cga_size is None:
-            object.__setattr__(self, "comm_cga_size", 1)
-        if self.num_comm_sm is None:
-            object.__setattr__(self, "num_comm_sm", 1)
-        if self.set_sm_margin is None:
-            object.__setattr__(self, "set_sm_margin", False)
-        if self.use_ce is None:
-            object.__setattr__(self, "use_ce", True)
+        buffer_shape = (buffer_shape[0] // dp_or_fsdp_axis_size(), buffer_shape[1])
 
         # Allocate the communication buffer
-        args, kwargs = self.get_bootstrap_args_kwargs()
-        object.__setattr__(self, "unique_id", tex.create_comm_overlap_buffer(*args, **kwargs))
-        # object.__setattr__(self, "is_enabled", True)
-
-    def is_all_gather(self):
-        """Check if the overlapped collective is an all-gather."""
-        return self.comm_type == tex.CommOverlapType.AG
-
-    def is_reduce_scatter(self):
-        """Check if the overlapped collective is a reduce-scatter."""
-        return self.comm_type == tex.CommOverlapType.RS
-
-    def get_bootstrap_args_kwargs(self):
-        """Generate positional and keyword arguments to bootstrap Userbuffers."""
-        args = (
-            self.comm_type,
-            self.method,
-            self.buffer_shape,
-            jax_dtype_to_te_dtype(self.buffer_dtype),
+        # TODO: double check if this needs to happen in the FFI prepare phase
+        executor_id = tex.create_cgemm_config_buffer(
+            collective_op,
+            collective_algo,
+            buffer_shape,
+            jax_dtype_to_te_dtype(buffer_dtype),
             tpsp_axis_size(),
+            num_splits=num_splits,
+            num_max_streams=num_max_streams,
+            comm_cga_size=comm_cga_size,
+            gemm_priority=gemm_priority,
+            comm_priority=comm_priority,
+            num_comm_sm=num_comm_sm,
+            set_sm_margin=set_sm_margin,
+            use_ce=use_ce,
+            atomic_gemm=atomic_gemm,
+            rs_overlap_first_gemm=rs_overlap_first_gemm,
+            aggregate_ag=aggregate_ag,
         )
-        kwargs = {
-            "num_splits": self.num_splits,
-            "num_max_streams": self.num_max_streams,
-            "comm_cga_size": self.comm_cga_size,
-            "gemm_priority": self.gemm_priority,
-            "comm_priority": self.comm_priority,
-            "num_comm_sm": self.num_comm_sm,
-            "set_sm_margin": self.set_sm_margin,
-            "use_ce": self.use_ce,
-            "atomic_gemm": self.atomic_gemm,
-            "rs_overlap_first_gemm": self.rs_overlap_first_gemm, # TODO: What is this?
-            "aggregate_ag": self.aggregate_ag,
-        }
-        return args, kwargs
+        
+        # Create the instance
+        instance = CollectiveGemmConfig(
+            collective_op=collective_op,
+            collective_algo=collective_algo,
+            buffer_shape=buffer_shape,
+            buffer_dtype=buffer_dtype,
+            num_splits=num_splits,
+            num_max_streams=num_max_streams,
+            comm_cga_size=comm_cga_size,
+            gemm_priority=gemm_priority,
+            comm_priority=comm_priority,
+            num_comm_sm=num_comm_sm,
+            set_sm_margin=set_sm_margin,
+            use_ce=use_ce,
+            atomic_gemm=atomic_gemm,
+            rs_overlap_first_gemm=rs_overlap_first_gemm,
+            aggregate_ag=aggregate_ag,
+            flatten_axis=flatten_axis,
+            executor_id=executor_id,
+        )
+        
+        return instance
 
-    # TODO
-    def get_lowering_kwargs(self):
-        """Generate a dictionary of keyword arguments used in GemmPrimitive.lowering()."""
-        aux_axis_boundary = -1
-        # TODO: remove is_enabled
-        if self.is_enabled:
-            if self.is_all_gather():
-                assert self.gather_dim >= 0, (
-                    "Internal TE error: CommOverlapHelper.gather_dim is not set correctly in "
-                    "GemmPrimitive."
-                )
-                aux_axis_boundary = self.gather_dim + 1
-            elif self.is_reduce_scatter():
-                assert self.scatter_dim >= 0, (
-                    "Internal TE error: CommOverlapHelper.scatter_dim is not set correctly in "
-                    "GemmPrimitive."
-                )
-                aux_axis_boundary = self.scatter_dim + 1
-
-        return {
-            "comm_overlap_id": self.unique_id,
-            "comm_overlap_method": int(self.method.value),
-            "comm_type": int(self.comm_type.value),
-            "aux_axis_boundary": aux_axis_boundary,
-        }
+    def __post_init__(self):
+        """Validate the configuration after initialization."""
+        assert self.collective_algo != tex.CollectiveAlgo.RING_EXCHANGE, (
+            f"{self.collective_algo} is not supported."
+        )
+        assert self.collective_op != tex.CollectiveOp.NONE, (
+            f"{self.collective_op} is not a valid collective operation."
+        )
+        assert (
+            self.buffer_shape is not None and len(self.buffer_shape) == 2
+        ), f"{self.buffer_shape} is not a valid buffer shape."
+        assert tpsp_axis_size() > 1, (
+            f"Communication + GEMM overlap requires a valid TP axis size. Got TP axis size {tpsp_axis_size()}."
+        )
+        assert tpsp_axis_size() % 2 == 0, (
+            f"Tensor-parallel axis of {tpsp_axis_size()} is not divisible by 2."
+        )
+    
 
 
-# @dataclass(frozen=True)
-# class CommOverlapHelperSet:
-#     """
-#     A set of CommOverlapHelper objects that provide complementary comm+GEMM overlap configurations
-#     for FPROP, DGRAD and WGRAD GEMMs in FWD/BWD passes through Dense-layers.
-#     """
+def _is_collective_all_gather(cgemm_config: CollectiveGemmConfig) -> bool:
+    """Check if the overlapped collective is an all-gather."""
+    return cgemm_config is not None and cgemm_config.collective_op == tex.CollectiveOp.ALL_GATHER
 
-#     fprop: CommOverlapHelper = field(default=None)
-#     dgrad: CommOverlapHelper = field(default=None)
-#     wgrad: CommOverlapHelper = field(default=None)
 
-#     def _sanity_check(self):
-#         # Require any argument that exists to be a `CommOverlapHelper` instance
-#         for overlap, name in zip((self.fprop, self.dgrad, self.wgrad), ("fprop", "dgrad", "wgrad")):
-#             if overlap is not None:
-#                 assert isinstance(overlap, CommOverlapHelper), (
-#                     f"CommOverlapHelperSet: Expected `{name}` to be a {CommOverlapHelper} but got "
-#                     f"{type(overlap)} instead."
-#                 )
+def _is_collective_reduce_scatter(cgemm_config: CollectiveGemmConfig) -> bool:
+    """Check if the overlapped collective is a reduce-scatter."""
+    return cgemm_config is not None and cgemm_config.collective_op == tex.CollectiveOp.REDUCE_SCATTER
 
-#         # If FPROP overlap is not defined or not enabled, require DGRAD and WGRAD to also not be
-#         # be defined or not enabled
-#         if self.fprop is None or not self.fprop.is_enabled:
-#             assert (self.dgrad is None or not self.dgrad.is_enabled) and (
-#                 self.wgrad is None or not self.wgrad.is_enabled
-#             ), (
-#                 "CommOverlapHelperSet: Cannot do communication overlap for DGRAD and/or WGRAD when "
-#                 "there is no communication overlap for FPROP."
-#             )
-#             return
+@dataclass(frozen=True)
+class CollectiveGemmConfigSet:
+    """
+    A set of CollectiveGemmConfig objects that provide complementary collective GEMM configurations for the Forward and Backward passes through Dense-layers.
+    """
 
-#         assert (
-#             not self.fprop.is_bulk()
-#         ), "CommOverlapHelperSet: Cannot overlap bulk collectives with FPROP."
+    forward: CollectiveGemmConfig = field(default=None)
+    backward: CollectiveGemmConfig = field(default=None)
 
-#         if self.fprop.is_all_gather():
-#             if self.dgrad is not None and self.dgrad.is_enabled:
-#                 if self.dgrad.is_bulk() and self.dgrad.is_all_gather():
-#                     assert (
-#                         self.wgrad is not None
-#                         and self.wgrad.is_enabled
-#                         and self.wgrad.is_bulk()
-#                         and self.wgrad.is_reduce_scatter()
-#                     ), (
-#                         "CommOverlapHelperSet: AG->GEMM FPROP with BULK-AG overlap for DGRAD "
-#                         "requires BULK-RS overlap for WGRAD."
-#                     )
+    @staticmethod       
+    def create(
+        buffer_shape: Sequence[int],
+        buffer_dtype: jnp.dtype,
+        forward_collective_op: tex.CollectiveOp,
+        collective_algo: tex.CollectiveAlgo = tex.CollectiveAlgo.RING_EXCHANGE,
+        num_splits: int = None,
+        num_max_streams: int = 3,
+        comm_cga_size: int = None,
+        gemm_priority: int = None,
+        comm_priority: int = None,
+        num_comm_sm: int = None,
+        set_sm_margin: bool = None,
+        use_ce: bool = None,
+        atomic_gemm: bool = False,
+        rs_overlap_first_gemm: bool = False,
+        aggregate_ag: bool = False,
+        flatten_axis: int = -1,
+    ):
+        forward = CollectiveGemmConfig.create(
+            buffer_shape,
+            buffer_dtype,
+            forward_collective_op,
+            collective_algo,
+            num_splits,
+            num_max_streams,
+            comm_cga_size,
+            gemm_priority,
+            comm_priority,
+            num_comm_sm,
+            set_sm_margin,
+            use_ce,
+            atomic_gemm,
+            rs_overlap_first_gemm,
+            aggregate_ag,
+            flatten_axis,
+        )
+        if forward_collective_op is tex.CollectiveOp.ALL_GATHER:
+            backward_collective_op = tex.CollectiveOp.REDUCE_SCATTER
+        elif forward_collective_op is tex.CollectiveOp.REDUCE_SCATTER:
+            backward_collective_op = tex.CollectiveOp.ALL_GATHER
+        else:
+            backward_collective_op = tex.CollectiveOp.NONE
 
-#                 elif not self.dgrad.is_bulk() and self.dgrad.is_reduce_scatter():
-#                     assert self.wgrad is None or not self.wgrad.is_enabled, (
-#                         "CommOverlapHelperSet: AG->GEMM FPROP with GEMM->RS DGRAD does not support "
-#                         "communication overlap for WGRAD."
-#                     )
+        backward = CollectiveGemmConfig.create(
+            buffer_shape,
+            buffer_dtype,
+            backward_collective_op,
+            collective_algo,
+            num_splits,
+            num_max_streams,
+            comm_cga_size,
+            gemm_priority,
+            comm_priority,
+            num_comm_sm,
+            set_sm_margin,
+            use_ce,
+            atomic_gemm,
+            rs_overlap_first_gemm,
+            aggregate_ag,
+            flatten_axis,
+        )
+        return CollectiveGemmConfigSet(forward=forward, backward=backward)
 
-#                 else:
-#                     raise AssertionError(
-#                         "CommOverlapHelperSet: AG->GEMM FPROP requires communication overlap for "
-#                         "DGRAD to be either BULK-AG or GEMM->RS."
-#                     )
-#             else:
-#                 assert self.wgrad is None or not self.wgrad.is_enabled, (
-#                     "CommOverlapHelperSet: AG->GEMM FPROP with no communication overlap for DGRAD"
-#                     "does not support communication overlap for WGRAD."
-#                 )
-
-#         elif self.fprop.is_reduce_scatter():
-#             if self.dgrad is not None and self.dgrad.is_enabled:
-#                 assert not self.dgrad.is_bulk() and self.dgrad.is_all_gather(), (
-#                     "CommOverlapHelperSet: GEMM->RS FPROP requires communication overlap for DGRAD "
-#                     "to be AG->GEMM."
-#                 )
-
-#             assert self.wgrad is None or not self.wgrad.is_enabled, (
-#                 "CommOverlapHelperSet: GEMM->RS FPROP does not support communication overlap "
-#                 "for WGRAD."
-#             )
-
-#         else:
-#             raise RuntimeError(
-#                 "CommOverlapHelperSet: Internal TE error, unrecognized collective type "
-#                 f"{self.fprop.comm_type} in communication overlap for FPROP."
-#             )
-
-#     def __post_init__(self):
-#         self._sanity_check()
-
-#         if self.fprop is None:
-#             # TODO: Why CommOverlapHelper is init with empty buffer size here
-#             object.__setattr__(self, "fprop", CommOverlapHelper())
-
-#         # Column-parallel layers: QKV projection and MLP FFN1
-#         #   FPROP with AG->GEMM:
-#         #     LHS:(B, M, None)--(AG)->(B, None, None) x RHS:(None, N) = OUT:(B, None, N)
-#         #   DGRAD w/ BULK-AG for LHS:
-#         #     GRAD:(B, None, N) x RHS:(None, N)^T = DGRAD:(B, None, None)
-#         #     LHS:(B, M, None)--(BULK-AG)->(B, None, None)
-#         #   WGRAD w/ BULK-RS for DGRAD:
-#         #     LHS:(B, None, None)^T x GRAD:(B, None, N) = WGRAD:(None, N)
-#         #     DGRAD:(B, None, None)--(BULK-RS)->(B, M, None)
-#         #
-#         # Row-parallel layers: Post-attention projection and MLP FFN2
-#         #   FPROP with GEMM->RS:
-#         #     LHS:(B, None, K) x RHS:(K, None) = (B, None, None)--(RS)->(B, M, None)
-#         #   DGRAD with AG->GEMM (all-gathered GRAD saved for WGRAD):
-#         #     GRAD:(B, M, None)--(AG)->(B, None, None) x RHS:(K, None)^T = (B, None, K)
-#         #   WGRAD with NO OVERLAP:
-#         #     LHS:(B, None, K)^T x GRAD:(B, None, None) = (K, None)
-#         if self.dgrad is None:
-#             dgrad_overlap = None
-
-#             if self.fprop.is_all_gather():
-#                 # FPROP AG->GEMM and DGRAD GEMM->RS
-#                 dgrad_overlap = CommOverlapHelper(
-#                     method=tex.CommOverlapMethod.RING_EXCHANGE,
-#                     comm_type=tex.CommOverlapType.RS,
-#                     buffer_shape=self.fprop.buffer_shape,
-#                     buffer_dtype=self.fprop.buffer_dtype,
-#                     tp_size=self.fprop.tp_size,
-#                     # logical_tp_axis=self.fprop.logical_tp_axis,
-#                     # logical_sp_axis=self.fprop.logical_sp_axis,
-#                 )
-
-#             elif self.fprop.is_reduce_scatter():
-#                 # FPROP GEMM->RS and DGRAD AG->GEMM
-#                 dgrad_overlap = CommOverlapHelper(
-#                     method=tex.CommOverlapMethod.RING_EXCHANGE,
-#                     comm_type=tex.CommOverlapType.AG,
-#                     buffer_shape=self.fprop.buffer_shape,
-#                     buffer_dtype=self.fprop.buffer_dtype,
-#                     tp_size=self.fprop.tp_size,
-#                     # logical_tp_axis=self.fprop.logical_tp_axis,
-#                     # logical_sp_axis=self.fprop.logical_sp_axis,
-#                 )
-
-#             else:
-#                 dgrad_overlap = CommOverlapHelper()
-
-#             object.__setattr__(self, "dgrad", dgrad_overlap)
-
-#         if self.wgrad is None:
-#             wgrad_overlap = self.wgrad
-
-#             if (
-#                 self.fprop.is_all_gather()
-#                 and self.dgrad.is_enabled
-#                 and self.dgrad.is_bulk()
-#                 and self.dgrad.is_all_gather()
-#             ):
-#                 # FPROP AG->GEMM, DGRAD BULK-AG for LHS and WGRAD BULK-RS for DGRAD
-#                 wgrad_overlap = CommOverlapHelper(
-#                     method=tex.CommOverlapMethod.BULK,
-#                     comm_type=tex.CommOverlapType.RS,
-#                     buffer_shape=self.fprop.buffer_shape,
-#                     buffer_dtype=self.fprop.buffer_dtype,
-#                     tp_size=self.fprop.tp_size,
-#                     # logical_tp_axis=self.fprop.logical_tp_axis,
-#                     # logical_sp_axis=self.fprop.logical_sp_axis,
-#                 )
-
-#             else:
-#                 wgrad_overlap = CommOverlapHelper()
-
-#             object.__setattr__(self, "wgrad", wgrad_overlap)
+noop_collective_gemm_config_set = CollectiveGemmConfigSet.create(
+    buffer_shape=(0, 0),
+    buffer_dtype=jnp.bfloat16,
+    forward_collective_op=tex.CollectiveOp.NONE,
+)
 
 
 class GemmPrimitive(BasePrimitive):
@@ -514,9 +429,9 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
-        comm_overlap,
+        cgemm_config,
     ):
-        del use_split_accumulator, transpose_batch_sequence, sequence_dim, is_outer
+        del use_split_accumulator, transpose_batch_sequence
 
         def _dims_are_consecutive(dims):
             if len(dims) <= 1:
@@ -582,17 +497,13 @@ class GemmPrimitive(BasePrimitive):
         output = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
 
         # Adjust output shape for comm+GEMM overlap
-        if comm_overlap.is_enabled and not is_outer: # Inner abstract
-            if comm_overlap.is_all_gather():
-                out_shape[sequence_dim] *= tpsp_axis_size()
-                output = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
-
-            elif comm_overlap.is_reduce_scatter():
-                rs_out_shape = list(out_shape).copy()
-                rs_out_shape[sequence_dim] = (
-                    rs_out_shape[sequence_dim] // tpsp_axis_size()
-                )
-                output = jax.core.ShapedArray(shape=rs_out_shape, dtype=out_dtype)
+        if cgemm_config is not None and not is_outer: # Inner abstract
+            overlap_out_shape = list(out_shape).copy()
+            if cgemm_config.is_all_gather():
+                overlap_out_shape[sequence_dim] *= tpsp_axis_size()
+            else: # RS
+                overlap_out_shape[sequence_dim] = (overlap_out_shape[sequence_dim] // tpsp_axis_size())
+            output = jax.core.ShapedArray(shape=overlap_out_shape, dtype=out_dtype)
 
         # Validate bias -- shape always depends on pure GEMM output 
         # (Phuong) This is not true for TP + Hidden
@@ -645,8 +556,8 @@ class GemmPrimitive(BasePrimitive):
 
         # Size cuBLAS workspace -- multiplied by number of comm+GEMM overlap compute streams
         workspace_size = get_cublas_workspace_size_bytes()
-        if comm_overlap.is_enabled:
-            workspace_size *= comm_overlap.num_max_streams
+        if cgemm_config is not None:
+            workspace_size *= cgemm_config.num_max_streams
 
         # cuBLAS requires workspace pointers aligned to 256 bytes but XLA does not guarantee that
         # so we add to the size here and align the pointer in the C++ custom call.
@@ -679,7 +590,7 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
-        comm_overlap,
+        cgemm_config,
     ):
         del out_dtype, transpose_batch_sequence, sequence_dim, is_outer
 
@@ -701,7 +612,12 @@ class GemmPrimitive(BasePrimitive):
             "grad": grad,
             "use_split_accumulator": use_split_accumulator,
         }
-        kwargs.update(comm_overlap.get_lowering_kwargs())
+        if cgemm_config is not None:
+            kwargs.update({
+                "cgemm_config_id": cgemm_config.unique_id,
+                "cgemm_config_method": int(cgemm_config.method.value),
+                "comm_type": int(cgemm_config.comm_type.value),
+            })
 
         operand_output_aliases = {}
         if fuse_bias and not grad:
@@ -732,7 +648,7 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
-        comm_overlap,
+        cgemm_config,
     ):
         del is_outer
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
@@ -768,7 +684,7 @@ class GemmPrimitive(BasePrimitive):
             fuse_gelu=fuse_gelu,
             grad=grad,
             use_split_accumulator=use_split_accumulator,
-            comm_overlap=comm_overlap,
+            cgemm_config=cgemm_config,
             transpose_batch_sequence=transpose_batch_sequence,
             sequence_dim=sequence_dim,
             is_outer=False,
@@ -786,11 +702,12 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
-        comm_overlap,
+        cgemm_config,
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
     ):
+        del transpose_batch_sequence, sequence_dim, is_outer
         assert GemmPrimitive.outer_primitive is not None
         lhs_bdims, _, rhs_bdims = batch_dims
 
@@ -824,7 +741,7 @@ class GemmPrimitive(BasePrimitive):
                 fuse_gelu=fuse_gelu,
                 grad=grad,
                 use_split_accumulator=use_split_accumulator,
-                comm_overlap=comm_overlap,
+                cgemm_config=cgemm_config,
             ),
             (out_bdims, bias_bdims, pre_gelu_bdims),
         )
@@ -834,7 +751,7 @@ class GemmPrimitive(BasePrimitive):
         arg_infos,
         contracting_dims,
         transpose_batch_sequence,
-        comm_overlap,
+        cgemm_config,
     ):
         lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
 
@@ -873,28 +790,27 @@ class GemmPrimitive(BasePrimitive):
         gsr = global_mesh_resource()
 
         # Find sequence dimension in lhs_specs if tensor sequence parallel is enabled
-        # We only do CommOverlap AG on the x or dY and CommOverlap RS on the Y or dX thus they always the LHS and have sequence dim
-        if comm_overlap is not None:
-            if comm_overlap.is_all_gather():
-                # For all-gather: find consecutive pair of tpsp_resource
-                batch_sequence_pairs = [(i, i + 1) for i in range(len(lhs_specs) - 1) 
-                                      if lhs_specs[i] == gsr.tpsp_resource and lhs_specs[i + 1] == gsr.tpsp_resource]
-                assert len(batch_sequence_pairs) == 1, f"Unable to detect the sequence dim as tpsp_resource does not appear exactly twice consecutively in lhs_specs: {lhs_specs}"
-                sequence_dim = batch_sequence_pairs[0][0] if transpose_batch_sequence else batch_sequence_pairs[0][1]
-            else: # RS
-                # For reduce-scatter: find single tpsp_resource occurrence
-                try:
-                    tpsp_idx = lhs_specs.index(gsr.tpsp_resource)
-                except ValueError:
-                    raise ValueError(f"tpsp_resource '{gsr.tpsp_resource}' is not found in lhs_specs: {lhs_specs}. Please check your sharding configuration.")
-                assert reduce_spec == gsr.tpsp_resource, f"Only CommOverlap RS with the Reduction over the TPSP axis is supported! Got reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
-                sequence_dim = tpsp_idx if transpose_batch_sequence else tpsp_idx + 1
+        # We only do CollectiveGemm AG on the x or dY and CollectiveGemm RS on the Y or dX thus they always the LHS and have sequence dim
+        if _is_collective_all_gather(cgemm_config):
+            # For all-gather: find consecutive pair of tpsp_resource
+            batch_sequence_pairs = [(i, i + 1) for i in range(len(lhs_specs) - 1) 
+                                  if lhs_specs[i] == gsr.tpsp_resource and lhs_specs[i + 1] == gsr.tpsp_resource]
+            assert len(batch_sequence_pairs) == 1, f"Unable to detect the sequence dim as tpsp_resource does not appear exactly twice consecutively in lhs_specs: {lhs_specs}"
+            sequence_dim = batch_sequence_pairs[0][0] if transpose_batch_sequence else batch_sequence_pairs[0][1]
+        elif _is_collective_reduce_scatter(cgemm_config):
+            # For reduce-scatter: find single tpsp_resource occurrence
+            try:
+                tpsp_idx = lhs_specs.index(gsr.tpsp_resource)
+            except ValueError:
+                raise ValueError(f"tpsp_resource '{gsr.tpsp_resource}' is not found in lhs_specs: {lhs_specs}. Please check your sharding configuration.")
+            assert reduce_spec == gsr.tpsp_resource, f"Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
+            sequence_dim = tpsp_idx if transpose_batch_sequence else tpsp_idx + 1
 
         if reduce_spec is not None:
             # Other non-reduce cdims (if exists) need to be unsharded
             lhs_cspecs = tuple(s if s == reduce_spec else None for s in lhs_cspecs)
             # Only do AG Sequence dim if not Overlap
-            if comm_overlap is not None and comm_overlap.is_all_gather():
+            if _is_collective_all_gather(cgemm_config):
                 rhs_cspecs = tuple(s if s == reduce_spec or s == gsr.tpsp_resource else None for s in rhs_cspecs)
             else:
                 rhs_cspecs = tuple(s if s == reduce_spec else None for s in rhs_cspecs)
@@ -918,7 +834,7 @@ class GemmPrimitive(BasePrimitive):
             )
 
         # Only do AG Sequence dim if not Overlap
-        if comm_overlap is None or not comm_overlap.is_all_gather():
+        if not _is_collective_all_gather(cgemm_config):
             # Non-contracting dims of LHS to be gathered along the SP axis.
             # Minor note: This causes MaxText TP (= Megatron TP + activation_hidden sharding) gathering x for
             # dW1 = x^T * dY1 which is unexpected. This is a known issue and no solution has found yet.
@@ -927,7 +843,7 @@ class GemmPrimitive(BasePrimitive):
         out_specs = lhs_non_cspecs + rhs_non_cspecs
 
         # Only do AG Sequence dim if not Overlap RS
-        if comm_overlap is not None and comm_overlap.is_reduce_scatter():
+        if _is_collective_reduce_scatter(cgemm_config):
             assert sequence_dim <= len(lhs_non_cspecs), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
             out_specs = out_specs[:sequence_dim] + (gsr.tpsp_resource,) + out_specs[sequence_dim + 1:]
 
@@ -964,7 +880,7 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
-        comm_overlap,
+        cgemm_config,
         mesh,
         arg_infos,
         result_infos,
@@ -972,7 +888,7 @@ class GemmPrimitive(BasePrimitive):
         del out_dtype, scaling_mode, grad, use_split_accumulator, result_infos, is_outer, sequence_dim
 
         (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
-            GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims, transpose_batch_sequence, comm_overlap)
+            GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims, transpose_batch_sequence, cgemm_config)
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
         
@@ -1001,7 +917,7 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
-        comm_overlap,
+        cgemm_config,
         mesh,
         arg_infos,
         result_infos,
@@ -1012,7 +928,7 @@ class GemmPrimitive(BasePrimitive):
             (lhs_specs, rhs_specs, bias_input_specs, gelu_input_specs),
             (out_specs, dbias_specs, pre_gelu_specs),
             reduce_spec, inferred_sequence_dim,
-        ) = GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims, transpose_batch_sequence, comm_overlap)
+        ) = GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims, transpose_batch_sequence, cgemm_config)
 
         # Block scale inverses match their operands, but tensor scale inverses are unsharded.
         none_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -1066,10 +982,10 @@ class GemmPrimitive(BasePrimitive):
                 transpose_batch_sequence=transpose_batch_sequence,
                 sequence_dim=inferred_sequence_dim,
                 is_outer=False,
-                comm_overlap=comm_overlap,
+                cgemm_config=cgemm_config,
             )
 
-            if reduce_spec is not None and comm_overlap is not None and comm_overlap.is_reduce_scatter():
+            if reduce_spec is not None and _is_collective_reduce_scatter(cgemm_config):
                 outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
             return outputs
 
@@ -1087,15 +1003,15 @@ class GemmPrimitive(BasePrimitive):
         transpose_batch_sequence,
         sequence_dim,
         is_outer,
-        comm_overlap,
+        cgemm_config,
         mesh,
         operand_types,
         result_types,
     ):
         del out_dtype, grad, use_split_accumulator
-        del mesh, result_types, transpose_batch_sequence, sequence_dim, is_outer, comm_overlap
+        del mesh, result_types, transpose_batch_sequence, sequence_dim, is_outer, cgemm_config
 
-        if comm_overlap is not None:
+        if cgemm_config is not None:
             raise NotImplementedError("CollectiveGEMM with Shardy propagation is not supported yet! Please turn off Shardy by exporting env var JAX_USE_SHARDY_PARTITIONER=false")
 
         prefix = "GemmPrimitive_"
@@ -1178,7 +1094,7 @@ def _te_gemm(
     fuse_gelu: bool = False,
     grad: bool = False,
     use_split_accumulator: bool = QuantizeConfig.FP8_2X_ACC_FPROP,
-    comm_overlap: CommOverlapHelper = CommOverlapHelper(),
+    cgemm_config: CollectiveGemmConfig = None,
 ) -> Tuple[jax.Array, ...]:
 
     # Prepare non-quantized GEMM operands
@@ -1233,7 +1149,7 @@ def _te_gemm(
     if gelu_input is None or not (fuse_gelu and grad):
         gelu_input = jnp.empty(0, dtype=out_dtype)
 
-    if aux_in is None or not comm_overlap.is_enabled:
+    if aux_in is None or not cgemm_config.is_enabled:
         aux_in = jnp.empty(0, dtype=jnp.bfloat16)
 
     return GemmPrimitive.outer_primitive.bind(
@@ -1251,7 +1167,7 @@ def _te_gemm(
         fuse_gelu=fuse_gelu,
         grad=grad,
         use_split_accumulator=use_split_accumulator,
-        comm_overlap=comm_overlap,
+        cgemm_config=cgemm_config,
     )
 
 
@@ -1603,7 +1519,7 @@ def gemm(
     use_split_accumulator: bool, default = True
         Enable promoting some intermediate sums to higher precision when accumulating the result in
         the cuBLAS GEMM kernel. Disabling this trades off numerical accuracy for speed.
-    comm_overlap: CommOverlapHelper, default = None
+    cgemm_config: CommOverlapHelper, default = None
         Helper object that manages comm+GEMM overlap options.
 
     Returns
@@ -1656,18 +1572,13 @@ def gemm(
 
     # Discard empty outputs
     grad = kwargs.get("grad", False)
-    comm_overlap = kwargs.get("comm_overlap", CommOverlapHelper())
     clean_outputs = outputs[0]  # first output is the final result and is never empty
-    if (fuse_bias and grad) or (fuse_gelu and not grad) or comm_overlap.has_aux_output():
+    if (fuse_bias and grad) or (fuse_gelu and not grad):
         clean_outputs = (outputs[0],)
         if fuse_bias and grad:  # only return bias gradient if it exists
             clean_outputs += (outputs[1],)
         if fuse_gelu and not grad:  # only return pre-GeLU output if it exists
             clean_outputs += (outputs[2],)
-        if comm_overlap.has_aux_output():
-            # only return aux output for bulk overlap or non-bulk all-gather overlap
-            # with gathered LHS output
-            clean_outputs += (outputs[3],)
     return clean_outputs
 
 
