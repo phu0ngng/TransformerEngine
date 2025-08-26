@@ -43,7 +43,7 @@ class GemmPrimitive:
     """
 
     name = "te_gemm"
-    multiple_results = False
+    multiple_results = True
     inner_primitive = None
     outer_primitive = None
 
@@ -52,20 +52,9 @@ class GemmPrimitive:
         """Abstract evaluation for the specific GEMM configuration."""
         batch, seq, hidden_in = lhs.shape
         hidden_in_weight, hidden_out = rhs.shape
-
-        # Validate contracting dimensions
-        assert contracting_dims == (
-            (2,),
-            (0,),
-        ), f"Expected contracting_dims=((2,), (0,)), got {contracting_dims}"
-        assert (
-            hidden_in == hidden_in_weight
-        ), f"Contracting dimension mismatch: {hidden_in} != {hidden_in_weight}"
-
-        # Output shape: [batch, seq, hidden_out]
         out_shape = (batch, seq, hidden_out)
         out_dtype = jnp.result_type(lhs.dtype, rhs.dtype)
-        return jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
+        return (jax.core.ShapedArray(shape=out_shape, dtype=out_dtype),)
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
@@ -73,35 +62,23 @@ class GemmPrimitive:
 
     @staticmethod
     def impl(lhs, rhs, contracting_dims):
-        """Implementation - calls inner primitive like TE does."""
-        print("GemmPrimitive.impl is called")
-        # Call inner primitive with all arguments (like TE does)
         return GemmPrimitive.inner_primitive.bind(lhs, rhs, contracting_dims=contracting_dims)
-
 
     @staticmethod
     def lowering(ctx, lhs, rhs, contracting_dims):
-        """Lowering - minimal implementation."""
-        return (lhs,)
+        return (lhs,)       # Does not do any calculation, just return lhs as the output
 
     @staticmethod
     def batcher(batched_args, batch_dims, contracting_dims):
-        """Batching rule."""
-        lhs, rhs = batched_args
-        lhs_bdim, rhs_bdim = batch_dims
-
-        if lhs_bdim is not None or rhs_bdim is not None:
-            raise ValueError("Batching not supported in this example")
-        assert GemmPrimitive.outer_primitive is not None
-
         return GemmPrimitive.outer_primitive.bind(lhs, rhs, contracting_dims=contracting_dims)
 
     @staticmethod
     def _parse_operand_output_specs(arg_infos, contracting_dims):
         """
-        Parse operand and output specs - exact implementation from TransformerEngine.
+        Parse operand and output specs - copied from TE to demonstrate we can conditionally
+        overwrite specs to trigger AG if we have access to inputs specs
         """
-        lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
+        lhs_specs, rhs_specs = map(get_padded_spec, arg_infos)
 
         lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
         lhs_cdims, rhs_cdims = map(
@@ -126,13 +103,8 @@ class GemmPrimitive:
                     reduce_spec = l
 
         if reduce_spec is not None:
-            # Other non-reduce cdims (if exists) need to be unsharded
             lhs_cspecs = tuple(s if s == reduce_spec else None for s in lhs_cspecs)
             rhs_cspecs = tuple(s if s == reduce_spec else None for s in rhs_cspecs)
-
-            # Non-contracting dims of RHS always needs to be gathered, i.e. for TP + activation_hidden
-            # No batch-dim check needed as `rhs_non_cspecs` never contains batch-dim.
-            # In `rhs_specs`, the batch dim appears only in Wgrad GEMM under `rhs_cspecs`.
             rhs_non_cspecs = tuple(
                 None if spec in lhs_non_cspecs else spec for spec in rhs_non_cspecs
             )
@@ -141,14 +113,8 @@ class GemmPrimitive:
             # Otherwise, require contracting dims of both operands to be unsharded
             lhs_cspecs = (None,) * len(lhs_cspecs)
             rhs_cspecs = (None,) * len(rhs_cspecs)
-
-            # Non-contracting dims of RHS always needs to be gathered along the FSDP axis
-            # For our simplified version, we'll just gather all non-contracting dims
             # rhs_non_cspecs = tuple(None for _ in rhs_non_cspecs)
 
-        # Non-contracting dims of LHS to be gathered along the SP axis.
-        # Minor note: This causes MaxText TP (= Megatron TP + activation_hidden sharding) gathering x for
-        # dW1 = x^T * dY1 which is unexpected. This is a known issue and no solution has found yet.
         lhs_non_cspecs = tuple(
             None if spec in rhs_non_cspecs else spec for spec in lhs_non_cspecs
         )
@@ -186,15 +152,12 @@ class GemmPrimitive:
         - We parse the operand specs and determine output sharding
         """
         del result_infos
-        print("GemmPrimitive.infer_sharding_from_operands is called")
+        print("--GemmPrimitive.infer_sharding_from_operands is called")
 
-        # Parse operand specs
-        (_, (out_specs,), _) = GemmPrimitive._parse_operand_output_specs(
+        (_, (out_specs,), *_) = GemmPrimitive._parse_operand_output_specs(
             arg_infos, contracting_dims
         )
-
-        # Create NamedSharding for output
-        output_sharding = NamedSharding(mesh, P(*out_specs))
+        output_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
         print(f"  Inferred output sharding: {output_sharding}")
         return [output_sharding]
@@ -209,35 +172,29 @@ class GemmPrimitive:
         """Partition function following TransformerEngine's approach."""
         del result_infos
 
-        print("GemmPrimitive.partition is called")
+        print("--GemmPrimitive.partition is called")
 
-        # Parse operand and output specs
-        (arg_specs, out_specs, _) = GemmPrimitive._parse_operand_output_specs(
+        (lhs_specs, rhs_specs), (output_specs,), _ = GemmPrimitive._parse_operand_output_specs(
             arg_infos, contracting_dims
         )
 
-        # Create shardings
-        lhs_specs, rhs_specs = arg_specs
-        output_specs = out_specs[0]
+        lhs_sharding = NamedSharding(mesh, PartitionSpec(*lhs_specs))
+        rhs_sharding = NamedSharding(mesh, PartitionSpec(*rhs_specs))
+        output_sharding = NamedSharding(mesh, PartitionSpec(*output_specs))
 
-        lhs_sharding = NamedSharding(mesh, P(*lhs_specs))
-        rhs_sharding = NamedSharding(mesh, P(*rhs_specs))
-        output_sharding = NamedSharding(mesh, P(*output_specs))
-
-        # Define sharded implementation
         def sharded_impl(lhs, rhs):
             return GemmPrimitive.impl(lhs, rhs, contracting_dims=contracting_dims)
 
-        return mesh, sharded_impl, [output_sharding], [lhs_sharding, rhs_sharding]
+        return mesh, sharded_impl, [output_sharding], (lhs_sharding, rhs_sharding)
 
     @staticmethod
     def shardy_sharding_rule(contracting_dims, mesh, value_types, result_types):
         """Sharding rule for Shardy."""
         del mesh, result_types
 
-        print("GemmPrimitive.shardy_sharding_rule is called")
+        print("--GemmPrimitive.shardy_sharding_rule is called")
 
-        prefix = "SpecificGemm_"
+        prefix = "TeGemm_"
 
         # Extract input and weight types
         lhs_type, rhs_type = value_types[0], value_types[1]
@@ -270,9 +227,10 @@ class GemmPrimitive:
         output_specs = [lhs_specs[i] for i in lhs_non_cdims] + [
             rhs_specs[i] for i in rhs_non_cdims
         ]
-        # lhs_spec = (SpecificGemm_lhs_d0, SpecificGemm_lhs_d1, SpecificGemm_lhs_k0)
-        # rhs_spec = (SpecificGemm_rhs_k0, SpecificGemm_rhs_d0)
-        # output_spec = (SpecificGemm_lhs_d0, SpecificGemm_lhs_d1, SpecificGemm_rhs_d0)
+        # printed values
+        # lhs_specs ['TeGemm_lhs_d0', 'TeGemm_lhs_d1', 'TeGemm_lhs_k0']
+        # rhs_specs ['TeGemm_rhs_k0', 'TeGemm_rhs_d1']
+        # output_specs ['TeGemm_lhs_d0', 'TeGemm_lhs_d1', 'TeGemm_rhs_d1']
 
         return SdyShardingRule(
             operand_mappings=(lhs_specs, rhs_specs),
@@ -320,7 +278,7 @@ def register_specific_gemm_primitive():
 register_specific_gemm_primitive()
 
 # Create a 2x4 mesh for tensor parallelism
-devices = mesh_utils.create_device_mesh((2, 4))
+devices = mesh_utils.create_device_mesh((2, 2))
 mesh = Mesh(devices, ("tensor", "data"))
 jax.sharding.set_mesh(mesh)
 
@@ -328,7 +286,7 @@ jax.sharding.set_mesh(mesh)
 batch_size = 32
 seq_len = 32
 hidden_in = 32
-hidden_out = 32
+hidden_out = 64 # need to be x2 hidden_in so that return lhs_shape = output_shape in lowering
 
 # Input: [batch, seq, hidden_in]
 input_tensor = jnp.ones((batch_size, seq_len, hidden_in), dtype=jnp.bfloat16)
@@ -336,57 +294,37 @@ input_tensor = jnp.ones((batch_size, seq_len, hidden_in), dtype=jnp.bfloat16)
 # Weight: [hidden_in, hidden_out]
 weight_tensor = jnp.ones((hidden_in, hidden_out), dtype=jnp.bfloat16)
 
-print("=== Specific GEMM Configuration Test ===")
-print(f"Mesh: {mesh}")
-print(f"Input shape: {input_tensor.shape}")
-print(f"Weight shape: {weight_tensor.shape}")
-print(f"Contracting dims: ((2,), (0,))  # hidden_in dimension")
-print(f"Expected output shape: ({batch_size}, {seq_len}, {hidden_out})")
+# print("=== Specific GEMM Configuration Test ===")
+# print(f"Mesh: {mesh}")
+# print(f"Input shape: {input_tensor.shape}")
+# print(f"Weight shape: {weight_tensor.shape}")
+# print(f"Contracting dims: ((2,), (0,))")
+# print(f"Expected output shape: ({batch_size}, {seq_len}, {hidden_out})")
 
 # Define the sharding configurations
-input_sharding = PartitionSpec(None, "tensor", None)
+input_sharding = PartitionSpec("data", "tensor", None)
 weight_sharding = PartitionSpec(None, "tensor")
+expected_output_sharding = PartitionSpec("data", None, 'tensor')
 
-print(f"\nInput sharding: {input_sharding}")
+print(f"Input sharding: {input_sharding}")
 print(f"Weight sharding: {weight_sharding}")
+print(f"Expected output sharding: {expected_output_sharding}")
 
 with mesh:
     # Shard the inputs
     input_sharded = jax.device_put(input_tensor, input_sharding)
     weight_sharded = jax.device_put(weight_tensor, weight_sharding)
 
-    print(f"\n--- Testing GEMM with specific configuration ---")
-
-    # Call our primitive
     try:
-        # Define the expected output sharding based on our analysis
-        # For our case: input[batch, seq, hidden_in] @ weight[hidden_in, hidden_out]
-        # Output: [batch, seq, hidden_out]
-        # Expected output sharding: (None, tensor, tensor) - preserve seq and hidden_out sharding
-        expected_output_sharding = NamedSharding(mesh, P(None, 'tensor', 'tensor'))
-        
-        # Use jit with explicit in_shardings and out_shardings to trigger partitioning
         jitted_gemm = jax.jit(
             lambda x, w: GemmPrimitive.outer_primitive.bind(x, w, contracting_dims=((2,), (0,))),
             in_shardings=[input_sharding, weight_sharding],
-            out_shardings=expected_output_sharding
+            # out_shardings=expected_output_sharding  <-- We CAN NOT provide this in TE
         )
-        
-        print("Calling jitted GEMM with explicit shardings...")
-        print(f"Input sharding: {input_sharding}")
-        print(f"Weight sharding: {weight_sharding}")
-        print(f"Expected output sharding: {expected_output_sharding}")
         result = jitted_gemm(input_sharded, weight_sharded)
-        print(f"GEMM succeeded!")
-        print(f"Result shape: {result.shape}")
-        print(f"Result type: {jax.typeof(result)}")
-        
-        # Check if result is sharded
-        if hasattr(result, 'sharding'):
-            print(f"Result sharding: {result.sharding}")
-        else:
-            print("Result is not sharded")
-            
+        print("\nOutput sharding")
+        jax.debug.inspect_array_sharding(result, callback=print)
+
     except Exception as e:
         print(f"GEMM failed: {e}")
         import traceback
