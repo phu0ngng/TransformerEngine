@@ -277,8 +277,11 @@ def register_specific_gemm_primitive():
 # Register the primitive
 register_specific_gemm_primitive()
 
-# Create a 2x4 mesh for tensor parallelism
-devices = mesh_utils.create_device_mesh((2, 2))
+# Create a 2x2 mesh using only 4sGPUs 
+available_devices = jax.devices()
+assert len(available_devices) >= 4, f"Need at least 4 GPUs"
+devices = available_devices[:4]
+devices = np.array(devices).reshape((2, 2))
 mesh = Mesh(devices, ("tensor", "data"))
 jax.sharding.set_mesh(mesh)
 
