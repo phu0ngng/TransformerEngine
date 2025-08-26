@@ -159,7 +159,6 @@ class GemmPrimitive:
         )
         output_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
-        print(f"  Inferred output sharding: {output_sharding}")
         return [output_sharding]
 
     @staticmethod
@@ -318,7 +317,7 @@ def execute_test(shardy_enabled=False):
     print(f"\n{'='*60}")
     print(f"Running test with Shardy {'ON' if shardy_enabled else 'OFF'}")
     print(f"{'='*60}")
-    
+
     # Set Shardy configuration
     if shardy_enabled:
         jax.config.update('jax_use_shardy_partitioner', True)
@@ -326,7 +325,7 @@ def execute_test(shardy_enabled=False):
     else:
         jax.config.update('jax_use_shardy_partitioner', False)
         print("Shardy partitioner disabled")
-    
+
     with mesh:
         # Shard the inputs
         input_sharded = jax.device_put(input_tensor, input_sharding)
