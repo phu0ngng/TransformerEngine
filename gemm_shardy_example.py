@@ -73,15 +73,11 @@ class GemmPrimitive:
 
     @staticmethod
     def impl(lhs, rhs, contracting_dims):
-        """Implementation - compute the actual GEMM operation."""
-        # For demonstration, we'll do a simple reshape and broadcast
-        # In a real implementation, this would call the actual GEMM kernel
-        #
+        """Implementation - calls inner primitive like TE does."""
         print("GemmPrimitive.impl is called")
-        # output_shape = lhs.shape[:-1] + rhs.shape[1:]
-        # return jax.numpy.ones(output_shape, dtype=jnp.bfloat16)
-        assert GemmPrimitive.inner_primitive is not None
+        # Call inner primitive with all arguments (like TE does)
         return GemmPrimitive.inner_primitive.bind(lhs, rhs, contracting_dims=contracting_dims)
+
 
     @staticmethod
     def lowering(ctx, lhs, rhs, contracting_dims):
@@ -232,7 +228,7 @@ class GemmPrimitive:
         def sharded_impl(lhs, rhs):
             return GemmPrimitive.impl(lhs, rhs, contracting_dims=contracting_dims)
 
-        return mesh, sharded_impl, [output_sharding], [input_sharding, weight_sharding]
+        return mesh, sharded_impl, [output_sharding], [lhs_sharding, rhs_sharding]
 
     @staticmethod
     def shardy_sharding_rule(contracting_dims, mesh, value_types, result_types):
@@ -363,16 +359,35 @@ with mesh:
 
     # Call our primitive
     try:
-        result = GemmPrimitive.outer_primitive.bind(input_sharded, weight_sharded, contracting_dims=((2,), (0,)))
+        # Define the expected output sharding based on our analysis
+        # For our case: input[batch, seq, hidden_in] @ weight[hidden_in, hidden_out]
+        # Output: [batch, seq, hidden_out]
+        # Expected output sharding: (None, tensor, tensor) - preserve seq and hidden_out sharding
+        expected_output_sharding = NamedSharding(mesh, P(None, 'tensor', 'tensor'))
+        
+        # Use jit with explicit in_shardings and out_shardings to trigger partitioning
+        jitted_gemm = jax.jit(
+            lambda x, w: GemmPrimitive.outer_primitive.bind(x, w, contracting_dims=((2,), (0,))),
+            in_shardings=[input_sharding, weight_sharding],
+            out_shardings=expected_output_sharding
+        )
+        
+        print("Calling jitted GEMM with explicit shardings...")
+        print(f"Input sharding: {input_sharding}")
+        print(f"Weight sharding: {weight_sharding}")
+        print(f"Expected output sharding: {expected_output_sharding}")
+        result = jitted_gemm(input_sharded, weight_sharded)
         print(f"GEMM succeeded!")
         print(f"Result shape: {result.shape}")
-
-        # Check the actual sharding of the result
-        # result_sharding = jax.devices()[0].addressable_shards(result)[0].sharding
-        # print(f"Result sharding: {result_sharding}")
-        print(jax.typeof(result))
-
+        print(f"Result type: {jax.typeof(result)}")
+        
+        # Check if result is sharded
+        if hasattr(result, 'sharding'):
+            print(f"Result sharding: {result.sharding}")
+        else:
+            print("Result is not sharded")
+            
     except Exception as e:
         print(f"GEMM failed: {e}")
-        # import traceback
-        # traceback.print_exc()
+        import traceback
+        traceback.print_exc()
