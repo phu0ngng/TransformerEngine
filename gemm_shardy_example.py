@@ -3,7 +3,7 @@
 Specific example demonstrating sharding propagation issues with the exact configuration:
 
 Input[batch, seq, hidden_in], PartitionSpec(None, tensor, None)
-Weight[hidden_in, act_num, hidden_out], PartitionSpec(None, None, tensor)
+Weight[hidden_in, hidden_out], PartitionSpec(None, None, tensor)
 output = gemm(Input, Weight, contracting_dim=((2,), (0,))
 """
 from functools import partial
@@ -38,7 +38,7 @@ def get_padded_spec(arg_info):
 class GemmPrimitive:
     """
     GEMM primitive for the specific configuration:
-    Input[batch, seq, hidden_in] @ Weight[hidden_in, act_num, hidden_out]
+    Input[batch, seq, hidden_in] @ Weight[hidden_in, hidden_out]
     contracting_dim=((2,), (0,))  # hidden_in dimension
     """
 
@@ -51,7 +51,7 @@ class GemmPrimitive:
     def abstract(lhs, rhs, contracting_dims):
         """Abstract evaluation for the specific GEMM configuration."""
         batch, seq, hidden_in = lhs.shape
-        hidden_in_weight, act_num, hidden_out = rhs.shape
+        hidden_in_weight, hidden_out = rhs.shape
 
         # Validate contracting dimensions
         assert contracting_dims == (
@@ -62,8 +62,8 @@ class GemmPrimitive:
             hidden_in == hidden_in_weight
         ), f"Contracting dimension mismatch: {hidden_in} != {hidden_in_weight}"
 
-        # Output shape: [batch, seq, act_num, hidden_out]
-        out_shape = (batch, seq, act_num, hidden_out)
+        # Output shape: [batch, seq, hidden_out]
+        out_shape = (batch, seq, hidden_out)
         out_dtype = jnp.result_type(lhs.dtype, rhs.dtype)
         return jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
 
@@ -86,7 +86,7 @@ class GemmPrimitive:
     @staticmethod
     def lowering(ctx, lhs, rhs, contracting_dims):
         """Lowering - minimal implementation."""
-        return ctx.avals_out        # No computation is perform
+        return (lhs,)
 
     @staticmethod
     def batcher(batched_args, batch_dims, contracting_dims):
@@ -275,8 +275,8 @@ class GemmPrimitive:
             rhs_specs[i] for i in rhs_non_cdims
         ]
         # lhs_spec = (SpecificGemm_lhs_d0, SpecificGemm_lhs_d1, SpecificGemm_lhs_k0)
-        # rhs_spec = (SpecificGemm_rhs_k0, SpecificGemm_rhs_d1, SpecificGemm_rhs_d2)
-        # output_spec = (SpecificGemm_lhs_d0, SpecificGemm_lhs_d1, SpecificGemm_rhs_d1, SpecificGemm_rhs_d2)
+        # rhs_spec = (SpecificGemm_rhs_k0, SpecificGemm_rhs_d0)
+        # output_spec = (SpecificGemm_lhs_d0, SpecificGemm_lhs_d1, SpecificGemm_rhs_d0)
 
         return SdyShardingRule(
             operand_mappings=(lhs_specs, rhs_specs),
@@ -329,28 +329,27 @@ mesh = Mesh(devices, ("tensor", "data"))
 jax.sharding.set_mesh(mesh)
 
 # Create test data with the exact configuration
-batch_size = 4
+batch_size = 32
 seq_len = 32
-hidden_in = 64
-act_num = 1
-hidden_out = 64
+hidden_in = 32
+hidden_out = 32
 
 # Input: [batch, seq, hidden_in]
 input_tensor = jnp.ones((batch_size, seq_len, hidden_in), dtype=jnp.bfloat16)
 
-# Weight: [hidden_in, act_num, hidden_out]
-weight_tensor = jnp.ones((hidden_in, act_num, hidden_out), dtype=jnp.bfloat16)
+# Weight: [hidden_in, hidden_out]
+weight_tensor = jnp.ones((hidden_in, hidden_out), dtype=jnp.bfloat16)
 
 print("=== Specific GEMM Configuration Test ===")
 print(f"Mesh: {mesh}")
 print(f"Input shape: {input_tensor.shape}")
 print(f"Weight shape: {weight_tensor.shape}")
 print(f"Contracting dims: ((2,), (0,))  # hidden_in dimension")
-print(f"Expected output shape: ({batch_size}, {seq_len}, {act_num}, {hidden_out})")
+print(f"Expected output shape: ({batch_size}, {seq_len}, {hidden_out})")
 
 # Define the sharding configurations
 input_sharding = PartitionSpec(None, "tensor", None)
-weight_sharding = PartitionSpec(None, None, "tensor")
+weight_sharding = PartitionSpec(None, "tensor")
 
 print(f"\nInput sharding: {input_sharding}")
 print(f"Weight sharding: {weight_sharding}")
