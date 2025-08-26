@@ -310,22 +310,40 @@ print(f"Input sharding: {input_sharding}")
 print(f"Weight sharding: {weight_sharding}")
 print(f"Expected output sharding: {expected_output_sharding}")
 
-with mesh:
-    # Shard the inputs
-    input_sharded = jax.device_put(input_tensor, input_sharding)
-    weight_sharded = jax.device_put(weight_tensor, weight_sharding)
+def execute_test(shardy_enabled=False):
+    """Execute the GEMM test with or without Shardy."""
+    print(f"\n{'='*60}")
+    print(f"Running test with Shardy {'ON' if shardy_enabled else 'OFF'}")
+    print(f"{'='*60}")
+    
+    # Set Shardy configuration
+    if shardy_enabled:
+        jax.config.update('jax_use_shardy_partitioner', True)
+        print("Shardy partitioner enabled")
+    else:
+        jax.config.update('jax_use_shardy_partitioner', False)
+        print("Shardy partitioner disabled")
+    
+    with mesh:
+        # Shard the inputs
+        input_sharded = jax.device_put(input_tensor, input_sharding)
+        weight_sharded = jax.device_put(weight_tensor, weight_sharding)
 
-    try:
-        jitted_gemm = jax.jit(
-            lambda x, w: GemmPrimitive.outer_primitive.bind(x, w, contracting_dims=((2,), (0,))),
-            in_shardings=[input_sharding, weight_sharding],
-            # out_shardings=expected_output_sharding  <-- We CAN NOT provide this in TE
-        )
-        result = jitted_gemm(input_sharded, weight_sharded)
-        print("\nOutput sharding")
-        jax.debug.inspect_array_sharding(result, callback=print)
+        try:
+            jitted_gemm = jax.jit(
+                lambda x, w: GemmPrimitive.outer_primitive.bind(x, w, contracting_dims=((2,), (0,))),
+                in_shardings=[input_sharding, weight_sharding],
+                # out_shardings=expected_output_sharding  <-- We CAN NOT provide this in TE
+            )
+            result = jitted_gemm(input_sharded, weight_sharded)
+            print("\nOutput sharding")
+            jax.debug.inspect_array_sharding(result, callback=print)
 
-    except Exception as e:
-        print(f"GEMM failed: {e}")
-        import traceback
-        traceback.print_exc()
+        except Exception as e:
+            print(f"GEMM failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+# Execute test twice - first without Shardy, then with Shardy
+execute_test(shardy_enabled=False)
+execute_test(shardy_enabled=True)
