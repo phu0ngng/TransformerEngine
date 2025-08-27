@@ -34,7 +34,7 @@
 #include "transformer_engine/multi_stream.h"
 
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
-XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::CommOverlapMethod);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::CommOverlapAlgo);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::CommOverlapType);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
 
@@ -125,17 +125,13 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 
-int64_t CreateCommOverlapBuffer(CommOverlapType comm_type, CommOverlapMethod method,
+int64_t CreateCollectiveGemmExecutor(CommOverlapType collective_op, CommOverlapAlgo collective_algo,
                                 const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                                 int tp_size, int num_splits = 3, int num_max_streams = 3,
                                 int comm_cga_size = 2, int gemm_priority = 0, int comm_priority = 0,
                                 int num_comm_sm = 16, int set_sm_margin = false, bool use_ce = true,
                                 bool atomic_gemm = false, bool rs_overlap_first_gemm = false,
                                 bool aggregate_ag = false);
-
-void DestroyCommOverlapBuffer(size_t unique_id);
-
-void DestroyAllCommOverlapBuffers();
 
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);

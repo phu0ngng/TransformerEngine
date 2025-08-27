@@ -89,7 +89,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
   m.def("create_collective_gemm_executor", &transformer_engine::jax::CreateUserBuffer,
-        pybind11::arg("collective_op"), pybind11::arg("collective_algo"), pybind11::arg("buffer_shape"),
+        pybind11::arg("collective_op"), pybind11::arg("collective_method"), pybind11::arg("buffer_shape"),
         pybind11::arg("buffer_dtype"), pybind11::arg("tp_size"), pybind11::pos_only(),
         pybind11::kw_only(), pybind11::arg("num_splits") = 4, pybind11::arg("num_max_streams") = 3,
         pybind11::arg("comm_cga_size") = 2, pybind11::arg("gemm_priority") = 0,
