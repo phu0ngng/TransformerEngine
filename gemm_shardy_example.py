@@ -312,14 +312,16 @@ print(f"Input sharding: {input_sharding}")
 print(f"Weight sharding: {weight_sharding}")
 print(f"Expected output sharding: {expected_output_sharding}")
 
-@partial(jax.custom_vjp, nondiff_argnums=(0, 1))    
+@jax.custom_vjp
 def _gemm(x, w):
     output, _ = _gemm_fwd(x, w)
     return output
 
 def _gemm_fwd(x, w):
     output = GemmPrimitive.outer_primitive.bind(x, w, contracting_dims=((2,), (0,)))
-    output = jax.lax.with_sharding_constraint(output, expected_output_sharding)
+    output = jax.lax.with_sharding_constraint(output, expected_output_sharding) #
+    jax.debug.print("\nOutput sharding")
+    jax.debug.inspect_array_sharding(output, callback=print)
     return output, None
 
 def _gemm_bwd(ctx, grad):
@@ -347,13 +349,11 @@ def execute_test(shardy_enabled=False):
         weight_sharded = jax.device_put(weight_tensor, weight_sharding)
 
         try:
-            jitted_gemm = jax.jit(jax.value_and_grad(_gemm, argnums=(0, 1)),
+            jitted_gemm = jax.jit(jax.value_and_grad(lambda x, w: jax.numpy.mean(_gemm(x, w)[0]), argnums=(0, 1)),
                                   in_shardings=[input_sharding, weight_sharding],
                                   #out_shardings=expected_output_sharding,
                                   )
-            result = jitted_gemm(input_sharded, weight_sharded)
-            print("\nOutput sharding")
-            jax.debug.inspect_array_sharding(result, callback=print)
+            result, *_ = jitted_gemm(input_sharded, weight_sharded)
 
         except Exception as e:
             print(f"GEMM failed: {e}")
