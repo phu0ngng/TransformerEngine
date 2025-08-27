@@ -171,7 +171,6 @@ class CollectiveGemmConfig:
 
     # Core init arguments
     collective_op: tex.CollectiveOp
-    collective_algo: tex.CollectiveAlgo 
     buffer_shape: Sequence[int]
     buffer_dtype: jnp.dtype
 
@@ -197,7 +196,6 @@ class CollectiveGemmConfig:
         buffer_shape: Sequence[int],
         buffer_dtype: jnp.dtype,
         collective_op: tex.CollectiveOp,
-        collective_algo: tex.CollectiveAlgo = tex.CollectiveAlgo.RING_EXCHANGE,
         num_splits: int = None,
         num_max_streams: int = 3,
         comm_cga_size: int = None,
@@ -217,7 +215,7 @@ class CollectiveGemmConfig:
             return None
 
         assert len(buffer_shape) >= 2, f"{buffer_shape} is not a valid buffer shape."
-        
+
         # Update global min/max CUDA stream priority values if not already done
         global CUDA_STREAM_PRIORITY_LOWEST, CUDA_STREAM_PRIORITY_HIGHEST
         if CUDA_STREAM_PRIORITY_LOWEST is None or CUDA_STREAM_PRIORITY_HIGHEST is None:
@@ -225,7 +223,7 @@ class CollectiveGemmConfig:
                 CUDA_STREAM_PRIORITY_LOWEST,
                 CUDA_STREAM_PRIORITY_HIGHEST,
             ) = tex.get_stream_priority_range()
-        
+
         # Set default priorities if not provided
         gemm_priority = gemm_priority or CUDA_STREAM_PRIORITY_LOWEST
         comm_priority = comm_priority or CUDA_STREAM_PRIORITY_HIGHEST
@@ -250,7 +248,6 @@ class CollectiveGemmConfig:
         # Create the communication plan
         plan_id = tex.create_collective_gemm_executor(
             collective_op,
-            collective_algo,
             buffer_shape,
             jax_dtype_to_te_dtype(buffer_dtype),
             tpsp_axis_size(),
@@ -266,11 +263,10 @@ class CollectiveGemmConfig:
             rs_overlap_first_gemm=rs_overlap_first_gemm,
             aggregate_ag=aggregate_ag,
         )
-        
+
         # Create the instance
         instance = CollectiveGemmConfig(
             collective_op=collective_op,
-            collective_algo=collective_algo,
             buffer_shape=buffer_shape,
             buffer_dtype=buffer_dtype,
             num_splits=num_splits,
@@ -286,14 +282,11 @@ class CollectiveGemmConfig:
             aggregate_ag=aggregate_ag,
             plan_id=plan_id,
         )
-        
+
         return instance
 
     def __post_init__(self):
         """Validate the configuration after initialization."""
-        assert self.collective_algo != tex.CollectiveAlgo.RING_EXCHANGE, (
-            f"{self.collective_algo} is not supported."
-        )
         assert self.collective_op != tex.CollectiveOp.NONE, (
             f"{self.collective_op} is not a valid collective operation."
         )
@@ -326,12 +319,11 @@ class CollectiveGemmConfigSet:
     forward: CollectiveGemmConfig = field(default=None)
     backward: CollectiveGemmConfig = field(default=None)
 
-    @staticmethod       
+    @staticmethod
     def create(
         buffer_shape: Sequence[int],
         buffer_dtype: jnp.dtype,
         forward_collective_op: tex.CollectiveOp,
-        collective_algo: tex.CollectiveAlgo = tex.CollectiveAlgo.RING_EXCHANGE,
         num_splits: int = None,
         num_max_streams: int = 3,
         comm_cga_size: int = None,
@@ -349,7 +341,6 @@ class CollectiveGemmConfigSet:
             buffer_shape,
             buffer_dtype,
             forward_collective_op,
-            collective_algo,
             num_splits,
             num_max_streams,
             comm_cga_size,
@@ -374,7 +365,6 @@ class CollectiveGemmConfigSet:
             buffer_shape,
             buffer_dtype,
             backward_collective_op,
-            collective_algo,
             num_splits,
             num_max_streams,
             comm_cga_size,
@@ -502,7 +492,7 @@ class GemmPrimitive(BasePrimitive):
                 overlap_out_shape[sequence_dim] = (overlap_out_shape[sequence_dim] // tpsp_axis_size())
             output = jax.core.ShapedArray(shape=overlap_out_shape, dtype=out_dtype)
 
-        # Validate bias -- shape always depends on pure GEMM output 
+        # Validate bias -- shape always depends on pure GEMM output
         # (Phuong) This is not true for TP + Hidden
         bias_shape = (0,)
         bias_dtype = out_dtype
@@ -522,7 +512,7 @@ class GemmPrimitive(BasePrimitive):
                 bias_shape = rhs_non_contracting_shape
         bias_grad = jax.core.ShapedArray(shape=bias_shape, dtype=bias_dtype)
 
-        # Validate pre-GeLU -- shape always depends on pure GEMM output 
+        # Validate pre-GeLU -- shape always depends on pure GEMM output
         pre_gelu_shape = (0,)
         pre_gelu_dtype = out_dtype
         if fuse_gelu:
@@ -600,7 +590,7 @@ class GemmPrimitive(BasePrimitive):
         args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input)
         kwargs = {
             "scaling_mode": int(scaling_mode.value),
-            "lhs_axis_boundary": max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims), 
+            "lhs_axis_boundary": max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
             "rhs_axis_boundary": min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
             "lhs_transposed": lhs_transposed,
             "rhs_transposed": rhs_transposed,
@@ -612,13 +602,11 @@ class GemmPrimitive(BasePrimitive):
         if cgemm_config is not None:
             kwargs.update({
                 "collective_op": int(cgemm_config.collective_op.value),
-                "algo": int(cgemm_config.collective_algo.value),
                 "plan_id": cgemm_config.plan_id,
             })
         else:
             kwargs.update({
                 "collective_op": int(tex.CollectiveOp.NONE.value),
-                "algo": int(tex.CollectiveAlgo.NONE.value),
                 "plan_id": -1,  # Invalid plan_id for no collective operation
             })
 
@@ -796,7 +784,7 @@ class GemmPrimitive(BasePrimitive):
         # We only do CollectiveGemm AG on the x or dY and CollectiveGemm RS on the Y or dX thus they always the LHS and have sequence dim
         if _is_collective_all_gather(cgemm_config):
             # For all-gather: find consecutive pair of tpsp_resource
-            batch_sequence_pairs = [(i, i + 1) for i in range(len(lhs_specs) - 1) 
+            batch_sequence_pairs = [(i, i + 1) for i in range(len(lhs_specs) - 1)
                                   if lhs_specs[i] == gsr.tpsp_resource and lhs_specs[i + 1] == gsr.tpsp_resource]
             assert len(batch_sequence_pairs) == 1, f"Unable to detect the sequence dim as tpsp_resource does not appear exactly twice consecutively in lhs_specs: {lhs_specs}"
             sequence_dim = batch_sequence_pairs[0][0] if transpose_batch_sequence else batch_sequence_pairs[0][1]
@@ -867,7 +855,7 @@ class GemmPrimitive(BasePrimitive):
         return (
             (lhs_specs, rhs_specs, bias_specs, gelu_specs),
             (out_specs, bias_specs, gelu_specs),
-            reduce_spec, 
+            reduce_spec,
             sequence_dim,
         )
 
@@ -894,17 +882,17 @@ class GemmPrimitive(BasePrimitive):
             GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims, transpose_batch_sequence, cgemm_config)
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
-        
+
         # Discard bias gradient spec if there is no bias fusion
         if not fuse_bias:
             dbias_specs = (None,)
         dbias_sharding = NamedSharding(mesh, PartitionSpec(*dbias_specs))
-        
+
         # Discard pre-GeLU output spec if there is no GeLU fusion
         if not fuse_gelu:
             pre_gelu_specs = (None,)
         pre_gelu_sharding = NamedSharding(mesh, PartitionSpec(*pre_gelu_specs))
-        
+
         return [out_sharding, dbias_sharding, pre_gelu_sharding]
 
 
