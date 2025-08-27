@@ -2,8 +2,8 @@
 """
 Specific example demonstrating sharding propagation issues with the exact configuration:
 
-Input[batch, seq, hidden_in], PartitionSpec(None, tensor, None)
-Weight[hidden_in, hidden_out], PartitionSpec(None, None, tensor)
+Input[batch, seq, hidden_in], PartitionSpec(data, tensor, None)
+Weight[hidden_in, hidden_out], PartitionSpec(None, tensor)
 output = gemm(Input, Weight, contracting_dim=((2,), (0,))
 """
 from functools import partial
@@ -66,7 +66,7 @@ class GemmPrimitive:
 
     @staticmethod
     def lowering(ctx, lhs, rhs, contracting_dims):
-        return (lhs,)       # Does not do any calculation, just return lhs as the output
+        return (lhs,)       # no lowering, no calculation, just return lhs as the output
 
     @staticmethod
     def batcher(batched_args, batch_dims, contracting_dims):
@@ -319,7 +319,7 @@ def _gemm(x, w):
 
 def _gemm_fwd(x, w):
     output = GemmPrimitive.outer_primitive.bind(x, w, contracting_dims=((2,), (0,)))
-    output = jax.lax.with_sharding_constraint(output, expected_output_sharding) #
+    # output = jax.lax.with_sharding_constraint(output, expected_output_sharding)  # <------ WAR if known output sharding constraint is available
     jax.debug.print("\nOutput sharding")
     jax.debug.inspect_array_sharding(output, callback=print)
     return output, None
