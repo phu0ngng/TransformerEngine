@@ -35,7 +35,7 @@
 
 // ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
-XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::JAXX_Collective_Op);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op);
 
 namespace transformer_engine {
 namespace jax {
@@ -124,13 +124,12 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 
-int64_t CreateCollectiveGemmExecutor(CommOverlapType collective_op,
-                                const std::vector<size_t> &buffer_shape, DType buffer_dtype,
-                                int tp_size, int num_splits = 3, int num_max_streams = 3,
-                                int comm_cga_size = 2, int gemm_priority = 0, int comm_priority = 0,
-                                int num_comm_sm = 16, int set_sm_margin = false, bool use_ce = true,
-                                bool atomic_gemm = false, bool rs_overlap_first_gemm = false,
-                                bool aggregate_ag = false);
+int64_t CreateCollectiveGemmExecutor(CommOverlapType collective_op, const std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                                     int tp_size, int num_splits = 3, int num_max_streams = 3,
+                                     int comm_cga_size = 2, int gemm_priority = 0, int comm_priority = 0,
+                                     int num_comm_sm = 16, int set_sm_margin = false, bool use_ce = true,
+                                     bool atomic_gemm = false, bool rs_overlap_first_gemm = false,
+                                     bool aggregate_ag = false);
 
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);

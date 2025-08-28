@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string_view>
 #include <tuple>
+#include <stdexcept>
 
 #include "../extensions.h"
 #include "common/util/cuda_runtime.h"
@@ -110,16 +111,9 @@ public:
                                        int gemm_priority, int comm_priority, int num_comm_sm,
                                        int set_sm_margin, bool use_ce, bool atomic_gemm,
                                        bool rs_overlap_first_gemm, bool aggregate_ag) {
-
-    // Local static variables - automatically initialized once and cleaned up at program exit
-    static std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> plan_registry_;
-    static std::mutex registry_mutex_;
-
-    std::lock_guard<std::mutex> lock(registry_mutex_);
-
     // Generate plan ID
     int64_t plan_id = 0;
-    hash_combine(plan_id, static_cast<int>(collective_op), static_cast<int>(collective_algo),
+    hash_combine(plan_id, static_cast<int>(collective_op),
                  buffer_shape[0], buffer_shape[1], static_cast<int>(buffer_dtype), tp_size,
                  num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority,
                  num_comm_sm, set_sm_margin, use_ce, atomic_gemm, rs_overlap_first_gemm, aggregate_ag);
@@ -133,14 +127,26 @@ public:
     // Create new plan
     std::unique_ptr<CommOverlapCore> executor;
     executor = std::make_unique<CommOverlapP2PBase>(
-      buffer_shape, buffer_dtype, tp_size, collective_op, num_max_streams,
-      comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
+      buffer_shape, buffer_dtype, tp_size, get_nvte_collective_op(collective_op),
+      num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
       set_sm_margin, use_ce, atomic_gemm, aggregate_ag);
 
     CommOverlapCore* executor_ptr = executor.get();
     plan_registry_[plan_id] = std::move(executor);
     return executor_ptr;
   }
+
+  static CommOverlapCore* get_executor(int plan_id){
+    auto it = plan_registry_.find(plan_id);
+    if (it != plan_registry_.end()) {
+      return it->second.get();  // Return existing executor
+    }
+    NVTE_ERROR("Invalid plan_id provided for collective operation. Got", plan_id);
+    return nullptr;
+  }
+
+private:
+    static std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> plan_registry_;
 };
 
 
@@ -185,14 +191,9 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   auto [rhs_, rhs_shape] = xla_buffer_to_nvte_gemm_operand(
       stream, rhs, rhs_scale_inv, rhs_swizzle, scaling_mode, rhs_axis_boundary, make_rhs_rowwise);
 
-  // Output tensor -- create with nullptr for GEMM->RS overlap because GEMM output goes into
-  // the communication buffer. We can use the XLA output buffer for the reduce-scattered
-  // auxiliary output tensor later.
   std::vector<size_t> out_shape = {(lhs_transposed) ? lhs_shape[1] : lhs_shape[0],
                                    (rhs_transposed) ? rhs_shape[0] : rhs_shape[1]};
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
-  void *out_ptr = collective_op == JAXX_Collective_Op::REDUCE_SCATTER ? comm_overlaps[comm_overlap_id]->get_ubuf_dptr() : output->untyped_data();
-  auto out_ = TensorWrapper(out_ptr, out_shape, out_dtype);
 
   // Bias input to forward pass or bias gradient output from backward pass
   void *bias_ptr = nullptr;
@@ -234,6 +235,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   // Launch TE/common kernel with swapped LHS/RHS for cuBLAS column-major order
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
   if (collective_op == JAXX_Collective_Op::NONE) {
+    auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
     NVTE_CHECK(out_.numel() == output->element_count(),
                "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(), " elements ",
                to_string_like(out_shape), " but got ", output->element_count(), " elements ",
@@ -243,14 +245,10 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                      rhs_transposed, lhs_transposed, grad, workspace_.data(), false,
                      use_split_accumulator, num_math_sm, stream);
   } else {
-    if (plan_id == -1) {
-      NVTE_ERROR("Invalid plan_id (-1) provided for collective operation");
-    }
     auto executor = CollectiveGemmPlanRegistry::get_executor(plan_id);
-    if (executor == nullptr) {
-      NVTE_ERROR("Failed to get executor for plan_id: ", plan_id);
-    }
+    auto tp_size = executor->get_tp_size();
     if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
+      auto out_ = TensorWrapper(executor->get_ubuf_dptr(), out_shape, out_dtype);
       // Prepare the auxiliary buffer for the reduce-scattered GEMM output
       auto rs_out_shape = std::vector<size_t>(out_shape);
       rs_out_shape.at(0) /= tp_size;
@@ -269,6 +267,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
     } else if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
       // auto aux_out_ = TensorWrapper();
 
+      auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
       // Copy the distributed LHS operand into the local chunk of the communication buffer
       executor->copy_into_buffer(stream, lhs_, true, make_lhs_rowwise);
 
@@ -276,9 +275,6 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
       executor->split_overlap_ag(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
                                 //  workspace_, grad, false, use_split_accumulator, aux_out_, stream);
                                  workspace_, grad, false, use_split_accumulator, nullptr, stream);
-    } else {
-      NVTE_ERROR("cuBLAS GEMM w/ comm. overlap invoked with invalid collective type (",
-                 static_cast<int64_t>(collective_op), ")");
     }
   }
 
@@ -302,7 +298,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Ret<Buffer_Type>()      // workspace
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<JAXX_Collective_Op>("collective_op")
-                                  .Attr<CommOverlapAlgo>("collective_algo")
                                   .Attr<int64_t>("lhs_axis_boundary")
                                   .Attr<int64_t>("rhs_axis_boundary")
                                   .Attr<bool>("lhs_transposed")
