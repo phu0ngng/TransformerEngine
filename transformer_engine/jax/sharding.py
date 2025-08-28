@@ -9,10 +9,8 @@ tensor parallelism (TP), pipeline parallelism (PP), and full-sharded data
 parallelism (FSDP). It includes functions for sharding constraints, mesh management,
 and collective operations.
 """
-import os
 from contextlib import contextmanager
 from dataclasses import dataclass
-from enum import Enum
 from typing import Callable, Optional
 import warnings
 import jax
@@ -43,22 +41,34 @@ def _get_mesh_info(resource: str, mesh: jax.sharding.Mesh):
     assert resource in mesh.axis_names, f"{resource} is not in the axis_names of Mesh {mesh}."
     return mesh.shape[resource], resource
 
-def _validate_mesh_resource_configuration():
+def _validate_mesh_resource_configuration(mesh_resource):
     """Validate that the mesh resource configuration is consistent and conflict-free."""
-    gsr = global_mesh_resource()
-    physical_mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+    is_dp_enabled = (
+        mesh_resource.dp_resource is not None and get_mesh_axis_size(mesh_resource.dp_resource) > 1
+    )
+    is_tp_enabled = (
+        mesh_resource.tp_resource is not None and get_mesh_axis_size(mesh_resource.tp_resource) > 1
+    )
+    is_tpsp_enabled = (
+        mesh_resource.tpsp_resource is not None
+        and get_mesh_axis_size(mesh_resource.tpsp_resource) > 1
+    )
+    is_fsdp_enabled = (
+        mesh_resource.fsdp_resource is not None
+        and get_mesh_axis_size(mesh_resource.fsdp_resource) > 1
+    )
 
-    is_dp_enabled = gsr.dp_resource is not None and physical_mesh.shape[gsr.dp_resource] > 1
-    is_tp_enabled = gsr.tp_resource is not None and physical_mesh.shape[gsr.tp_resource] > 1
-    is_tpsp_enabled = gsr.tpsp_resource is not None and physical_mesh.shape[gsr.tpsp_resource] > 1
-    is_fsdp_enabled = gsr.fsdp_resource is not None and physical_mesh.shape[gsr.fsdp_resource] > 1
-    
     assert not (is_dp_enabled and is_fsdp_enabled), (
-        f"Data parallelism and full-sharded data parallelism cannot be enabled at the same time. Got dp_resource={gsr.dp_resource} and fsdp_resource={gsr.fsdp_resource}"
+        "Data parallelism and full-sharded data parallelism cannot be enabled at the same time."
+        f" Got dp_resource={mesh_resource.dp_resource} and"
+        f" fsdp_resource={mesh_resource.fsdp_resource}"
     )
     assert not (is_tp_enabled and is_tpsp_enabled), (
-        f"Tensor parallelism and tensor sequence parallelism cannot be enabled at the same time. Got tp_resource={gsr.tp_resource} and tpsp_resource={gsr.tpsp_resource}"
+        "Tensor parallelism and tensor sequence parallelism cannot be enabled at the same time."
+        f" Got tp_resource={mesh_resource.tp_resource} and"
+        f" tpsp_resource={mesh_resource.tpsp_resource}"
     )
+
 
 def get_sharding_map_logic_axis_to_mesh_axis():
     """
@@ -66,30 +76,21 @@ def get_sharding_map_logic_axis_to_mesh_axis():
     """
     gsr = global_mesh_resource()
 
-<<<<<<< HEAD
-    physical_mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
-    is_dp_enabled = gsr.dp_resource is not None and physical_mesh.shape[gsr.dp_resource] > 1
-    is_fsdp_enabled = gsr.fsdp_resource is not None and physical_mesh.shape[gsr.fsdp_resource] > 1
-    assert not (is_dp_enabled and is_fsdp_enabled), (
-        f"Data parallelism and full-sharded data parallelism should not be enabled at the same time. Got dp_resource={gsr.dp_resource} and fsdp_resource={gsr.fsdp_resource}"
-    )
+    is_tpsp_enabled = gsr.tpsp_resource is not None and get_mesh_axis_size(gsr.tpsp_resource) > 1
+    is_fsdp_enabled = gsr.fsdp_resource is not None and get_mesh_axis_size(gsr.fsdp_resource) > 1
 
     te_logical_axis_to_mesh_axis = {
-        BATCH_AXES: gsr.dp_resource if is_dp_enabled else gsr.fsdp_resource,
-=======
-    te_logical_axis_to_mesh_axis = {
-        BATCH_AXES: gsr.fsdp_resource or gsr.dp_resource,
->>>>>>> tpsp_resource
+        BATCH_AXES: gsr.fsdp_resource if is_fsdp_enabled else gsr.dp_resource,
         SEQLEN_AXES: None,
         SEQLEN_TP_AXES: gsr.tpsp_resource,
         SEQLEN_CP_AXES: gsr.cp_resource,
-        HEAD_AXES: gsr.tp_resource or gsr.tpsp_resource,
+        HEAD_AXES: gsr.tpsp_resource if is_tpsp_enabled else gsr.tp_resource,
         HIDDEN_AXES: None,
-        HIDDEN_TP_AXES: gsr.tp_resource or gsr.tpsp_resource,
+        HIDDEN_TP_AXES: gsr.tpsp_resource if is_tpsp_enabled else gsr.tp_resource,
         JOINED_AXES: None,
         W_NO_SHARD_AXES: None,
         W_FSDP_AXES: gsr.fsdp_resource,
-        W_TP_AXES: gsr.tp_resource or gsr.tpsp_resource,
+        W_TP_AXES: gsr.tpsp_resource if is_tpsp_enabled else gsr.tp_resource,
         W_JOINED_AXES: None,
     }
     return te_logical_axis_to_mesh_axis
@@ -164,7 +165,7 @@ def with_sharding_constraint_by_logical_axes(
         flax_rules = flax.linen.get_logical_axis_rules()
         if len(flax_rules) > 0:
             return flax.linen.with_logical_constraint(
-                x, logical_axis_names, fallback=flax.linen.spmd.RulesFallback.NO_CONSTRAINT
+                x, logical_axis_names, fallback=flax.linen.spmd.RulesFallback.AXIS_IS_UNSHARDED
             )
     except ImportError:
         pass
@@ -314,11 +315,7 @@ def global_shard_guard(resource: MeshResource):
     old_resources = _GLOBAL_MESH_RESOURCE
     try:
         _GLOBAL_MESH_RESOURCE = resource
-        _validate_mesh_resource_configuration()
         yield
-    except Exception as e:
-        _GLOBAL_MESH_RESOURCE = old_resources
-        raise e
     finally:
         _GLOBAL_MESH_RESOURCE = old_resources
 
@@ -334,6 +331,7 @@ def global_mesh_resource() -> MeshResource:
         " context. If you are not using multiple GPUs, you can use an empty MeshResource by"
         " wrapping your program in 'with global_shard_guard(MeshResource()):'"
     )
+    _validate_mesh_resource_configuration(_GLOBAL_MESH_RESOURCE)
     return _GLOBAL_MESH_RESOURCE
 
 
@@ -375,6 +373,7 @@ def tpsp_axis_size():
     Return 1 if no TP axis is set.
     """
     return get_mesh_axis_size(global_mesh_resource().tpsp_resource)
+
 
 @lru_cache(maxsize=1)
 def dp_or_fsdp_axis_size():

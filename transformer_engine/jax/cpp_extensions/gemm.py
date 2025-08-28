@@ -33,7 +33,7 @@ from ..quantize import (
     ScalingMode,
     Quantizer,
     GroupedQuantizer,
-    QuantizeConfig,
+    get_quantize_config,
     QuantizerSet,
     QuantizeLayout,
     noop_quantizer_set,
@@ -306,7 +306,7 @@ class CollectiveGemmConfig:
 
     def __post_init__(self):
         """Validate the configuration after initialization."""
-        if not self.collective_op.is_none:   
+        if not self.collective_op.is_none:
             assert (
                 self.buffer_shape is not None and len(self.buffer_shape) == 2
             ), f"{self.buffer_shape} is not a valid buffer shape."
@@ -758,10 +758,12 @@ class GemmPrimitive(BasePrimitive):
         # Ensure that tensor sequence parallelism is not used via setting tp_resource
         if gsr.tp_resource is not None:
             for i in range(len(lhs_specs) - 1):
-                if (lhs_specs[i] == gsr.tp_resource and lhs_specs[i + 1] == gsr.tp_resource):
+                if lhs_specs[i] == gsr.tp_resource and lhs_specs[i + 1] == gsr.tp_resource:
                     warnings.warn(
-                        f"Tensor sequence parallelism is detected as tp_resource='{gsr.tp_resource}' appears twice consecutively in lhs_specs: {lhs_specs}. "
-                        f"Please setting MeshResource.tpsp_resource for tensor sequence parallelism to avoid potential issues."
+                        "Tensor sequence parallelism is detected as"
+                        f" tp_resource='{gsr.tp_resource}' appears twice consecutively in"
+                        f" lhs_specs: {lhs_specs}. Please setting MeshResource.tpsp_resource for"
+                        " tensor sequence parallelism to avoid potential issues."
                     )
 
         lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
@@ -1013,6 +1015,12 @@ class GemmPrimitive(BasePrimitive):
             raise NotImplementedError("CollectiveGEMM with Shardy propagation is not supported yet! Please turn off Shardy by exporting env var JAX_USE_SHARDY_PARTITIONER=false")
 
         prefix = "GemmPrimitive_"
+
+        warnings.warn(
+            "Known issues with TE GemmPrimitives when Shardy propagation is enabled. For now,"
+            " please turn off Shardy by exporting the environment variable"
+            " 'JAX_USE_SHARDY_PARTITIONER=0' if you experience any problems."
+        )
 
         def _generate_operand_rules(name, ndim, cdims):
             specs = []
@@ -1450,7 +1458,7 @@ def _jax_gemm(
             ), f"rhs.scaling_mode={rhs.scaling_mode} != lhs.scaling_mode={lhs.scaling_mode}"
             precision = (
                 jax.lax.Precision.HIGHEST
-                if QuantizeConfig.FP8_2X_ACC_FPROP
+                if get_quantize_config().FP8_2X_ACC_FPROP
                 else jax.lax.Precision.DEFAULT
             )
             return _jax_gemm_tensor_scaling_fp8(lhs, rhs, dim_nums, precision)
