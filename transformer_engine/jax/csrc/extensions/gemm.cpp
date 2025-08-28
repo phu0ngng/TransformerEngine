@@ -265,7 +265,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 
       // TODO: Don't we need to copy the output back to the original buffer?
     } else if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
-      // auto aux_out_ = TensorWrapper();
+      auto aux_out_ = TensorWrapper();  // Empty
 
       auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
       // Copy the distributed LHS operand into the local chunk of the communication buffer
@@ -273,8 +273,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 
       // Launch AG+GEMM
       executor->split_overlap_ag(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
-                                //  workspace_, grad, false, use_split_accumulator, aux_out_, stream);
-                                 workspace_, grad, false, use_split_accumulator, nullptr, stream);
+                                 workspace_, grad, false, use_split_accumulator, aux_out_, stream);
     }
   }
 

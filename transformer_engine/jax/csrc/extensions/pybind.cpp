@@ -5,7 +5,6 @@
  ************************************************************************/
 
 #include "../extensions.h"
-#include "common/util/pybind_helper.h"
 namespace transformer_engine {
 namespace jax {
 
@@ -68,17 +67,12 @@ pybind11::dict Registrations() {
   return dict;
 }
 
-}  // namespace jax
-}  // namespace transformer_engine
-
 PYBIND11_MODULE(transformer_engine_jax, m) {
-  NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
-
-  m.def("registrations", &transformer_engine::jax::Registrations);
-  m.def("get_fused_attn_backend", &transformer_engine::jax::GetFusedAttnBackend);
-  m.def("get_cuda_version", &transformer_engine::jax::GetCudaRuntimeVersion);
-  m.def("get_cudnn_version", &transformer_engine::jax::GetCudnnRuntimeVersion);
-  m.def("get_device_compute_capability", &transformer_engine::jax::GetDeviceComputeCapability);
+  m.def("registrations", &Registrations);
+  m.def("get_fused_attn_backend", &GetFusedAttnBackend);
+  m.def("get_cuda_version", &GetCudaRuntimeVersion);
+  m.def("get_cudnn_version", &GetCudnnRuntimeVersion);
+  m.def("get_device_compute_capability", &GetDeviceComputeCapability);
   m.def("get_cublasLt_version", &cublasLtGetVersion);
   m.def("get_dact_dbias_quantize_workspace_sizes", &GetDActDBiasQuantizeWorkspaceSizes);
   m.def("get_dbias_quantize_workspace_sizes", &GetDBiasQuantizeWorkspaceSizes);
@@ -88,7 +82,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
-  m.def("create_collective_gemm_executor", &transformer_engine::jax::CreateCollectiveGemmExecutor,
+  m.def("create_collective_gemm_executor", &CreateCollectiveGemmExecutor,
         pybind11::arg("collective_op"), pybind11::arg("buffer_shape"),
         pybind11::arg("buffer_dtype"), pybind11::arg("tp_size"), pybind11::pos_only(),
         pybind11::kw_only(), pybind11::arg("num_splits") = 4, pybind11::arg("num_max_streams") = 3,
@@ -98,23 +92,25 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         pybind11::arg("atomic_gemm") = false, pybind11::arg("rs_overlap_first_gemm") = false,
         pybind11::arg("aggregate_ag") = false,
         pybind11::call_guard<pybind11::gil_scoped_release>());
-  m.def("destroy_collective_gemm_executor", &transformer_engine::jax::DestroyCollectiveGemmExecutor,
-        pybind11::call_guard<pybind11::gil_scoped_release>());
-  m.def("destroy_all_collective_gemm_executors", &transformer_engine::jax::DestroyAllCollectiveGemmExecutors,
-        pybind11::call_guard<pybind11::gil_scoped_release>());
 
-  pybind11::enum_<transformer_engine::jax::JAXX_Scaling_Mode>(m, "JAXX_Scaling_Mode",
-                                                              pybind11::module_local())
-      .value("NO_SCALING", transformer_engine::jax::JAXX_Scaling_Mode::NO_SCALING)
+  pybind11::enum_<JAXX_Scaling_Mode>(m, "JAXX_Scaling_Mode", pybind11::module_local())
+      .value("NO_SCALING", JAXX_Scaling_Mode::NO_SCALING)
       .value("DELAYED_TENSOR_SCALING",
-             transformer_engine::jax::JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
-      .value("MXFP8_1D_SCALING", transformer_engine::jax::JAXX_Scaling_Mode::MXFP8_1D_SCALING)
+             JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING)
+      .value("MXFP8_1D_SCALING", JAXX_Scaling_Mode::MXFP8_1D_SCALING)
       .value("CURRENT_TENSOR_SCALING",
-             transformer_engine::jax::JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING);
+             JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING);
 
-  pybind11::enum_<transformer_engine::jax::QuantizeLayout>(m, "QuantizeLayout",
-                                                           pybind11::module_local())
-      .value("ROWWISE", transformer_engine::jax::QuantizeLayout::ROWWISE)
-      .value("COLWISE", transformer_engine::jax::QuantizeLayout::COLWISE)
-      .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE);
+  pybind11::enum_<QuantizeLayout>(m, "QuantizeLayout", pybind11::module_local())
+      .value("ROWWISE", QuantizeLayout::ROWWISE)
+      .value("COLWISE", QuantizeLayout::COLWISE)
+      .value("ROWWISE_COLWISE", QuantizeLayout::ROWWISE_COLWISE);
+
+  pybind11::enum_<JAXX_Collective_Op>(m, "JAXX_Collective_Op", pybind11::module_local())
+      .value("NONE", JAXX_Collective_Op::NONE)
+      .value("ALL_GATHER", JAXX_Collective_Op::ALL_GATHER)
+      .value("REDUCE_SCATTER", JAXX_Collective_Op::REDUCE_SCATTER);
 }
+
+}  // namespace jax
+}  // namespace transformer_engine
