@@ -17,7 +17,6 @@ from jax.tree_util import register_pytree_node_class
 
 from transformer_engine_jax import QuantizeLayout
 
-from .helper import apply_padding_to_scale_inv
 from .scaling_modes import ScalingMode, TensorUsage
 from .dequantizer import ScalingModeToDequantizerMap
 from ..sharding import (
@@ -205,7 +204,6 @@ class ScaledTensor1x(ScaledTensor):
             return self
 
         # axis_names were given for N layout, so needs to be transpose for T layout
-        axis_names = logical_axis_names
         if self.data_layout == "T":
             assert self.flatten_axis > 0
             assert len(logical_axis_names) == self.data.ndim
@@ -214,6 +212,8 @@ class ScaledTensor1x(ScaledTensor):
                 *logical_axis_names[flatten_axis:],
                 *logical_axis_names[:flatten_axis],
             )
+        else:
+            axis_names = logical_axis_names
 
         data = with_sharding_constraint_by_logical_axes(self.data, axis_names)
 
