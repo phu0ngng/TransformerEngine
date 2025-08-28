@@ -230,7 +230,6 @@ class CollectiveGemmConfig:
         atomic_gemm: bool = False,
         rs_overlap_first_gemm: bool = False,
         aggregate_ag: bool = False,
-        flatten_axis: int = -1,
     ):
         """Create a CollectiveGemmConfig with all values properly set and initialize the Userbuffer"""
 
@@ -257,12 +256,9 @@ class CollectiveGemmConfig:
 
         # Handle buffer shape collapsing
         if buffer_shape is not None and len(buffer_shape) > 2:
-            if flatten_axis < 0:
-                flatten_axis = flatten_axis + len(buffer_shape)
-            buffer_shape = (
-                reduce(operator.mul, buffer_shape[:flatten_axis]),
-                reduce(operator.mul, buffer_shape[flatten_axis:]),
-            )
+            buffer_shape = (reduce(operator.mul, buffer_shape[:-1]), buffer_shape[-1])
+
+        # Correct buffer shape for DP/FSDP
         buffer_shape = (buffer_shape[0] // dp_or_fsdp_axis_size(), buffer_shape[1])
 
         # Create the communication plan
@@ -334,7 +330,9 @@ class CollectiveGemmConfigSet:
 
     @staticmethod
     def create(
-        buffer_shape: Sequence[int],
+        lhs_shape: Sequence[int],
+        rhs_shape: Sequence[int],
+        contracting_dims: Tuple[Sequence[int], Sequence[int]],
         buffer_dtype: jnp.dtype,
         forward_collective_op: CollectiveOp,
         num_splits: int = None,
@@ -348,8 +346,21 @@ class CollectiveGemmConfigSet:
         atomic_gemm: bool = False,
         rs_overlap_first_gemm: bool = False,
         aggregate_ag: bool = False,
-        flatten_axis: int = -1,
     ):
+        lhs_non_cdims = get_non_contracting_dims(len(lhs_shape), contracting_dims[0])
+        rhs_non_cdims = get_non_contracting_dims(len(rhs_shape), contracting_dims[1])
+        output_shape = (*[lhs_shape[i] for i in lhs_non_cdims], *[rhs_shape[i] for i in rhs_non_cdims])
+
+        if forward_collective_op.is_all_gather:
+            buffer_shape = lhs_shape
+            backward_collective_op = CollectiveOp.REDUCE_SCATTER
+        elif forward_collective_op.is_reduce_scatter:
+            buffer_shape = output_shape
+            backward_collective_op = CollectiveOp.ALL_GATHER
+        else: 
+            buffer_shape = (0, 0)
+            backward_collective_op = CollectiveOp.NONE
+
         forward = CollectiveGemmConfig.create(
             buffer_shape,
             buffer_dtype,
@@ -365,14 +376,7 @@ class CollectiveGemmConfigSet:
             atomic_gemm,
             rs_overlap_first_gemm,
             aggregate_ag,
-            flatten_axis,
         )
-        if forward_collective_op.is_all_gather:
-            backward_collective_op = CollectiveOp.REDUCE_SCATTER
-        elif forward_collective_op.is_reduce_scatter:
-            backward_collective_op = CollectiveOp.ALL_GATHER
-        else:
-            backward_collective_op = CollectiveOp.NONE
 
         backward = CollectiveGemmConfig.create(
             buffer_shape,
@@ -389,7 +393,6 @@ class CollectiveGemmConfigSet:
             atomic_gemm,
             rs_overlap_first_gemm,
             aggregate_ag,
-            flatten_axis,
         )
         return CollectiveGemmConfigSet(forward=forward, backward=backward)
 

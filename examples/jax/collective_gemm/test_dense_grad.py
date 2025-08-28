@@ -53,7 +53,7 @@ parser.add_argument("--batch-size", type=int, default=2)
 parser.add_argument("--seq-length", type=int, default=8192)
 parser.add_argument("--hidden-in", type=int, default=16384)
 parser.add_argument("--hidden-out", type=int, default=53248)
-parser.add_argument("--comm-type", type=str.upper, default="AG", choices=["AG", "RS"])
+parser.add_argument("--forward-collective-op", type=str.upper, default="AG", choices=["AG", "RS"])
 # parser.add_argument("--fp8-recipe", type=str.lower, default=None,
 #                     choices=["fp8_currentscaling", "fp8_delayedscaling", "mxfp8"],
 #                     )

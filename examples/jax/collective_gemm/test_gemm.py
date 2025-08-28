@@ -1,225 +1,175 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Comm+GEMM Overlap with TE/JAX"""
-
+"""Collective GEMM test on multi-GPU with tensor parallelism"""
 import argparse
-from functools import partial
-from pprint import pprint
-
-import numpy as np
-from mpi4py import MPI
+import unittest
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.experimental import mesh_utils
+from jax.sharding import PartitionSpec, NamedSharding
 
-import transformer_engine.jax as te
-import transformer_engine_jax as tex
-from transformer_engine.jax.sharding import get_padded_spec
-from transformer_engine.jax.cpp_extensions import (
-    gemm,
-    CommOverlapHelper,
+from common import (
+    is_bf16_supported,
+    assert_allclose,
 )
+import transformer_engine.jax.cpp_extensions as tex
+from transformer_engine.jax.quantize import is_fp8_available, ScalingMode, Quantizer, QuantizeConfig, fp8_autocast
+from transformer_engine.jax.cpp_extensions.gemm import CollectiveGemmConfigSet, CollectiveOp
+from transformer_engine.jax.sharding import MeshResource
 
-jax.clear_caches()
+DEVICE_DP_AXIS = "data"
+DEVICE_TPSP_AXIS = "tensor_sequence"
+PARAMS_KEY = "params"
 
-# This script needs to be launched via `mpirun` with 1 process per GPU
-myrank = MPI.COMM_WORLD.Get_rank()
-numranks = MPI.COMM_WORLD.Get_size()
-jax.distributed.initialize(cluster_detection_method="mpi4py")
 
-parser = argparse.ArgumentParser()
-parser.add_argument("-dp", "--dp-size", type=int, default=1)
-parser.add_argument("-fsdp", "--fsdp-size", type=int, default=1)
-parser.add_argument("-tp", "--tp-size", type=int, default=numranks // 2)
-parser.add_argument("-np", "--num-gpus", type=int, default=numranks)
-parser.add_argument("--batch-size", type=int, default=2)
-parser.add_argument("--seq-length", type=int, default=8192)
-parser.add_argument("--hidden-size", type=int, default=16384)
-parser.add_argument("--activation-size", type=int, default=53248)
-parser.add_argument("--no-batch", action="store_true")
-parser.add_argument("--no-fsdp", action="store_true")
-parser.add_argument("--comm-type", type=str.upper, default="AG", choices=["AG", "RS"])
-parser.add_argument("--check-result", action="store_true")
-args = parser.parse_args()
+def _setup_mesh_and_sharding(input, weight, bias, num_gpu_dp, num_gpu_tp):
+    device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
+    mesh = jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS))
+    # jax.sharding.set_mesh(mesh)
+    
+    input_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS, None))
+    weight_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS))
+    bias_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS))
+    
+    return mesh, input_sharding, weight_sharding, bias_sharding
 
-# Operand shapes
-dtype = jnp.bfloat16
-lhs_shape = (
-    [args.seq_length, args.hidden_size]
-    if args.comm_type == "AG"
-    else [args.seq_length, args.activation_size]
-)
-rhs_shape = (
-    [args.hidden_size, args.activation_size]
-    if args.comm_type == "AG"
-    else [args.activation_size, args.hidden_size]
-)
 
-# Operand partitioning
-batched = not args.no_batch
-fsdp = not args.no_fsdp
-input_specs = [None] * len(lhs_shape)
-weight_specs = [None] * len(rhs_shape)
-if batched:
-    lhs_shape = [args.batch_size] + lhs_shape
-    if fsdp:
-        mesh_shape = {"dp": args.dp_size, "fsdp": args.fsdp_size, "tp": args.tp_size}
-        mesh_resource = te.MeshResource(
-            dp_resource="dp", tp_resource="tp", cp_resource=None, fsdp_resource="fsdp"
-        )
-        if args.comm_type == "AG":
-            input_specs = [("dp", "fsdp"), "tp", None]
-            weight_specs = ["fsdp", "tp"]
-        elif args.comm_type == "RS":
-            input_specs = [("dp", "fsdp"), None, "tp"]
-            weight_specs = ["tp", "fsdp"]
+def _create_cgemm_configs(input, weight, collective_type):
+    if collective_type == "all_gather":
+        collective_op = CollectiveOp.ALL_GATHER
+    elif collective_type == "reduce_scatter":
+        collective_op = CollectiveOp.REDUCE_SCATTER
     else:
-        mesh_shape = {"dp": args.dp_size, "tp": args.tp_size}
-        mesh_resource = te.MeshResource(
-            dp_resource="dp",
-            tp_resource="tp",
-            cp_resource="tp",
-        )
-        if args.comm_type == "AG":
-            input_specs = ["dp", "tp", None]
-            weight_specs = [None, "tp"]
-        elif args.comm_type == "RS":
-            input_specs = ["dp", None, "tp"]
-            weight_specs = ["tp", None]
-else:
-    if fsdp:
-        mesh_shape = {"fsdp": args.fsdp_size, "tp": args.tp_size}
-        mesh_resource = te.MeshResource(fsdp_resource="fsdp", tp_resource="tp", cp_resource="cp")
-        if args.comm_type == "AG":
-            input_specs = ["tp", None]
-            weight_specs = ["fsdp", "tp"]
-        elif args.comm_type == "RS":
-            input_specs = [None, "tp"]
-            weight_specs = ["tp", "fsdp"]
-    else:
-        mesh_shape = {"tp": args.tp_size}
-        mesh_resource = te.MeshResource(tp_resource="tp", cp_resource="cp")
-        if args.comm_type == "AG":
-            input_specs = ["tp", None]
-            weight_specs = [None, "tp"]
-        elif args.comm_type == "RS":
-            input_specs = [None, "tp"]
-            weight_specs = ["tp", None]
+        raise ValueError(f"Invalid collective type: {collective_type}")
 
-# Mesh setup and sharding definitions
-devices = mesh_utils.create_device_mesh((args.num_gpus,), devices=jax.devices()[: args.num_gpus])
-mesh = Mesh(np.array(devices).reshape(tuple(mesh_shape.values())), tuple(mesh_shape.keys()))
-no_sharding = NamedSharding(mesh, PartitionSpec(None))
-input_sharding = NamedSharding(mesh, PartitionSpec(*input_specs))
-weight_sharding = NamedSharding(mesh, PartitionSpec(*weight_specs))
-
-# Operand initialization
-key = jax.random.PRNGKey(0)
-key1, key2 = jax.random.split(key, 2)
-lhs_data = jax.random.normal(key1, lhs_shape, dtype=dtype)
-rhs_data = jax.random.normal(key2, rhs_shape, dtype=dtype)
-lhs = jax.device_put(lhs_data, input_sharding)
-rhs = jax.device_put(rhs_data, weight_sharding)
-dimension_numbers = (((-1,), (0,)), ((0,), ()))
-
-# Name of comm+GEMM overlap layer
-overlap_method = tex.CommOverlapMethod.RING_EXCHANGE
-comm_type = tex.CommOverlapType.AG if args.comm_type == "AG" else tex.CommOverlapType.RS
-
-# Bootstrap Userbuffers communicators and communication buffers
-# NOTE: All-gather overlap requires buffer to be sized the LHS operand's global shape.
-#       Reduce-scatter overlap requires buffer to be sized to the GEMM output's global shape.
-output_shape = (*lhs_shape[:-1], rhs_shape[-1])
-buffer_shape = list(lhs_shape if comm_type == tex.CommOverlapType.AG else output_shape).copy()
-if batched:
-    # The only all-gathered dimension is sequence, batch is still sharded for the buffer
-    buffer_shape[0] = buffer_shape[0] // (args.dp_size * args.fsdp_size)
-overlap_helper = CommOverlapHelper(
-    method=overlap_method,
-    comm_type=comm_type,
-    buffer_shape=buffer_shape,
-    buffer_dtype=dtype,
-    tp_size=args.tp_size,
-    tp_resource="tp",
-)
-if myrank == 0:
-    print(f"{myrank}: OVERLAP CONFIG:", flush=True)
-    pprint(overlap_helper)
-    print(
-        f"\n{myrank}: INPUTS {lhs.shape} x {rhs.shape}\n"
-        + f"{myrank}:    LHS sharding: {lhs.sharding.spec}\n"
-        + f"{myrank}:    RHS sharding: {rhs.sharding.spec}\n",
-        flush=True,
+    cgemm_config = CollectiveGemmConfigSet.create(
+        lhs_shape=input.shape,
+        rhs_shape=weight.shape,
+        contracting_dims=((2,), (0,)),
+        dtype=input.dtype,
+        collective_op=collective_op,
     )
+    return cgemm_config.forward_config, cgemm_config.backward_config
 
 
-@jax.jit
-def _gemm_wrapper(x, y):
-    return partial(
-        gemm,
-        dimension_numbers=(((-1,), (0,)), ((0,), ())),
-        comm_overlap=overlap_helper,
-    )(x, y)
+def run_gemm_tests(args):
+    """Execute GEMM tests."""
+    print(args)
+    # Collective GEMM requires Shardy partitioner to be disabled
+    jax.config.update("jax_use_shardy_partitioner", False)
 
+    # Setup mesh
+    num_gpu = jax.local_device_count()
+    num_gpu_dp = 2 if args.enable_data_parallel else 1
+    assert num_gpu > 0 and num_gpu % num_gpu_dp == 0, "Number of GPUs must be greater than 0 and divisible by number of data parallel GPUs"
+    num_gpu_tp = num_gpu // num_gpu_dp
+    assert num_gpu_tp > 1, "Number of tensor parallel GPUs must be greater than 1 for Collective GEMM"
+    print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu} total GPUs)")
 
-with te.sharding.global_shard_guard(mesh_resource):
-    output = _gemm_wrapper(lhs, rhs)
+    # Create test data
+    rng = jax.random.PRNGKey(0)
+    rng, input_rng, weight_rng, bias_rng = jax.random.split(rng, 4)
+    input = jnp.random.normal(input_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16)
+    weight = jnp.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16)
+    bias = jnp.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
 
-jax.block_until_ready(output)
-if myrank == 0:
-    print(
-        f"{myrank}: {'AG -> GEMM' if args.comm_type == 'AG' else 'GEMM -> RS'} OUTPUT "
-        + f"{output.shape}\n"
-        + f"{myrank}:    Sharding: {get_padded_spec(output.sharding.spec, output.ndim)}\n",
-        flush=True,
+    # Create collective GEMM configs
+    cgemm_config, _= _create_cgemm_configs(input, weight, args.collective_type)
+
+    # Setup mesh and sharding
+    mesh, input_sharding, weight_sharding, bias_sharding = _setup_mesh_and_sharding(input, weight, bias, num_gpu_dp, num_gpu_tp)
+    jax.sharding.set_mesh(mesh)
+
+    with mesh, fp8_autocast(enabled=False, fp8_recipe=None, 
+                            mesh_resource=MeshResource(dp_resource=DEVICE_DP_AXIS, tpsp_resource=DEVICE_TPSP_AXIS)):
+        print(f"Device mesh: {mesh}")
+        
+        input_sharded = jax.device_put(input, input_sharding)
+        weight_sharded = jax.device_put(weight, weight_sharding)
+        bias_sharded = jax.device_put(bias, bias_sharding)
+
+        ref_output = tex.gemm(input, weight, bias, contracting_dims=((2,), (0,)))
+        sharded_output = tex.gemm(input_sharded, weight_sharded, bias_sharded, 
+                                  contracting_dims=((2,), (0,)), cgemm_config=cgemm_config)
+        gathered_output = jax.lax.with_sharding_constraint(sharded_output, NamedSharding(mesh, PartitionSpec(None)))
+        jax.block_until_ready(gathered_output)
+
+    return ref_output, gathered_output
+        
+def gemm_parser(args):
+    """Test settings."""
+    parser = argparse.ArgumentParser(description="JAX Collective GEMM Test")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=32,
+        metavar="N",
+        help="input batch size (default: 32)",
     )
-
-if args.check_result:
-    ref_global = jnp.matmul(
-        jax.device_put(lhs_data, no_sharding), jax.device_put(rhs_data, no_sharding)
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=64,
+        metavar="N",
+        help="sequence length (default: 64)",
     )
-    jax.block_until_ready(ref_global)
-    if myrank == 0:
-        print(f"{myrank}: Global reference: {ref_global}\n", flush=True)
+    parser.add_argument(
+        "--hidden-in",
+        type=int,
+        default=256,
+        metavar="N",
+        help="input hidden dimension (default: 256)",
+    )
+    parser.add_argument(
+        "--hidden-out",
+        type=int,
+        default=512,
+        metavar="N",
+        help="output hidden dimension (default: 512)",
+    )
+    parser.add_argument(
+        "--collective-type",
+        type=str,
+        default="all_gather",
+        help="Collective operation type (default: all_gather)",
+    )
+    parser.add_argument(
+        "--fp8-recipe",
+        type=str,
+        default="DelayedScaling",
+        help="FP8 recipe (default: DelayedScaling)",
+    )
+    parser.add_argument(
+        "--enable-data-parallel",
+        action="store_true",
+        default=False,
+        help="Enable data parallel (default: False)",
+    )
+    
+    return parser.parse_args(args)
 
-    output_global = jax.lax.with_sharding_constraint(output, no_sharding)
-    jax.block_until_ready(output_global)
-    if myrank == 0:
-        print(f"{myrank}: Global output: {output_global}\n", flush=True)
 
-    diff = jnp.abs(ref_global - output_global).flatten()
-    if myrank == 0:
-        print(f"{myrank}: Global difference: {diff}\n", flush=True)
+class TestCollectiveGemm(unittest.TestCase):
+    """Collective GEMM unittests"""
+    
+    # is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
+    # is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+    
+    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
+    def test_te_bf16_all_gather(self):
+        """Test Transformer Engine with BF16"""
+        args = gemm_parser(["--collective-type", "all_gather"])
+        ref_output, gathered_output = run_gemm_tests(args)
+        assert_allclose(ref_output, gathered_output)
 
-    m = jnp.argmax(diff).item()
-    abs_err = diff[m].item()
-    rel_err = abs_err / max(abs(ref_global.flatten()[m]), 1e-5)
+    @unittest.skipIf(not is_bf16_supported(), "Device compute capability 8.0+ is required for BF16")
+    def test_te_bf16_reduce_scatter(self):
+        """Test Transformer Engine with BF16"""
+        args = gemm_parser(["--collective-type", "reduce_scatter"])
+        ref_output, gathered_output = run_gemm_tests(args)
+        assert_allclose(ref_output, gathered_output)
 
-    rtol = 0.02
-    atol = 0.001
-    numerics_failed = False
-    if rel_err > rtol and abs_err > atol:
-        numerics_failed = True
-        numerics_info = (
-            "NUMERICAL CHECK FAILED: "
-            + f"Outputs not close enough at index {m} "
-            + f"with {output.flatten()[m].item()} vs {ref_global.flatten()[m].item()} | "
-            + f"rel. error = {rel_err} (tol = {rtol}) | "
-            + f"abs. error = {abs_err} (tol = {atol})"
-        )
-    else:
-        numerics_info = "NUMERICAL CHECK PASSED: "
-        if rel_err <= rtol:
-            numerics_info += f"rel. error = {rel_err} (tol = {rtol})" + (
-                " | " if abs_err < atol else ""
-            )
-        if abs_err <= atol:
-            numerics_info += f"abs. error = {abs_err} (tol = {atol})"
-
-    if myrank == 0:
-        print(numerics_info + "\n", end="", flush=True)
-
-tex.destroy_all_comm_overlap_buffers()
+if __name__ == "__main__":
+    run_gemm_tests(gemm_parser(None))
