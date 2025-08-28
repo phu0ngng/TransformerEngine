@@ -831,7 +831,7 @@ class GemmPrimitive(BasePrimitive):
                 raise ValueError(
                     f"tpsp_resource '{gsr.tpsp_resource}' is not found in lhs_specs: {lhs_specs}."
                     " Please check your sharding configuration."
-                )
+                ) from exc
             assert reduce_spec == gsr.tpsp_resource, (
                 "Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got"
                 f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
