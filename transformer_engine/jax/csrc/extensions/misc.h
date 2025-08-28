@@ -93,7 +93,7 @@ void hash_combine(int64_t &seed, const T &v, Rest... rest) {
   (hash_combine(seed, rest), ...);
 }
 
-enum class JAXX_Collective_Op : int64_t{
+enum class JAXX_Collective_Op : int64_t {
   NONE = 0,
   ALL_GATHER = 1,
   REDUCE_SCATTER = 2,

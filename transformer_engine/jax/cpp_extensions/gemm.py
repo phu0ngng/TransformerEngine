@@ -167,6 +167,7 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
 
     return lhs_q, rhs_q
 
+
 class CollectiveOp(Enum):
     NONE = JAXX_Collective_Op.NONE
     ALL_GATHER = JAXX_Collective_Op.ALL_GATHER
@@ -175,12 +176,15 @@ class CollectiveOp(Enum):
     @property
     def is_all_gather(self) -> bool:
         return self == CollectiveOp.ALL_GATHER
+
     @property
     def is_reduce_scatter(self) -> bool:
         return self == CollectiveOp.REDUCE_SCATTER
+
     @property
     def is_none(self) -> bool:
         return self == CollectiveOp.NONE
+
 
 @dataclass(frozen=True)
 class CollectiveGemmConfig:
@@ -311,12 +315,12 @@ class CollectiveGemmConfig:
                 self.buffer_shape is not None and len(self.buffer_shape) == 2
             ), f"{self.buffer_shape} is not a valid buffer shape."
             assert tpsp_axis_size() > 1, (
-                f"Communication + GEMM overlap requires a valid TP axis size. Got TP axis size {tpsp_axis_size()}."
+                "Communication + GEMM overlap requires a valid TP axis size. Got TP axis size"
+                f" {tpsp_axis_size()}."
             )
-            assert tpsp_axis_size() % 2 == 0, (
-                f"Tensor-parallel axis of {tpsp_axis_size()} is not divisible by 2."
-            )
-
+            assert (
+                tpsp_axis_size() % 2 == 0
+            ), f"Tensor-parallel axis of {tpsp_axis_size()} is not divisible by 2."
 
 
 @dataclass(frozen=True)
@@ -388,6 +392,7 @@ class CollectiveGemmConfigSet:
             flatten_axis,
         )
         return CollectiveGemmConfigSet(forward=forward, backward=backward)
+
 
 noop_cgemm_config = CollectiveGemmConfig.create(
     buffer_shape=(0, 0),
@@ -499,12 +504,14 @@ class GemmPrimitive(BasePrimitive):
         output = jax.core.ShapedArray(shape=out_shape, dtype=out_dtype)
 
         # Adjust output shape for comm+GEMM overlap
-        if not cgemm_config.collective_op.is_none and not is_outer: # Inner abstract
+        if not cgemm_config.collective_op.is_none and not is_outer:  # Inner abstract
             overlap_out_shape = list(out_shape).copy()
             if cgemm_config.collective_op.is_all_gather:
                 overlap_out_shape[sequence_dim] *= tpsp_axis_size()
-            else: # RS
-                overlap_out_shape[sequence_dim] = (overlap_out_shape[sequence_dim] // tpsp_axis_size())
+            else:  # RS
+                overlap_out_shape[sequence_dim] = (
+                    overlap_out_shape[sequence_dim] // tpsp_axis_size()
+                )
             output = jax.core.ShapedArray(shape=overlap_out_shape, dtype=out_dtype)
 
         # Validate bias -- shape always depends on pure GEMM output
@@ -793,17 +800,33 @@ class GemmPrimitive(BasePrimitive):
         # We only do CollectiveGemm AG on the x or dY and CollectiveGemm RS on the Y or dX thus they always the LHS and have sequence dim
         if cgemm_config.collective_op.is_all_gather:
             # For all-gather: find consecutive pair of tpsp_resource
-            batch_sequence_pairs = [(i, i + 1) for i in range(len(lhs_specs) - 1)
-                                  if lhs_specs[i] == gsr.tpsp_resource and lhs_specs[i + 1] == gsr.tpsp_resource]
-            assert len(batch_sequence_pairs) == 1, f"Unable to detect the sequence dim as tpsp_resource does not appear exactly twice consecutively in lhs_specs: {lhs_specs}"
-            sequence_dim = batch_sequence_pairs[0][0] if transpose_batch_sequence else batch_sequence_pairs[0][1]
+            batch_sequence_pairs = [
+                (i, i + 1)
+                for i in range(len(lhs_specs) - 1)
+                if lhs_specs[i] == gsr.tpsp_resource and lhs_specs[i + 1] == gsr.tpsp_resource
+            ]
+            assert len(batch_sequence_pairs) == 1, (
+                "Unable to detect the sequence dim as tpsp_resource does not appear exactly twice"
+                f" consecutively in lhs_specs: {lhs_specs}"
+            )
+            sequence_dim = (
+                batch_sequence_pairs[0][0]
+                if transpose_batch_sequence
+                else batch_sequence_pairs[0][1]
+            )
         elif cgemm_config.collective_op.is_reduce_scatter:
             # For reduce-scatter: find single tpsp_resource occurrence
             try:
                 tpsp_idx = lhs_specs.index(gsr.tpsp_resource)
             except ValueError:
-                raise ValueError(f"tpsp_resource '{gsr.tpsp_resource}' is not found in lhs_specs: {lhs_specs}. Please check your sharding configuration.")
-            assert reduce_spec == gsr.tpsp_resource, f"Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
+                raise ValueError(
+                    f"tpsp_resource '{gsr.tpsp_resource}' is not found in lhs_specs: {lhs_specs}."
+                    " Please check your sharding configuration."
+                )
+            assert reduce_spec == gsr.tpsp_resource, (
+                "Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got"
+                f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
+            )
             sequence_dim = tpsp_idx if transpose_batch_sequence else tpsp_idx + 1
 
         if reduce_spec is not None:
@@ -811,7 +834,9 @@ class GemmPrimitive(BasePrimitive):
             lhs_cspecs = tuple(s if s == reduce_spec else None for s in lhs_cspecs)
             # Only do AG Sequence dim if not Overlap
             if cgemm_config.collective_op.is_all_gather:
-                rhs_cspecs = tuple(s if s == reduce_spec or s == gsr.tpsp_resource else None for s in rhs_cspecs)
+                rhs_cspecs = tuple(
+                    s if s == reduce_spec or s == gsr.tpsp_resource else None for s in rhs_cspecs
+                )
             else:
                 rhs_cspecs = tuple(s if s == reduce_spec else None for s in rhs_cspecs)
 
@@ -838,14 +863,20 @@ class GemmPrimitive(BasePrimitive):
             # Non-contracting dims of LHS to be gathered along the SP axis.
             # Minor note: This causes MaxText TP (= Megatron TP + activation_hidden sharding) gathering x for
             # dW1 = x^T * dY1 which is unexpected. This is a known issue and no solution has found yet.
-            lhs_non_cspecs = tuple(None if spec in rhs_non_cspecs else spec for spec in lhs_non_cspecs)
+            lhs_non_cspecs = tuple(
+                None if spec in rhs_non_cspecs else spec for spec in lhs_non_cspecs
+            )
 
         out_specs = lhs_non_cspecs + rhs_non_cspecs
 
         # Only do AG Sequence dim if not Overlap RS
         if cgemm_config.collective_op.is_reduce_scatter:
-            assert sequence_dim <= len(lhs_non_cspecs), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
-            out_specs = out_specs[:sequence_dim] + (gsr.tpsp_resource,) + out_specs[sequence_dim + 1:]
+            assert sequence_dim <= len(
+                lhs_non_cspecs
+            ), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
+            out_specs = (
+                out_specs[:sequence_dim] + (gsr.tpsp_resource,) + out_specs[sequence_dim + 1 :]
+            )
 
         # specs = merge(cspecs, non_cspecs)
         lhs_specs, rhs_specs = map(
@@ -885,10 +916,20 @@ class GemmPrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-        del out_dtype, scaling_mode, grad, use_split_accumulator, result_infos, is_outer, sequence_dim
+        del (
+            out_dtype,
+            scaling_mode,
+            grad,
+            use_split_accumulator,
+            result_infos,
+            is_outer,
+            sequence_dim,
+        )
 
         (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
-            GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims, transpose_batch_sequence, cgemm_config)
+            GemmPrimitive._parse_operand_output_specs(
+                arg_infos, contracting_dims, transpose_batch_sequence, cgemm_config
+            )
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
@@ -903,7 +944,6 @@ class GemmPrimitive(BasePrimitive):
         pre_gelu_sharding = NamedSharding(mesh, PartitionSpec(*pre_gelu_specs))
 
         return [out_sharding, dbias_sharding, pre_gelu_sharding]
-
 
     @staticmethod
     def partition(
@@ -927,8 +967,11 @@ class GemmPrimitive(BasePrimitive):
         (
             (lhs_specs, rhs_specs, bias_input_specs, gelu_input_specs),
             (out_specs, dbias_specs, pre_gelu_specs),
-            reduce_spec, inferred_sequence_dim,
-        ) = GemmPrimitive._parse_operand_output_specs(arg_infos, contracting_dims, transpose_batch_sequence, cgemm_config)
+            reduce_spec,
+            inferred_sequence_dim,
+        ) = GemmPrimitive._parse_operand_output_specs(
+            arg_infos, contracting_dims, transpose_batch_sequence, cgemm_config
+        )
 
         # Block scale inverses match their operands, but tensor scale inverses are unsharded.
         none_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -1012,7 +1055,10 @@ class GemmPrimitive(BasePrimitive):
         del mesh, result_types, transpose_batch_sequence, sequence_dim, is_outer, cgemm_config
 
         if cgemm_config is not None:
-            raise NotImplementedError("CollectiveGEMM with Shardy propagation is not supported yet! Please turn off Shardy by exporting env var JAX_USE_SHARDY_PARTITIONER=false")
+            raise NotImplementedError(
+                "CollectiveGEMM with Shardy propagation is not supported yet! Please turn off"
+                " Shardy by exporting env var JAX_USE_SHARDY_PARTITIONER=false"
+            )
 
         prefix = "GemmPrimitive_"
 

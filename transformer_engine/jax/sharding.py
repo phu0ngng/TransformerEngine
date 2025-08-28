@@ -382,4 +382,6 @@ def dp_or_fsdp_axis_size():
     Get the size of the data parallelism or full-sharded data parallelism axis.
     Return 1 if no DP or FSDP axis is set.
     """
-    return get_mesh_axis_size(global_mesh_resource().dp_resource or global_mesh_resource().fsdp_resource)
+    return get_mesh_axis_size(
+        global_mesh_resource().dp_resource or global_mesh_resource().fsdp_resource
+    )

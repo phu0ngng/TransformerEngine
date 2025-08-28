@@ -112,7 +112,7 @@ def dense(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=( 3, 4, 5, 6, 8))
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 8))
 def _dense(
     x,
     kernel,
@@ -121,7 +121,7 @@ def _dense(
     batch_sequence_transpose,
     input_axes,
     kernel_axes,
-    quantizer_set,      # need to be a diff_arg for DelayedScaling state management
+    quantizer_set,  # need to be a diff_arg for DelayedScaling state management
     cgemm_config_set,
 ):
     """Internal implementation of dense layer transformation with custom VJP.

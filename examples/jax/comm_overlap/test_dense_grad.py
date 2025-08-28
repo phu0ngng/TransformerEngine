@@ -17,6 +17,7 @@ from jax.experimental import mesh_utils
 
 from common import assert_allclose
 import transformer_engine.jax as te
+
 # from transformer_engine.common import recipe
 from transformer_engine.jax.sharding import (
     MeshResource,
@@ -64,9 +65,7 @@ assert (
     args.dp == 1 or args.fsdp == 1
 ), f"DP and FSDP should not be used at the same time! Got DP={args.dp} FSDP={args.fsdp}"
 n_gpus = args.dp * args.fsdp * args.tp
-assert (
-    n_gpus == numranks
-), f"We need {n_gpus} processes for {n_gpus} GPUs, got {numranks}!"
+assert n_gpus == numranks, f"We need {n_gpus} processes for {n_gpus} GPUs, got {numranks}!"
 
 # Declare inputs
 dtype = jnp.bfloat16
@@ -119,9 +118,7 @@ mesh_resource = MeshResource(
     tp_resource=None if args.tp == 1 else TP_AXIS,
 )
 devices = mesh_utils.create_device_mesh((n_gpus,), devices=jax.devices()[:n_gpus])
-mesh = Mesh(
-    np.array(devices).reshape(tuple(mesh_shape.values())), tuple(mesh_shape.keys())
-)
+mesh = Mesh(np.array(devices).reshape(tuple(mesh_shape.values())), tuple(mesh_shape.keys()))
 if myrank == 0:
     print(f"[{myrank}|{numranks}] Device mesh: {mesh}\n")
 
@@ -165,9 +162,7 @@ with (
     buffer_shape = list(input_shape).copy()
     buffer_shape[0] = buffer_shape[0] // (args.dp * args.fsdp)
     fprop_1_overlap = CommOverlapHelper(
-        comm_type=(
-            tex.CommOverlapType.RS if args.comm_type == "RS" else tex.CommOverlapType.AG
-        ),
+        comm_type=(tex.CommOverlapType.RS if args.comm_type == "RS" else tex.CommOverlapType.AG),
         method=tex.CommOverlapMethod.RING_EXCHANGE,
         buffer_shape=buffer_shape,
     )
@@ -203,9 +198,7 @@ for i, (ref, target) in enumerate(zip(ref_grads, grads)):
             f"[{myrank}|{numranks}] {labels[i]} : {target.shape}\n"
             + f"  Sharding: {target.sharding.spec}\n"
         )
-    gathered = jax.lax.with_sharding_constraint(
-        target, NamedSharding(mesh, PartitionSpec(None))
-    )
+    gathered = jax.lax.with_sharding_constraint(target, NamedSharding(mesh, PartitionSpec(None)))
     jax.block_until_ready(gathered)
     assert_allclose(ref, gathered, dtype=assertion_dtype)
 

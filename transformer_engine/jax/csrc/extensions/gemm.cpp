@@ -7,9 +7,9 @@
 
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string_view>
 #include <tuple>
-#include <stdexcept>
 
 #include "../extensions.h"
 #include "common/util/cuda_runtime.h"
@@ -102,21 +102,22 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
   return std::make_tuple(std::move(input), input_shape);
 }
 
-
 //TODO: Move these there to TE/Common
 class CollectiveGemmPlanRegistry {
-public:
-  static CommOverlapCore* get_executor(JAXX_Collective_Op collective_op, const std::vector<size_t> &buffer_shape, DType buffer_dtype,
-                                       int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
-                                       int gemm_priority, int comm_priority, int num_comm_sm,
-                                       int set_sm_margin, bool use_ce, bool atomic_gemm,
-                                       bool rs_overlap_first_gemm, bool aggregate_ag) {
+ public:
+  static CommOverlapCore *get_executor(JAXX_Collective_Op collective_op,
+                                       const std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                                       int tp_size, int num_splits, int num_max_streams,
+                                       int comm_cga_size, int gemm_priority, int comm_priority,
+                                       int num_comm_sm, int set_sm_margin, bool use_ce,
+                                       bool atomic_gemm, bool rs_overlap_first_gemm,
+                                       bool aggregate_ag) {
     // Generate plan ID
     int64_t plan_id = 0;
-    hash_combine(plan_id, static_cast<int>(collective_op),
-                 buffer_shape[0], buffer_shape[1], static_cast<int>(buffer_dtype), tp_size,
-                 num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority,
-                 num_comm_sm, set_sm_margin, use_ce, atomic_gemm, rs_overlap_first_gemm, aggregate_ag);
+    hash_combine(plan_id, static_cast<int>(collective_op), buffer_shape[0], buffer_shape[1],
+                 static_cast<int>(buffer_dtype), tp_size, num_splits, num_max_streams,
+                 comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
+                 atomic_gemm, rs_overlap_first_gemm, aggregate_ag);
 
     // Check if plan already exists
     auto it = plan_registry_.find(plan_id);
@@ -127,16 +128,16 @@ public:
     // Create new plan
     std::unique_ptr<CommOverlapCore> executor;
     executor = std::make_unique<CommOverlapP2PBase>(
-      buffer_shape, buffer_dtype, tp_size, get_nvte_collective_op(collective_op),
-      num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
-      set_sm_margin, use_ce, atomic_gemm, aggregate_ag);
+        buffer_shape, buffer_dtype, tp_size, get_nvte_collective_op(collective_op), num_max_streams,
+        comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
+        atomic_gemm, aggregate_ag);
 
-    CommOverlapCore* executor_ptr = executor.get();
+    CommOverlapCore *executor_ptr = executor.get();
     plan_registry_[plan_id] = std::move(executor);
     return executor_ptr;
   }
 
-  static CommOverlapCore* get_executor(int plan_id){
+  static CommOverlapCore *get_executor(int plan_id) {
     auto it = plan_registry_.find(plan_id);
     if (it != plan_registry_.end()) {
       return it->second.get();  // Return existing executor
@@ -145,40 +146,38 @@ public:
     return nullptr;
   }
 
-private:
-    static std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> plan_registry_;
+ private:
+  static std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> plan_registry_;
 };
 
-
-int64_t CreateCollectiveGemmExecutor(JAXX_Collective_Op collective_op, const std::vector<size_t> &buffer_shape, DType buffer_dtype,
-                                     int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
-                                     int gemm_priority, int comm_priority, int num_comm_sm,
-                                     int set_sm_margin, bool use_ce, bool atomic_gemm,
-                                     bool rs_overlap_first_gemm, bool aggregate_ag) {
+int64_t CreateCollectiveGemmExecutor(JAXX_Collective_Op collective_op,
+                                     const std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                                     int tp_size, int num_splits, int num_max_streams,
+                                     int comm_cga_size, int gemm_priority, int comm_priority,
+                                     int num_comm_sm, int set_sm_margin, bool use_ce,
+                                     bool atomic_gemm, bool rs_overlap_first_gemm,
+                                     bool aggregate_ag) {
   int64_t plan_id = 0;
-  hash_combine(plan_id, static_cast<int>(collective_op),
-               buffer_shape[0], buffer_shape[1], static_cast<int>(buffer_dtype), tp_size,
-               num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority,
-               num_comm_sm, set_sm_margin, use_ce, atomic_gemm, rs_overlap_first_gemm, aggregate_ag);
+  hash_combine(plan_id, static_cast<int>(collective_op), buffer_shape[0], buffer_shape[1],
+               static_cast<int>(buffer_dtype), tp_size, num_splits, num_max_streams, comm_cga_size,
+               gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce, atomic_gemm,
+               rs_overlap_first_gemm, aggregate_ag);
 
   CollectiveGemmPlanRegistry::get_executor(
-    collective_op, buffer_shape, buffer_dtype, tp_size, num_splits,
-    num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin,
-    use_ce, atomic_gemm, rs_overlap_first_gemm, aggregate_ag);
+      collective_op, buffer_shape, buffer_dtype, tp_size, num_splits, num_max_streams,
+      comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce, atomic_gemm,
+      rs_overlap_first_gemm, aggregate_ag);
   return plan_id;
 }
 
-
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
-                   Result_Type output, Result_Type bias_grad,
-                   Result_Type pre_gelu_out, Result_Type lhs_swizzle,
-                   Result_Type rhs_swizzle, Result_Type workspace, JAXX_Scaling_Mode scaling_mode,
-                   JAXX_Collective_Op collective_op,
-                   int64_t lhs_axis_boundary, int64_t rhs_axis_boundary,
-                   bool lhs_transposed, bool rhs_transposed,
-                   bool fuse_bias, bool fuse_gelu, bool grad, bool use_split_accumulator,
-                   int64_t plan_id) {
+                   Result_Type output, Result_Type bias_grad, Result_Type pre_gelu_out,
+                   Result_Type lhs_swizzle, Result_Type rhs_swizzle, Result_Type workspace,
+                   JAXX_Scaling_Mode scaling_mode, JAXX_Collective_Op collective_op,
+                   int64_t lhs_axis_boundary, int64_t rhs_axis_boundary, bool lhs_transposed,
+                   bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
+                   bool use_split_accumulator, int64_t plan_id) {
   // Operands (this includes swizzling MXFP8 scaling factors)
   // NOTE: TensorWrapper operands are always rowwise for full-precision GEMM, or FP8 GEMM when
   //       device supports non-TN layouts (compute capability >= 10.0, excluding 12.x)
