@@ -13,12 +13,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Optional
 import warnings
+from functools import lru_cache
+
 import jax
 import jax.numpy as jnp
 from jax.interpreters import pxla
 from jax.sharding import PartitionSpec, get_abstract_mesh
 import numpy as np
-from functools import lru_cache
 
 _PXLA_THREAD_RESOURCES = pxla.thread_resources
 

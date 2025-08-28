@@ -8,7 +8,7 @@ import operator
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import partial, reduce
-from typing import Tuple, Sequence, Union
+from typing import Tuple, Sequence, Union, Enum
 import warnings
 
 import jax
@@ -21,6 +21,7 @@ from transformer_engine_jax import (
     get_num_compute_streams,
     JAXX_Collective_Op,
     create_collective_gemm_executor,
+    get_device_compute_capability,
     get_stream_priority_range,
 )
 
@@ -63,7 +64,6 @@ __all__ = [
 
 
 num_cublas_streams = get_num_compute_streams()
-gsr = global_mesh_resource()
 
 
 CUDA_STREAM_PRIORITY_LOWEST = None
@@ -72,7 +72,7 @@ CUDA_STREAM_PRIORITY_HIGHEST = None
 
 def get_cublas_workspace_size_bytes() -> None:
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
-    if tex.get_device_compute_capability(0) >= 90:
+    if get_device_compute_capability(0) >= 90:
         return 33_554_432
     return 4_194_304
 
@@ -169,6 +169,8 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
 
 
 class CollectiveOp(Enum):
+    "Enum for Collective Type in Collective GEMM"
+
     NONE = JAXX_Collective_Op.NONE
     ALL_GATHER = JAXX_Collective_Op.ALL_GATHER
     REDUCE_SCATTER = JAXX_Collective_Op.REDUCE_SCATTER
@@ -195,7 +197,7 @@ class CollectiveGemmConfig:
     # Core init arguments
     collective_op: JAXX_Collective_Op
     buffer_shape: Sequence[int]
-    buffer_dtype: jnp.dtype
+    dtype: jnp.dtype
 
     # Userbuffers bootstrap kwargs
     # TODO: double check meaning of these values
@@ -212,12 +214,12 @@ class CollectiveGemmConfig:
     aggregate_ag: bool
 
     # Internal attributes
-    executor_id: int
+    plan_id: int
 
     @staticmethod
     def create(
         buffer_shape: Sequence[int],
-        buffer_dtype: jnp.dtype,
+        dtype: jnp.dtype,
         collective_op: JAXX_Collective_Op,
         num_splits: int = None,
         num_max_streams: int = 3,
@@ -268,7 +270,7 @@ class CollectiveGemmConfig:
             plan_id = create_collective_gemm_executor(
                 collective_op,
                 buffer_shape,
-                jax_dtype_to_te_dtype(buffer_dtype),
+                jax_dtype_to_te_dtype(dtype),
                 tpsp_axis_size(),
                 num_splits=num_splits,
                 num_max_streams=num_max_streams,
@@ -287,7 +289,7 @@ class CollectiveGemmConfig:
         instance = CollectiveGemmConfig(
             collective_op=collective_op,
             buffer_shape=buffer_shape,
-            buffer_dtype=buffer_dtype,
+            dtype=dtype,
             num_splits=num_splits,
             num_max_streams=num_max_streams,
             comm_cga_size=comm_cga_size,
@@ -333,7 +335,7 @@ class CollectiveGemmConfigSet:
         lhs_shape: Sequence[int],
         rhs_shape: Sequence[int],
         contracting_dims: Tuple[Sequence[int], Sequence[int]],
-        buffer_dtype: jnp.dtype,
+        dtype: jnp.dtype,
         forward_collective_op: CollectiveOp,
         num_splits: int = None,
         num_max_streams: int = 3,
@@ -349,7 +351,10 @@ class CollectiveGemmConfigSet:
     ):
         lhs_non_cdims = get_non_contracting_dims(len(lhs_shape), contracting_dims[0])
         rhs_non_cdims = get_non_contracting_dims(len(rhs_shape), contracting_dims[1])
-        output_shape = (*[lhs_shape[i] for i in lhs_non_cdims], *[rhs_shape[i] for i in rhs_non_cdims])
+        output_shape = (
+            *[lhs_shape[i] for i in lhs_non_cdims],
+            *[rhs_shape[i] for i in rhs_non_cdims],
+        )
 
         if forward_collective_op.is_all_gather:
             buffer_shape = lhs_shape
@@ -357,13 +362,13 @@ class CollectiveGemmConfigSet:
         elif forward_collective_op.is_reduce_scatter:
             buffer_shape = output_shape
             backward_collective_op = CollectiveOp.ALL_GATHER
-        else: 
+        else:
             buffer_shape = (0, 0)
             backward_collective_op = CollectiveOp.NONE
 
         forward = CollectiveGemmConfig.create(
             buffer_shape,
-            buffer_dtype,
+            dtype,
             forward_collective_op,
             num_splits,
             num_max_streams,
@@ -380,7 +385,7 @@ class CollectiveGemmConfigSet:
 
         backward = CollectiveGemmConfig.create(
             buffer_shape,
-            buffer_dtype,
+            dtype,
             backward_collective_op,
             num_splits,
             num_max_streams,
@@ -399,13 +404,15 @@ class CollectiveGemmConfigSet:
 
 noop_cgemm_config = CollectiveGemmConfig.create(
     buffer_shape=(0, 0),
-    buffer_dtype=jnp.bfloat16,
+    dtype=jnp.bfloat16,
     collective_op=CollectiveOp.NONE,
 )
 
 noop_cgemm_config_set = CollectiveGemmConfigSet.create(
-    buffer_shape=(0, 0),
-    buffer_dtype=jnp.bfloat16,
+    lhs_shape=(0, 0),
+    rhs_shape=(0, 0),
+    contracting_dims=((), ()),
+    dtype=jnp.bfloat16,
     forward_collective_op=CollectiveOp.NONE,
 )
 
@@ -486,7 +493,7 @@ class GemmPrimitive(BasePrimitive):
             ), "Quantized cuBLAS GEMM requires inverse scaling factors for both operands."
             if (
                 scaling_mode != ScalingMode.MXFP8_1D_SCALING
-                and not tex.is_non_nt_fp8_gemm_supported()
+                and not is_fp8_gemm_with_all_layouts_supported()
             ):
                 assert not lhs_is_transposed and rhs_is_transposed, (
                     "cuBLAS FP8 GEMM on devices with compute capability < 10.0 (Hopper) "
@@ -797,7 +804,6 @@ class GemmPrimitive(BasePrimitive):
                     reduce_spec = l
 
         sequence_dim = None
-        gsr = global_mesh_resource()
 
         # Find sequence dimension in lhs_specs if tensor sequence parallel is enabled
         # We only do CollectiveGemm AG on the x or dY and CollectiveGemm RS on the Y or dX thus they always the LHS and have sequence dim
@@ -821,7 +827,7 @@ class GemmPrimitive(BasePrimitive):
             # For reduce-scatter: find single tpsp_resource occurrence
             try:
                 tpsp_idx = lhs_specs.index(gsr.tpsp_resource)
-            except ValueError:
+            except ValueError as exc:
                 raise ValueError(
                     f"tpsp_resource '{gsr.tpsp_resource}' is not found in lhs_specs: {lhs_specs}."
                     " Please check your sharding configuration."
@@ -838,7 +844,7 @@ class GemmPrimitive(BasePrimitive):
             # Only do AG Sequence dim if not Overlap
             if cgemm_config.collective_op.is_all_gather:
                 rhs_cspecs = tuple(
-                    s if s == reduce_spec or s == gsr.tpsp_resource else None for s in rhs_cspecs
+                    s if s in (reduce_spec, gsr.tpsp_resource) else None for s in rhs_cspecs
                 )
             else:
                 rhs_cspecs = tuple(s if s == reduce_spec else None for s in rhs_cspecs)
@@ -1031,7 +1037,7 @@ class GemmPrimitive(BasePrimitive):
                 cgemm_config=cgemm_config,
             )
 
-            if reduce_spec is not None and _is_collective_reduce_scatter(cgemm_config):
+            if reduce_spec is not None and not cgemm_config.collective_op.is_reduce_scatter:
                 outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
             return outputs
 
@@ -1147,7 +1153,7 @@ def _te_gemm(
     fuse_bias: bool = False,
     fuse_gelu: bool = False,
     grad: bool = False,
-    use_split_accumulator: bool = QuantizeConfig.FP8_2X_ACC_FPROP,
+    use_split_accumulator: bool = get_quantize_config().FP8_2X_ACC_FPROP,
     transpose_batch_sequence: bool = False,
     cgemm_config: CollectiveGemmConfig = None,
 ) -> Tuple[jax.Array, ...]:
@@ -1626,6 +1632,7 @@ def gemm(
         lhs_quantizer=lhs_quantizer,
         rhs_quantizer=rhs_quantizer,
         contracting_dims=contracting_dims,
+        transpose_batch_sequence=transpose_batch_sequence,
         **kwargs,
     )
 
