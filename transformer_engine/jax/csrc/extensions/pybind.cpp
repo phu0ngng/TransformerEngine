@@ -94,16 +94,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         },
         pybind11::arg("device_id") = -1,
         pybind11::call_guard<pybind11::gil_scoped_release>());
-  m.def("create_collective_gemm_executor", &CreateCollectiveGemmExecutor,
-        pybind11::arg("collective_op"), pybind11::arg("buffer_shape"),
-        pybind11::arg("buffer_dtype"), pybind11::arg("tp_size"), pybind11::pos_only(),
-        pybind11::kw_only(), pybind11::arg("num_splits") = 4, pybind11::arg("num_max_streams") = 3,
-        pybind11::arg("comm_cga_size") = 2, pybind11::arg("gemm_priority") = 0,
-        pybind11::arg("comm_priority") = 0, pybind11::arg("num_comm_sm") = 16,
-        pybind11::arg("set_sm_margin") = true, pybind11::arg("use_ce") = true,
-        pybind11::arg("atomic_gemm") = false, pybind11::arg("rs_overlap_first_gemm") = false,
-        pybind11::arg("aggregate_ag") = false,
-        pybind11::call_guard<pybind11::gil_scoped_release>());
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)

@@ -102,19 +102,6 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
   return std::make_tuple(std::move(input), input_shape);
 }
 
-struct CollectiveGemmConfig {
-JAXX_Collective_Op collective_op;
-const std::vector<size_t> &buffer_shape;
-DType buffer_dtype;
-int tp_size;
-int num_splits; 
-int num_max_streams;
-int gemm_priority; 
-int comm_priority;
-int num_comm_sm;
-bool use_ce;
-bool aggregate_ag;
-};
 
 //TODO: Move these there to TE/Common
 class CollectiveGemmPlanRegistry {
@@ -126,7 +113,7 @@ class CollectiveGemmPlanRegistry {
 
   CommOverlapCore *get_executor(CollectiveGemmConfig& cgemm_config) {
     int64_t plan_id = 0;
-    hash_combine(plan_id, static_cast<int>(cgemm_config.collective_op), cgemm_config.buffer_shape[0], cgemm_config.buffer_shape[1],
+    hash_combine(plan_id, static_cast<int>(cgemm_config.collective_op), cgemm_config.buffer_first_dim, cgemm_config.buffer_second_dim,
                  static_cast<int>(cgemm_config.buffer_dtype), cgemm_config.tp_size, cgemm_config.num_splits, cgemm_config.num_max_streams,
                  cgemm_config.gemm_priority, cgemm_config.comm_priority, cgemm_config.num_comm_sm, cgemm_config.use_ce, cgemm_config.aggregate_ag);
 
@@ -139,7 +126,7 @@ class CollectiveGemmPlanRegistry {
     // Create new plan
     std::unique_ptr<CommOverlapCore> executor;
     executor = std::make_unique<CommOverlapP2PBase>(
-        cgemm_config.buffer_shape, cgemm_config.buffer_dtype, cgemm_config.tp_size, get_nvte_collective_op(cgemm_config.collective_op), cgemm_config.num_max_streams,
+       {cgemm_config.buffer_first_dim, buffer_second_dim}, cgemm_config.buffer_dtype, cgemm_config.tp_size, get_nvte_collective_op(cgemm_config.collective_op), cgemm_config.num_max_streams,
         1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority, cgemm_config.num_comm_sm, True /*set_sm_margin*/, cgemm_config.use_ce,
         False /*atomic_gemm*/, cgemm_config.aggregate_ag);
 

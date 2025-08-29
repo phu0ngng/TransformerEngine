@@ -33,9 +33,6 @@
 #include "transformer_engine/activation.h"
 #include "transformer_engine/multi_stream.h"
 
-// ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
-XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
-XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op);
 
 namespace transformer_engine {
 namespace jax {
@@ -124,14 +121,21 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 
-int64_t CreateCollectiveGemmExecutor(JAXX_Collective_Op collective_op,
-                                     const std::vector<size_t> &buffer_shape, DType buffer_dtype,
-                                     int tp_size, int num_splits = 3, int num_max_streams = 3,
-                                     int comm_cga_size = 2, int gemm_priority = 0,
-                                     int comm_priority = 0, int num_comm_sm = 16,
-                                     int set_sm_margin = false, bool use_ce = true,
-                                     bool atomic_gemm = false, bool rs_overlap_first_gemm = false,
-                                     bool aggregate_ag = false);
+
+struct CollectiveGemmConfig {
+  JAXX_Collective_Op collective_op;
+  size_t buffer_first_dim;
+  size_t buffer_second_dim;
+  DType buffer_dtype;
+  int tp_size;
+  int num_splits;
+  int num_max_streams;
+  int gemm_priority;
+  int comm_priority;
+  int num_comm_sm;
+  bool use_ce;
+  bool aggregate_ag;
+};
 
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
@@ -144,5 +148,24 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CublasHandleInitHandler);
 
 }  // namespace jax
 }  // namespace transformer_engine
+
+// ENUM_ATTR and DICT_ATTR recoding need to be registered in the global namespace
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
+XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op);
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+  transformer_engine::jax::CollectiveGemmConfig,
+  StructMember<transformer_engine::jax::JAXX_Collective_Op>("collective_op"),
+  StructMember<int64_t>("buffer_first_dim"),
+  StructMember<int64_t>("buffer_second_dim"),
+  StructMember<transformer_engine::DType>("dtype"),
+  StructMember<int64_t>("tp_size"),
+  StructMember<int64_t>("num_splits"),
+  StructMember<int64_t>("num_max_streams"),
+  StructMember<int64_t>("gemm_priority"),
+  StructMember<int64_t>("comm_priority"),
+  StructMember<int64_t>("num_comm_sm"),
+  StructMember<bool>("use_ce"),
+  StructMember<bool>("aggregate_ag"),
+;
 
 #endif  // TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_

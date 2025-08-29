@@ -247,7 +247,8 @@ class CollectiveGemmConfig:
         print(f"Config to create plan_id collective_op{collective_op}, buffer_shape={buffer_shape}, dtype={dtype}, tp_size={tp_size}")
         lowering_cgemm_attrs = {
             "collective_op": collective_op.value,
-            "buffer_shape": list(buffer_shape),
+            "buffer_first_dim": buffer_shape[0],
+            "buffer_second_dim": buffer_shape[1],
             "dtype": jax_dtype_to_te_dtype(dtype),
             "tp_size": tp_size,
             "num_splits": num_splits,
