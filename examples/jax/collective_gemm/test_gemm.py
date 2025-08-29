@@ -27,6 +27,7 @@ DEVICE_TPSP_AXIS = "tensor_sequence"
 PARAMS_KEY = "params"
 
 jax.clear_caches()
+jax.config.update("jax_use_shardy_partitioner", False)  # CollectiveGEMM does not work with Shardy yet
 
 # FOR NOW: This script needs to be launched via `mpirun` with 1 process per GPU
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -79,13 +80,14 @@ def run_gemm_tests(args):
     assert num_gpu == numranks, f"Requires {num_gpu} processes for {num_gpu} GPUs, got {numranks}!"
     num_gpu_dp = 2 if args.enable_data_parallel else 1
     assert (
-        num_gpu > 0 and num_gpu % num_gpu_dp == 0
-    ), "Number of GPUs must be greater than 0 and divisible by number of data parallel GPUs"
+        num_gpu > 1 and num_gpu % num_gpu_dp
+    ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
+
     num_gpu_tp = num_gpu // num_gpu_dp
     assert (
         num_gpu_tp > 1
     ), "Number of tensor parallel GPUs must be greater than 1 for Collective GEMM"
-    print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu} total GPUs)")
+    print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")
 
     # Create test data
     rng = jax.random.PRNGKey(0)
@@ -146,7 +148,7 @@ def gemm_parser(args):
         type=int,
         default=1024,
         metavar="N",
-        help="sequence length (default: 64)",
+        help="sequence length (default: 128)",
     )
     parser.add_argument(
         "--hidden-in",
@@ -166,6 +168,7 @@ def gemm_parser(args):
         "--collective-type",
         type=str,
         default="all_gather",
+        choices=["all_gather", "reduce_scatter"],
         help="Collective operation type (default: all_gather)",
     )
     parser.add_argument(
@@ -180,6 +183,31 @@ def gemm_parser(args):
         default=False,
         help="Enable data parallel (default: False)",
     )
+    parser.add_argument(
+        "--num-gpu-dp",
+        type=int,
+        default=2,
+        help="Number of data parallel GPUs (default: 2)",
+    )
+    parser.add_argument(
+        "--num-gpu-tp",
+        type=int,
+        default=2,
+        help="Number of tensor parallel GPUs (default: 2)",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="bfloat16",
+        choices=["bfloat16", "float16", "float32"],
+        help="Data type for tensors (default: bfloat16)",
+    )
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        default=True,
+        help="Validate outputs (default: True)",
+    )
 
     return parser.parse_args(args)
 
@@ -190,19 +218,22 @@ class TestCollectiveGemm(unittest.TestCase):
     # is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
     # is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
+    def setUp(self):
+        """Set up test environment for pytest execution."""
+        self.args = gemm_parser(["--collective-type", "all_gather"])
+
     def test_te_bf16_all_gather(self):
         """Test Collective GEMM with AllGather"""
-        args = gemm_parser(["--collective-type", "all_gather"])
-        ref_output, gathered_output = run_gemm_tests(args)
+        ref_output, output = run_gemm_tests(self.args)
         if myrank == 0:
-            assert_allclose(ref_output, gathered_output)
+            assert_allclose(ref_output, output)
 
     def test_te_bf16_reduce_scatter(self):
         """Test Collective GEMM with ReduceScatter"""
-        args = gemm_parser(["--collective-type", "reduce_scatter"])
-        ref_output, gathered_output = run_gemm_tests(args)
+        self.args.collective_type = "reduce_scatter"  # Modify existing args
+        ref_output, output = run_gemm_tests(self.args)
         if myrank == 0:
-            assert_allclose(ref_output, gathered_output)
+            assert_allclose(ref_output, output)
 
 
 if __name__ == "__main__":
