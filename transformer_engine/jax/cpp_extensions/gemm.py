@@ -270,6 +270,7 @@ class CollectiveGemmConfig:
         if collective_op is CollectiveOp.NONE:
             plan_id = -1
         else:
+            print(f"Config to create plan_id collective_op{collective_op}, buffer_shape={buffer_shape}, dtype={dtype}, tp_size={tp_size}")
             plan_id = create_collective_gemm_executor(
                 collective_op.value,
                 list(buffer_shape),
