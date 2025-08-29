@@ -154,18 +154,18 @@ XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Scaling_Mode);
 XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op);
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
   transformer_engine::jax::CollectiveGemmConfig,
-  StructMember<transformer_engine::jax::JAXX_Collective_Op>("collective_op"),
-  StructMember<int64_t>("buffer_first_dim"),
-  StructMember<int64_t>("buffer_second_dim"),
-  StructMember<transformer_engine::DType>("dtype"),
-  StructMember<int64_t>("tp_size"),
-  StructMember<int64_t>("num_splits"),
-  StructMember<int64_t>("num_max_streams"),
-  StructMember<int64_t>("gemm_priority"),
-  StructMember<int64_t>("comm_priority"),
-  StructMember<int64_t>("num_comm_sm"),
-  StructMember<bool>("use_ce"),
-  StructMember<bool>("aggregate_ag"),
+  xla::ffi::StructMember<transformer_engine::jax::JAXX_Collective_Op>("collective_op"),
+  xla::ffi::StructMember<int64_t>("buffer_first_dim"),
+  xla::ffi::StructMember<int64_t>("buffer_second_dim"),
+  xla::ffi::StructMember<transformer_engine::DType>("dtype"),
+  xla::ffi::StructMember<int64_t>("tp_size"),
+  xla::ffi::StructMember<int64_t>("num_splits"),
+  xla::ffi::StructMember<int64_t>("num_max_streams"),
+  xla::ffi::StructMember<int64_t>("gemm_priority"),
+  xla::ffi::StructMember<int64_t>("comm_priority"),
+  xla::ffi::StructMember<int64_t>("num_comm_sm"),
+  xla::ffi::StructMember<bool>("use_ce"),
+  xla::ffi::StructMember<bool>("aggregate_ag"),
 ;
 
 #endif  // TRANSFORMER_ENGINE_JAX_CSRC_FP8_MODULES_H_

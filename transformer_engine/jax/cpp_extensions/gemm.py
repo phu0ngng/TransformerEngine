@@ -21,9 +21,7 @@ from jax.experimental.custom_partitioning import SdyShardingRule
 from transformer_engine_jax import (
     get_num_compute_streams,
     JAXX_Collective_Op,
-    create_collective_gemm_executor,
     get_device_compute_capability,
-    get_stream_priority_range,
 )
 
 from .base import BasePrimitive, register_primitive
@@ -65,10 +63,6 @@ __all__ = [
 
 
 num_cublas_streams = get_num_compute_streams()
-
-
-CUDA_STREAM_PRIORITY_LOWEST = None
-CUDA_STREAM_PRIORITY_HIGHEST = None
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -206,8 +200,8 @@ class CollectiveGemmConfig:
         collective_op: JAXX_Collective_Op,
         num_splits: int = None,
         num_max_streams: int = 3,       # Why 3?
-        gemm_priority: int = None,
-        comm_priority: int = None,
+        gemm_priority: int = 0,
+        comm_priority: int = 0,
         num_comm_sm: int = None,
         use_ce: bool = True,
         aggregate_ag: bool = False, # TODO: do we need this?
@@ -215,18 +209,6 @@ class CollectiveGemmConfig:
         """Create a CollectiveGemmConfig with all values properly set and initialize the Userbuffer"""
 
         assert len(buffer_shape) >= 2, f"{buffer_shape} is not a valid buffer shape."
-
-        # Update global min/max CUDA stream priority values if not already done
-        global CUDA_STREAM_PRIORITY_LOWEST, CUDA_STREAM_PRIORITY_HIGHEST
-        if CUDA_STREAM_PRIORITY_LOWEST is None or CUDA_STREAM_PRIORITY_HIGHEST is None and not collective_op.is_none:
-            (
-                CUDA_STREAM_PRIORITY_LOWEST,
-                CUDA_STREAM_PRIORITY_HIGHEST,
-            ) = get_stream_priority_range()
-
-        # Set default priorities if not provided
-        gemm_priority = gemm_priority or CUDA_STREAM_PRIORITY_LOWEST
-        comm_priority = comm_priority or CUDA_STREAM_PRIORITY_HIGHEST
 
         tp_size = tpsp_axis_size() if not collective_op.is_none else 1
         dp_size = dp_or_fsdp_axis_size() if not collective_op.is_none else 1

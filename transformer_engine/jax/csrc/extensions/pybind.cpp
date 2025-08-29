@@ -85,15 +85,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
-  // TODO(Phuong) reuse common/util/pybind_helper.h
-  m.def("get_stream_priority_range",
-        [](int device_id = -1) {
-        int low_pri, high_pri;
-        transformer_engine::cuda::stream_priority_range(&low_pri, &high_pri, device_id);
-        return std::make_pair(low_pri, high_pri);
-        },
-        pybind11::arg("device_id") = -1,
-        pybind11::call_guard<pybind11::gil_scoped_release>());
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)
