@@ -105,6 +105,11 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
 //TODO: Move these there to TE/Common
 class CollectiveGemmPlanRegistry {
  public:
+  static CollectiveGemmPlanRegistry& getInstance(){
+    static thread_local CollectiveGemmPlanRegistry instance;
+    return instance;
+  }
+
   static CommOverlapCore *get_executor(JAXX_Collective_Op collective_op,
                                        const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                                        int tp_size, int num_splits, int num_max_streams,
@@ -120,8 +125,8 @@ class CollectiveGemmPlanRegistry {
                  atomic_gemm, rs_overlap_first_gemm, aggregate_ag);
 
     // Check if plan already exists
-    auto it = plan_registry_.find(plan_id);
-    if (it != plan_registry_.end()) {
+    auto it = _plan_map.find(plan_id);
+    if (it != _plan_map.end()) {
       return it->second.get();  // Return existing executor
     }
 
@@ -133,13 +138,13 @@ class CollectiveGemmPlanRegistry {
         atomic_gemm, aggregate_ag);
 
     CommOverlapCore *executor_ptr = executor.get();
-    plan_registry_[plan_id] = std::move(executor);
+    _plan_map[plan_id] = std::move(executor);
     return executor_ptr;
   }
 
   static CommOverlapCore *get_executor(int plan_id) {
-    auto it = plan_registry_.find(plan_id);
-    if (it != plan_registry_.end()) {
+    auto it = _plan_map.find(plan_id);
+    if (it != _plan_map.end()) {
       return it->second.get();  // Return existing executor
     }
     NVTE_ERROR("Invalid plan_id provided for collective operation. Got", plan_id);
@@ -147,7 +152,11 @@ class CollectiveGemmPlanRegistry {
   }
 
  private:
-  static std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> plan_registry_;
+  CollectiveGemmPlanRegistry(){};
+  CollectiveGemmPlanRegistry(const CollectiveGemmPlanRegistry&) = delete;
+  CollectiveGemmPlanRegistry& operator=(const CollectiveGemmPlanRegistry&) = delete;
+
+  static std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> _plan_map;
 };
 
 int64_t CreateCollectiveGemmExecutor(JAXX_Collective_Op collective_op,
@@ -163,7 +172,7 @@ int64_t CreateCollectiveGemmExecutor(JAXX_Collective_Op collective_op,
                gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce, atomic_gemm,
                rs_overlap_first_gemm, aggregate_ag);
 
-  CollectiveGemmPlanRegistry::get_executor(
+  CollectiveGemmPlanRegistry::getInstance()::get_executor(
       collective_op, buffer_shape, buffer_dtype, tp_size, num_splits, num_max_streams,
       comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce, atomic_gemm,
       rs_overlap_first_gemm, aggregate_ag);
@@ -244,7 +253,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                      rhs_transposed, lhs_transposed, grad, workspace_.data(), false,
                      use_split_accumulator, num_math_sm, stream);
   } else {
-    auto executor = CollectiveGemmPlanRegistry::get_executor(plan_id);
+    auto executor = CollectiveGemmPlanRegistry::getInstance()::get_executor(plan_id);
     auto tp_size = executor->get_tp_size();
     if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
       auto out_ = TensorWrapper(executor->get_ubuf_dptr(), out_shape, out_dtype);

@@ -124,7 +124,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 
-int64_t CreateCollectiveGemmExecutor(CommOverlapType collective_op,
+int64_t CreateCollectiveGemmExecutor(JAXX_Collective_Op collective_op,
                                      const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                                      int tp_size, int num_splits = 3, int num_max_streams = 3,
                                      int comm_cga_size = 2, int gemm_priority = 0,

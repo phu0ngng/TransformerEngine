@@ -268,8 +268,8 @@ class CollectiveGemmConfig:
             plan_id = -1
         else:
             plan_id = create_collective_gemm_executor(
-                collective_op,
-                buffer_shape,
+                collective_op.value,
+                buffer_shape.tolist(),
                 jax_dtype_to_te_dtype(dtype),
                 tpsp_axis_size(),
                 num_splits=num_splits,
