@@ -144,21 +144,21 @@ def gemm_parser(args):
     parser.add_argument(
         "--seq-len",
         type=int,
-        default=64,
+        default=1024,
         metavar="N",
         help="sequence length (default: 64)",
     )
     parser.add_argument(
         "--hidden-in",
         type=int,
-        default=64,
+        default=512,
         metavar="N",
         help="input hidden dimension (default: 256)",
     )
     parser.add_argument(
         "--hidden-out",
         type=int,
-        default=64,
+        default=256,
         metavar="N",
         help="output hidden dimension (default: 512)",
     )
@@ -190,12 +190,12 @@ class TestCollectiveGemm(unittest.TestCase):
     # is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
     # is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
-    # def test_te_bf16_all_gather(self):
-    #     """Test Collective GEMM with AllGather"""
-    #     args = gemm_parser(["--collective-type", "all_gather"])
-    #     ref_output, gathered_output = run_gemm_tests(args)
-    #     if myrank == 0:
-    #         assert_allclose(ref_output, gathered_output)
+    def test_te_bf16_all_gather(self):
+        """Test Collective GEMM with AllGather"""
+        args = gemm_parser(["--collective-type", "all_gather"])
+        ref_output, gathered_output = run_gemm_tests(args)
+        if myrank == 0:
+            assert_allclose(ref_output, gathered_output)
 
     def test_te_bf16_reduce_scatter(self):
         """Test Collective GEMM with ReduceScatter"""
