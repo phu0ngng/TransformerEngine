@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "../extensions.h"
+#include "common/util/cuda_runtime.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -158,6 +159,12 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("ROWWISE", transformer_engine::jax::QuantizeLayout::ROWWISE)
       .value("COLWISE", transformer_engine::jax::QuantizeLayout::COLWISE)
       .value("ROWWISE_COLWISE", transformer_engine::jax::QuantizeLayout::ROWWISE_COLWISE)
+      .export_values();
+
+  pybind11::enum_<JAXX_Collective_Op>(m, "JAXX_Collective_Op", pybind11::module_local())
+      .value("NONE", JAXX_Collective_Op::NONE)
+      .value("ALL_GATHER", JAXX_Collective_Op::ALL_GATHER)
+      .value("REDUCE_SCATTER", JAXX_Collective_Op::REDUCE_SCATTER)
       .export_values();
 }
 

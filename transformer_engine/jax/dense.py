@@ -11,6 +11,7 @@ customizable contracting dimensions for flexible tensor operations.
 
 from typing import Tuple, Sequence
 from functools import partial
+import warnings
 import jax
 import jax.numpy as jnp
 
@@ -60,9 +61,11 @@ def dense(
     kernel: jnp.ndarray,
     bias: jnp.ndarray = None,
     contracting_dims: Tuple[Sequence[int], Sequence[int]] = ((1,), (0,)),
+    batch_sequence_transpose: bool = False,
     input_axes: Tuple[str, ...] = None,
     kernel_axes: Tuple[str, ...] = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
+    cgemm_config_set: tex.CollectiveGemmConfigSet = tex.noop_cgemm_config_set,
 ):
     """Perform dense layer transformation with optional quantization.
 
@@ -75,11 +78,18 @@ def dense(
         kernel: Weight matrix for the dense layer transformation
         bias: Optional bias tensor to add after the transformation
         contracting_dims: Tuple of sequences specifying which dimensions to contract
+        batch_sequence_transpose: Transpose the batch and sequence dimensions of the input tensor.
+        input_axes: Logical axes for sharding the activation input
+        kernel_axes: Logical axes for sharding the weight matrix
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
+        cgemm_config_set: A set of CollectiveGemmConfig objects for forward and backward passes.
 
     Returns:
         Transformed output tensor
     """
+    if batch_sequence_transpose:
+        warnings.warn("batch_sequence_transpose is not well tested, use with caution!")
+
     # Remove when tex.quantize() can handle quantizer=None
     if quantizer_set == noop_quantizer_set and tex.gemm_uses_jax_dot():
         x = with_sharding_constraint_by_logical_axes(x, input_axes)
@@ -93,29 +103,26 @@ def dense(
             kernel,
             bias,
             contracting_dims,
+            batch_sequence_transpose,
             input_axes,
             kernel_axes,
             quantizer_set,
+            cgemm_config_set,
         )
     return output
 
 
-@partial(
-    jax.custom_vjp,
-    nondiff_argnums=(
-        3,
-        4,
-        5,
-    ),
-)
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 8))
 def _dense(
     x,
     kernel,
     bias,
     contracting_dims,
+    batch_sequence_transpose,
     input_axes,
     kernel_axes,
-    quantizer_set,
+    quantizer_set,  # need to be a diff_arg for DelayedScaling state management
+    cgemm_config_set,
 ):
     """Internal implementation of dense layer transformation with custom VJP.
 
@@ -127,9 +134,11 @@ def _dense(
         kernel: Weight matrix
         bias: Optional bias tensor
         contracting_dims: Contracting dimensions specification
+        batch_sequence_transpose: Transpose the batch and sequence dimensions of the input tensor.
         input_axes: Logical axes for sharding the activation input
         kernel_axes: Logical axes for sharding the weight matrix
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
+        cgemm_config_set: A set of CollectiveGemmConfig objects for forward and backward passes.
 
     Returns:
         Transformed output tensor
@@ -139,9 +148,11 @@ def _dense(
         kernel,
         bias,
         contracting_dims,
+        batch_sequence_transpose,
         input_axes,
         kernel_axes,
         quantizer_set,
+        cgemm_config_set,
     )
     return output
 
@@ -151,9 +162,11 @@ def _dense_fwd_rule(
     kernel,
     bias,
     contracting_dims,
+    batch_sequence_transpose,
     input_axes,
     kernel_axes,
     quantizer_set,
+    cgemm_config_set,
 ):
     """Forward pass rule for dense layer transformation.
 
@@ -193,8 +206,10 @@ def _dense_fwd_rule(
         casted_x.get_tensor(usage=TensorUsage.LHS),
         casted_kernel.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=(x_contracting_dims, k_contracting_dims),
+        transpose_batch_sequence=batch_sequence_transpose,
         bias=bias if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
+        cgemm_config=cgemm_config_set.forward,
     )
 
     if use_bias and tex.gemm_uses_jax_dot():
@@ -214,7 +229,7 @@ def _dense_fwd_rule(
 
 
 def _dense_bwd_rule(
-    contracting_dims, input_axes, kernel_axes, ctx, grad
+    contracting_dims, input_axes, kernel_axes, batch_sequence_transpose, cgemm_config_set, ctx, grad
 ):  # pylint: disable=unused-argument
     """Backward pass rule for dense layer transformation.
 
@@ -257,8 +272,9 @@ def _dense_bwd_rule(
         casted_grad.get_tensor(usage=TensorUsage.LHS),
         casted_kernel_rhs,
         contracting_dims=(g_contracting_dim, k_contracting_dim),
+        transpose_batch_sequence=batch_sequence_transpose,
+        cgemm_config=cgemm_config_set.backward,
     )
-    dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
 
     # GEMM TN
     # x_non_contracting_dims
@@ -270,7 +286,11 @@ def _dense_bwd_rule(
         casted_x_lhs,
         casted_grad.get_tensor(usage=TensorUsage.RHS),
         contracting_dims=(x_contracting_dim, g_contracting_dim),
+        transpose_batch_sequence=batch_sequence_transpose,
+        cgemm_config=cgemm_config_set.backward,
     )
+
+    dgrad = with_sharding_constraint_by_logical_axes(dgrad, input_axes)
     wgrad = with_sharding_constraint_by_logical_axes(wgrad, kernel_axes)
 
     return dgrad, wgrad, dbias, quantizer_set
