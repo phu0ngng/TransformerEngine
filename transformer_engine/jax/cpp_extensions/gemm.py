@@ -194,27 +194,10 @@ class CollectiveGemmConfig:
     """
     Configuration object that carries collective GEMM configuration
     """
-
-    # Core init arguments
     collective_op: JAXX_Collective_Op
     buffer_shape: Sequence[int]
     dtype: jnp.dtype
-
-    # Userbuffers bootstrap kwargs
-    num_splits: int
-    num_max_streams: int
-    comm_cga_size: int
-    gemm_priority: int
-    comm_priority: int
-    num_comm_sm: int
-    set_sm_margin: bool
-    use_ce: bool
-    atomic_gemm: bool
-    rs_overlap_first_gemm: bool
-    aggregate_ag: bool
-
-    # Internal attributes
-    plan_id: int
+    lowering_cgemm_attrs: dict = field(default_factory=dict)
 
     @staticmethod
     def create(
@@ -222,16 +205,12 @@ class CollectiveGemmConfig:
         dtype: jnp.dtype,
         collective_op: JAXX_Collective_Op,
         num_splits: int = None,
-        num_max_streams: int = 3,
-        comm_cga_size: int = None,
+        num_max_streams: int = 3,       # Why 3?
         gemm_priority: int = None,
         comm_priority: int = None,
         num_comm_sm: int = None,
-        set_sm_margin: bool = None,
-        use_ce: bool = None,
-        atomic_gemm: bool = False,
-        rs_overlap_first_gemm: bool = False,
-        aggregate_ag: bool = False,
+        use_ce: bool = True,
+        aggregate_ag: bool = False, # TODO: do we need this?
     ):
         """Create a CollectiveGemmConfig with all values properly set and initialize the Userbuffer"""
 
@@ -254,10 +233,8 @@ class CollectiveGemmConfig:
 
         # Set conditional defaults for config options not specified
         num_splits = num_splits or tp_size
-        comm_cga_size = comm_cga_size or 1
-        num_comm_sm = num_comm_sm or 1
-        set_sm_margin = set_sm_margin or False
-        use_ce = use_ce or True
+        set_sm_margin = num_comm_sm is not None
+        num_comm_sm = num_comm_sm or 0
 
         # Handle buffer shape collapsing
         if buffer_shape is not None and len(buffer_shape) > 2:
@@ -267,45 +244,27 @@ class CollectiveGemmConfig:
         buffer_shape = (buffer_shape[0] // dp_size, buffer_shape[1])
 
         # Create the communication plan
-        if collective_op is CollectiveOp.NONE:
-            plan_id = -1
-        else:
-            print(f"Config to create plan_id collective_op{collective_op}, buffer_shape={buffer_shape}, dtype={dtype}, tp_size={tp_size}")
-            plan_id = create_collective_gemm_executor(
-                collective_op.value,
-                list(buffer_shape),
-                jax_dtype_to_te_dtype(dtype),
-                tp_size,
-                num_splits=num_splits,
-                num_max_streams=num_max_streams,
-                comm_cga_size=comm_cga_size,
-                gemm_priority=gemm_priority,
-                comm_priority=comm_priority,
-                num_comm_sm=num_comm_sm,
-                set_sm_margin=set_sm_margin,
-                use_ce=use_ce,
-                atomic_gemm=atomic_gemm,
-                rs_overlap_first_gemm=rs_overlap_first_gemm,
-                aggregate_ag=aggregate_ag,
-            )
+        print(f"Config to create plan_id collective_op{collective_op}, buffer_shape={buffer_shape}, dtype={dtype}, tp_size={tp_size}")
+        lowering_cgemm_attrs = {
+            "collective_op": collective_op.value,
+            "buffer_shape": list(buffer_shape),
+            "dtype": jax_dtype_to_te_dtype(dtype),
+            "tp_size": tp_size,
+            "num_splits": num_splits,
+            "num_max_streams": num_max_streams,
+            "gemm_priority": gemm_priority,
+            "comm_priority": comm_priority,
+            "num_comm_sm": num_comm_sm,
+            "use_ce": use_ce,
+            "aggregate_ag": aggregate_ag,
+        }
 
         # Create the instance
         instance = CollectiveGemmConfig(
             collective_op=collective_op,
             buffer_shape=buffer_shape,
             dtype=dtype,
-            num_splits=num_splits,
-            num_max_streams=num_max_streams,
-            comm_cga_size=comm_cga_size,
-            gemm_priority=gemm_priority,
-            comm_priority=comm_priority,
-            num_comm_sm=num_comm_sm,
-            set_sm_margin=set_sm_margin,
-            use_ce=use_ce,
-            atomic_gemm=atomic_gemm,
-            rs_overlap_first_gemm=rs_overlap_first_gemm,
-            aggregate_ag=aggregate_ag,
-            plan_id=plan_id,
+            lowering_cgemm_attrs=lowering_cgemm_attrs,
         )
 
         return instance
@@ -343,14 +302,10 @@ class CollectiveGemmConfigSet:
         forward_collective_op: CollectiveOp,
         num_splits: int = None,
         num_max_streams: int = 3,
-        comm_cga_size: int = None,
         gemm_priority: int = None,
         comm_priority: int = None,
         num_comm_sm: int = None,
-        set_sm_margin: bool = None,
         use_ce: bool = None,
-        atomic_gemm: bool = False,
-        rs_overlap_first_gemm: bool = False,
         aggregate_ag: bool = False,
     ):
         lhs_non_cdims = get_non_contracting_dims(len(lhs_shape), contracting_dims[0])
@@ -376,14 +331,10 @@ class CollectiveGemmConfigSet:
             forward_collective_op,
             num_splits,
             num_max_streams,
-            comm_cga_size,
             gemm_priority,
             comm_priority,
             num_comm_sm,
-            set_sm_margin,
             use_ce,
-            atomic_gemm,
-            rs_overlap_first_gemm,
             aggregate_ag,
         )
 
@@ -393,14 +344,10 @@ class CollectiveGemmConfigSet:
             backward_collective_op,
             num_splits,
             num_max_streams,
-            comm_cga_size,
             gemm_priority,
             comm_priority,
             num_comm_sm,
-            set_sm_margin,
             use_ce,
-            atomic_gemm,
-            rs_overlap_first_gemm,
             aggregate_ag,
         )
         return CollectiveGemmConfigSet(forward=forward, backward=backward)
@@ -634,8 +581,6 @@ class GemmPrimitive(BasePrimitive):
             "fuse_gelu": fuse_gelu,
             "grad": grad,
             "use_split_accumulator": use_split_accumulator,
-            "collective_op": int(cgemm_config.collective_op.value),
-            "plan_id": cgemm_config.plan_id,
         }
 
         operand_output_aliases = {}
@@ -647,7 +592,7 @@ class GemmPrimitive(BasePrimitive):
         return jax.ffi.ffi_lowering(
             GemmPrimitive.name,
             operand_output_aliases=operand_output_aliases,
-        )(ctx, *args, **kwargs)
+        )(ctx, *args, **kwargs, cgem_config=cgemm_config.lowering_cgemm_attrs)
 
     @staticmethod
     def impl(
