@@ -80,7 +80,7 @@ def run_gemm_tests(args):
     assert num_gpu == numranks, f"Requires {num_gpu} processes for {num_gpu} GPUs, got {numranks}!"
     num_gpu_dp = 2 if args.enable_data_parallel else 1
     assert (
-        num_gpu > 1 and num_gpu % num_gpu_dp
+        num_gpu > 1 and num_gpu % num_gpu_dp == 0
     ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
 
     num_gpu_tp = num_gpu // num_gpu_dp
