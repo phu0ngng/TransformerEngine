@@ -43,14 +43,14 @@ def _setup_mesh_and_sharding(num_gpu_dp, num_gpu_tp):
     mesh = jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS))
     # jax.sharding.set_mesh(mesh)
 
-    input_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS, None))
+    x_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS, None))
     weight_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS))
     bias_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS))
 
-    return mesh, input_sharding, weight_sharding, bias_sharding
+    return mesh, x_sharding, weight_sharding, bias_sharding
 
 
-def _create_cgemm_configs(input, weight, collective_type):
+def _create_cgemm_configs(x, weight, collective_type):
     if collective_type == "all_gather":
         collective_op = CollectiveOp.ALL_GATHER
     elif collective_type == "reduce_scatter":
@@ -59,13 +59,13 @@ def _create_cgemm_configs(input, weight, collective_type):
         raise ValueError(f"Invalid collective type: {collective_type}")
 
     cgemm_config = CollectiveGemmConfigSet.create(
-        lhs_shape=input.shape,
+        lhs_shape=x.shape,
         rhs_shape=weight.shape,
         contracting_dims=((2,), (0,)),
-        dtype=input.dtype,
+        dtype=x.dtype,
         forward_collective_op=collective_op,
     )
-    return cgemm_config.forward_config, cgemm_config.backward_config
+    return cgemm_config.forward, cgemm_config.backward
 
 
 def run_gemm_tests(args):
@@ -75,7 +75,8 @@ def run_gemm_tests(args):
     jax.config.update("jax_use_shardy_partitioner", False)
 
     # Setup mesh
-    num_gpu = jax.local_device_count()
+    num_gpu = jax.device_count()
+    assert num_gpu == numranks, f"Requires {num_gpu} processes for {num_gpu} GPUs, got {numranks}!"
     num_gpu_dp = 2 if args.enable_data_parallel else 1
     assert (
         num_gpu > 0 and num_gpu % num_gpu_dp == 0
@@ -88,18 +89,15 @@ def run_gemm_tests(args):
 
     # Create test data
     rng = jax.random.PRNGKey(0)
-    rng, input_rng, weight_rng, bias_rng = jax.random.split(rng, 4)
-    input = jnp.random.normal(
-        input_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16
+    rng, x_rng, weight_rng, bias_rng = jax.random.split(rng, 4)
+    x = jax.random.normal(
+        x_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16
     )
-    weight = jnp.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16)
-    bias = jnp.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
-
-    # Create collective GEMM configs
-    cgemm_config, _ = _create_cgemm_configs(input, weight, args.collective_type)
+    weight = jax.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16)
+    bias = jax.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
 
     # Setup mesh and sharding
-    mesh, input_sharding, weight_sharding, bias_sharding = _setup_mesh_and_sharding(
+    mesh, x_sharding, weight_sharding, bias_sharding = _setup_mesh_and_sharding(
         num_gpu_dp, num_gpu_tp
     )
     jax.sharding.set_mesh(mesh)
@@ -111,15 +109,17 @@ def run_gemm_tests(args):
     ):
         print(f"Device mesh: {mesh}")
 
-        input_sharded = jax.device_put(input, input_sharding)
-        weight_sharded = jax.device_put(weight, weight_sharding)
-        bias_sharded = jax.device_put(bias, bias_sharding)
+        # Collective GEMM configs need to be created under the mesh_resource context
+        cgemm_config, _ = _create_cgemm_configs(x, weight, args.collective_type)
 
-        ref_output = tex.gemm(input, weight, bias, contracting_dims=((2,), (0,)))
+        x_sharded = jax.device_put(x, x_sharding)
+        weight_sharded = jax.device_put(weight, weight_sharding)
+        # bias_sharded = jax.device_put(bias, bias_sharding)
+
+        ref_output = tex.gemm(x, weight, contracting_dims=((2,), (0,)))
         sharded_output = tex.gemm(
-            input_sharded,
+            x_sharded,
             weight_sharded,
-            bias_sharded,
             contracting_dims=((2,), (0,)),
             cgemm_config=cgemm_config,
         )
@@ -137,7 +137,7 @@ def gemm_parser(args):
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=32,
+        default=4,
         metavar="N",
         help="input batch size (default: 32)",
     )
@@ -151,14 +151,14 @@ def gemm_parser(args):
     parser.add_argument(
         "--hidden-in",
         type=int,
-        default=256,
+        default=64,
         metavar="N",
         help="input hidden dimension (default: 256)",
     )
     parser.add_argument(
         "--hidden-out",
         type=int,
-        default=512,
+        default=64,
         metavar="N",
         help="output hidden dimension (default: 512)",
     )

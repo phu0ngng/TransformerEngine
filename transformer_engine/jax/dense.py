@@ -65,7 +65,7 @@ def dense(
     input_axes: Tuple[str, ...] = None,
     kernel_axes: Tuple[str, ...] = None,
     quantizer_set: QuantizerSet = noop_quantizer_set,
-    cgemm_config_set: tex.CollectiveGemmConfigSet = tex.noop_collective_gemm_config_set,
+    cgemm_config_set: tex.CollectiveGemmConfigSet = tex.noop_cgemm_config_set,
 ):
     """Perform dense layer transformation with optional quantization.
 

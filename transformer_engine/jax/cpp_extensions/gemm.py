@@ -8,7 +8,8 @@ import operator
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import partial, reduce
-from typing import Tuple, Sequence, Union, Enum
+from typing import Tuple, Sequence, Union
+from enum import Enum
 import warnings
 
 import jax
@@ -200,7 +201,6 @@ class CollectiveGemmConfig:
     dtype: jnp.dtype
 
     # Userbuffers bootstrap kwargs
-    # TODO: double check meaning of these values
     num_splits: int
     num_max_streams: int
     comm_cga_size: int
@@ -239,7 +239,7 @@ class CollectiveGemmConfig:
 
         # Update global min/max CUDA stream priority values if not already done
         global CUDA_STREAM_PRIORITY_LOWEST, CUDA_STREAM_PRIORITY_HIGHEST
-        if CUDA_STREAM_PRIORITY_LOWEST is None or CUDA_STREAM_PRIORITY_HIGHEST is None:
+        if CUDA_STREAM_PRIORITY_LOWEST is None or CUDA_STREAM_PRIORITY_HIGHEST is None and not collective_op.is_none:
             (
                 CUDA_STREAM_PRIORITY_LOWEST,
                 CUDA_STREAM_PRIORITY_HIGHEST,
@@ -249,8 +249,11 @@ class CollectiveGemmConfig:
         gemm_priority = gemm_priority or CUDA_STREAM_PRIORITY_LOWEST
         comm_priority = comm_priority or CUDA_STREAM_PRIORITY_HIGHEST
 
+        tp_size = tpsp_axis_size() if not collective_op.is_none else 1
+        dp_size = dp_or_fsdp_axis_size() if not collective_op.is_none else 1
+
         # Set conditional defaults for config options not specified
-        num_splits = num_splits or tpsp_axis_size()
+        num_splits = num_splits or tp_size
         comm_cga_size = comm_cga_size or 1
         num_comm_sm = num_comm_sm or 1
         set_sm_margin = set_sm_margin or False
@@ -261,7 +264,7 @@ class CollectiveGemmConfig:
             buffer_shape = (reduce(operator.mul, buffer_shape[:-1]), buffer_shape[-1])
 
         # Correct buffer shape for DP/FSDP
-        buffer_shape = (buffer_shape[0] // dp_or_fsdp_axis_size(), buffer_shape[1])
+        buffer_shape = (buffer_shape[0] // dp_size, buffer_shape[1])
 
         # Create the communication plan
         if collective_op is CollectiveOp.NONE:
@@ -269,9 +272,9 @@ class CollectiveGemmConfig:
         else:
             plan_id = create_collective_gemm_executor(
                 collective_op.value,
-                buffer_shape.tolist(),
+                list(buffer_shape),
                 jax_dtype_to_te_dtype(dtype),
-                tpsp_axis_size(),
+                tp_size,
                 num_splits=num_splits,
                 num_max_streams=num_max_streams,
                 comm_cga_size=comm_cga_size,
@@ -1155,7 +1158,7 @@ def _te_gemm(
     grad: bool = False,
     use_split_accumulator: bool = get_quantize_config().FP8_2X_ACC_FPROP,
     transpose_batch_sequence: bool = False,
-    cgemm_config: CollectiveGemmConfig = None,
+    cgemm_config: CollectiveGemmConfig = noop_cgemm_config,
 ) -> Tuple[jax.Array, ...]:
 
     # Prepare non-quantized GEMM operands
