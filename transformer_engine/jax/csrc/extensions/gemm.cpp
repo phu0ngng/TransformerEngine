@@ -113,8 +113,8 @@ class CollectiveGemmPlanRegistry {
 
   CommOverlapCore *get_executor(CollectiveGemmConfig cgemm_config) {
     int64_t plan_id = 0;
-    hash_combine(plan_id, static_cast<int>(cgemm_config.collective_op), cgemm_config.buffer_first_dim, cgemm_config.buffer_second_dim,
-                 static_cast<int>(cgemm_config.buffer_dtype), cgemm_config.tp_size, cgemm_config.num_splits, cgemm_config.num_max_streams,
+    hash_combine(plan_id, static_cast<int>(cgemm_config.collective_op), cgemm_config.buffer_first_dim, cgemm_config.buffer_second_dim, cgemm_config.dtype,
+                 cgemm_config.tp_size, cgemm_config.num_splits, cgemm_config.num_max_streams,
                  cgemm_config.gemm_priority, cgemm_config.comm_priority, cgemm_config.num_comm_sm, cgemm_config.use_ce, cgemm_config.aggregate_ag);
 
     // Check if plan already exists
@@ -131,7 +131,7 @@ class CollectiveGemmPlanRegistry {
     std::unique_ptr<CommOverlapCore> executor;
     executor = std::make_unique<CommOverlapP2PBase>(
       buffer_shape,
-      cgemm_config.buffer_dtype,
+      static_cast<transformer_engine::DType>(cgemm_config.dtype),
       cgemm_config.tp_size,
       get_nvte_collective_op(cgemm_config.collective_op),
       cgemm_config.num_max_streams,

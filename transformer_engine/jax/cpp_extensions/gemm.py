@@ -191,7 +191,11 @@ class CollectiveGemmConfig:
     collective_op: JAXX_Collective_Op
     buffer_shape: Sequence[int]
     dtype: jnp.dtype
+    num_max_streams: int
     lowering_cgemm_attrs: dict = field(default_factory=dict)
+
+    def __hash__(self):
+        return hash(tuple(self.lowering_cgemm_attrs.items()))
 
     @staticmethod
     def create(
@@ -215,7 +219,6 @@ class CollectiveGemmConfig:
 
         # Set conditional defaults for config options not specified
         num_splits = num_splits or tp_size
-        set_sm_margin = num_comm_sm is not None
         num_comm_sm = num_comm_sm or 0
 
         # Handle buffer shape collapsing
@@ -227,17 +230,18 @@ class CollectiveGemmConfig:
 
         # Create the communication plan
         print(f"Config to create plan_id collective_op{collective_op}, buffer_shape={buffer_shape}, dtype={dtype}, tp_size={tp_size}")
+        import numpy as np
         lowering_cgemm_attrs = {
-            "collective_op": collective_op.value,
-            "buffer_first_dim": buffer_shape[0],
-            "buffer_second_dim": buffer_shape[1],
-            "dtype": jax_dtype_to_te_dtype(dtype),
-            "tp_size": tp_size,
-            "num_splits": num_splits,
-            "num_max_streams": num_max_streams,
-            "gemm_priority": gemm_priority,
-            "comm_priority": comm_priority,
-            "num_comm_sm": num_comm_sm,
+            "collective_op": int(collective_op.value),
+            "buffer_first_dim": int(buffer_shape[0]),
+            "buffer_second_dim": int(buffer_shape[1]),
+            "dtype": int(jax_dtype_to_te_dtype(dtype)),
+            "tp_size": int(tp_size),
+            "num_splits": int(num_splits),
+            "num_max_streams": int(num_max_streams),
+            "gemm_priority": int(gemm_priority),
+            "comm_priority": int(comm_priority),
+            "num_comm_sm": int(num_comm_sm),
             "use_ce": use_ce,
             "aggregate_ag": aggregate_ag,
         }
@@ -247,6 +251,7 @@ class CollectiveGemmConfig:
             collective_op=collective_op,
             buffer_shape=buffer_shape,
             dtype=dtype,
+            num_max_streams=num_max_streams,
             lowering_cgemm_attrs=lowering_cgemm_attrs,
         )
 
@@ -285,10 +290,10 @@ class CollectiveGemmConfigSet:
         forward_collective_op: CollectiveOp,
         num_splits: int = None,
         num_max_streams: int = 3,
-        gemm_priority: int = None,
-        comm_priority: int = None,
+        gemm_priority: int = 0,
+        comm_priority: int = 0,
         num_comm_sm: int = None,
-        use_ce: bool = None,
+        use_ce: bool = True,
         aggregate_ag: bool = False,
     ):
         lhs_non_cdims = get_non_contracting_dims(len(lhs_shape), contracting_dims[0])
@@ -556,8 +561,8 @@ class GemmPrimitive(BasePrimitive):
         args = (lhs, lhs_scale_inv, rhs, rhs_scale_inv, bias, gelu_input)
         kwargs = {
             "scaling_mode": int(scaling_mode.value),
-            "lhs_axis_boundary": max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims),
-            "rhs_axis_boundary": min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
+            "lhs_axis_boundary": int(max(lhs_cdims) + 1 if lhs_transposed else min(lhs_cdims)),
+            "rhs_axis_boundary": int(min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1),
             "lhs_transposed": lhs_transposed,
             "rhs_transposed": rhs_transposed,
             "fuse_bias": fuse_bias,
@@ -575,7 +580,8 @@ class GemmPrimitive(BasePrimitive):
         return jax.ffi.ffi_lowering(
             GemmPrimitive.name,
             operand_output_aliases=operand_output_aliases,
-        )(ctx, *args, **kwargs, cgem_config=cgemm_config.lowering_cgemm_attrs)
+    )(ctx, *args, **kwargs, cgemm_config=cgemm_config.lowering_cgemm_attrs)
+
 
     @staticmethod
     def impl(
