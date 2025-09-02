@@ -55,9 +55,9 @@ __all__ = [
     "gemm",
     "grouped_gemm",
     "gemm_uses_jax_dot",
-    # "sanitize_dims",
-    # "get_non_contracting_dims",
-    # "transpose_dims",
+    "sanitize_dims",
+    "get_non_contracting_dims",
+    "transpose_dims",
 ]
 
 
