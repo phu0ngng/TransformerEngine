@@ -114,13 +114,13 @@ def run_gemm_tests(args, mesh=None):
         bias_sharded = jax.device_put(bias, bias_sharding)
 
         ref_output = tex.gemm(x, weight, bias=bias, contracting_dims=((2,), (0,)))
-        sharded_output = tex.gemm(
-            x_sharded,
-            weight_sharded,
-            bias=bias_sharded,
-            contracting_dims=((2,), (0,)),
-            cgemm_config=cgemm_config,
+        jitted_cgemm = jax.jit(
+            lambda x, w, b: tex.gemm(
+                x, w, bias=b, contracting_dims=((2,), (0,)), cgemm_config=cgemm_config
+            ),
+            in_shardings=(x_sharding, weight_sharding, bias_sharding),
         )
+        sharded_output = jitted_cgemm(x_sharded, weight_sharded, bias_sharded)
         gathered_output = jax.lax.with_sharding_constraint(
             sharded_output, NamedSharding(mesh, PartitionSpec(None))
         )
