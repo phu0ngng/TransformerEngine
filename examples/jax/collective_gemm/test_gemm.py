@@ -126,7 +126,8 @@ def run_gemm_tests(args, mesh=None):
         )
         jax.block_until_ready(gathered_output)
 
-    return ref_output, gathered_output
+    if args.enable_result_check and myrank == 0:
+        assert_allclose(ref_output, gathered_output)
 
 
 def gemm_parser(args):
@@ -175,9 +176,15 @@ def gemm_parser(args):
     )
     parser.add_argument(
         "--enable-data-parallel",
-        type=bool,
+        action="store_true",
         default=False,
         help="Enable data parallel (default: False)",
+    )
+    parser.add_argument(
+        "--enable-result-check",
+        action="store_true",
+        default=False,
+        help="Enable result check (default: False)",
     )
     return parser.parse_args(args)
 
@@ -195,6 +202,7 @@ class TestCollectiveGemm(unittest.TestCase):
         # Create mesh once for all tests
         self.mesh = _create_mesh(self.args)
         jax.sharding.set_mesh(self.mesh)
+        self.args.enable_result_check = True
 
     def tearDown(self):
         """Clean up after each test."""
@@ -204,31 +212,23 @@ class TestCollectiveGemm(unittest.TestCase):
     def test_te_bf16_all_gather(self):
         """Test Collective GEMM with AllGather"""
         self.args.collective_type = "all_gather"
-        ref_output, output = run_gemm_tests(self.args, self.mesh)
-        if myrank == 0:
-            assert_allclose(ref_output, output)
+        run_gemm_tests(self.args, self.mesh)
 
     def test_te_bf16_reduce_scatter(self):
         """Test Collective GEMM with ReduceScatter"""
         self.args.collective_type = "reduce_scatter"
-        ref_output, output = run_gemm_tests(self.args, self.mesh)
-        if myrank == 0:
-            assert_allclose(ref_output, output)
+        run_gemm_tests(self.args, self.mesh)
 
     def test_te_bf16_all_gather_with_dp(self):
         """Test Collective GEMM with AllGather"""
         self.args.enable_data_parallel = True
-        ref_output, output = run_gemm_tests(self.args, self.mesh)
-        if myrank == 0:
-            assert_allclose(ref_output, output)
+        run_gemm_tests(self.args, self.mesh)
 
     def test_te_bf16_reduce_scatter_with_dp(self):
         """Test Collective GEMM with ReduceScatter"""
         self.args.enable_data_parallel = True
         self.args.collective_type = "reduce_scatter"
-        ref_output, output = run_gemm_tests(self.args, self.mesh)
-        if myrank == 0:
-            assert_allclose(ref_output, output)
+        run_gemm_tests(self.args, self.mesh)
 
 
 if __name__ == "__main__":

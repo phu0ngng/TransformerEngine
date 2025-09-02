@@ -1,205 +1,241 @@
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""Comm+GEMM Overlap with TE/JAX"""
-import os
+"""Collective Dense Gradient test on multi-GPU with tensor parallelism"""
 import argparse
-from functools import partial
+import unittest
+import os
 
 from mpi4py import MPI
 
-import numpy as np
-
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.experimental import mesh_utils
+from jax.sharding import PartitionSpec, NamedSharding
 
 from common import assert_allclose
-import transformer_engine.jax as te
 
-# from transformer_engine.common import recipe
-from transformer_engine.jax.sharding import (
-    MeshResource,
-    global_shard_guard,
-)
-from transformer_engine.jax.dense import dense
-from transformer_engine.jax.cpp_extensions import (
-    CommOverlapHelper,
-    CommOverlapHelperSet,
-)
-import transformer_engine_jax as tex
+import transformer_engine.jax.cpp_extensions as tex
 
+# from transformer_engine.jax.quantize import is_fp8_available, ScalingMode, Quantizer, QuantizeConfig, fp8_autocast
+from transformer_engine.jax.quantize import fp8_autocast
+from transformer_engine.jax.cpp_extensions.gemm import CollectiveGemmConfigSet, CollectiveOp
+from transformer_engine.jax.sharding import MeshResource
+
+DEVICE_DP_AXIS = "data"
+DEVICE_TPSP_AXIS = "tensor_sequence"
+PARAMS_KEY = "params"
 
 jax.clear_caches()
+jax.config.update("jax_use_shardy_partitioner", False)  # CollectiveGEMM does not work with Shardy yet
 
-# This script needs to be launched via `mpirun` with 1 process per GPU
+# FOR NOW: This script needs to be launched via `mpirun` with 1 process per GPU
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 myrank = MPI.COMM_WORLD.Get_rank()
 numranks = MPI.COMM_WORLD.Get_size()
 jax.distributed.initialize(cluster_detection_method="mpi4py")
-
-# TODO: do we really need this ?
 assert (
     jax.local_device_count() == 1
 ), f"[{myrank}|{numranks}] Expected 1 GPU per process, found {jax.local_device_count()}"
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--dp", type=int, default=1)
-parser.add_argument("--fsdp", type=int, default=1)
-parser.add_argument("--tp", type=int, default=1)
-parser.add_argument("--batch-size", type=int, default=2)
-parser.add_argument("--seq-length", type=int, default=8192)
-parser.add_argument("--hidden-in", type=int, default=16384)
-parser.add_argument("--hidden-out", type=int, default=53248)
-parser.add_argument("--forward-collective-op", type=str.upper, default="AG", choices=["AG", "RS"])
-# parser.add_argument("--fp8-recipe", type=str.lower, default=None,
-#                     choices=["fp8_currentscaling", "fp8_delayedscaling", "mxfp8"],
-#                     )
-# TODO: remove these two
-parser.add_argument("--seed", type=int, default=42)
-args = parser.parse_args()
+def _get_operand_sharding(mesh, is_with_dp=False):
 
-assert (
-    args.dp == 1 or args.fsdp == 1
-), f"DP and FSDP should not be used at the same time! Got DP={args.dp} FSDP={args.fsdp}"
-n_gpus = args.dp * args.fsdp * args.tp
-assert n_gpus == numranks, f"We need {n_gpus} processes for {n_gpus} GPUs, got {numranks}!"
+    if is_with_dp:
+        x_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS, None))
+        weight_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS))
+        bias_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS))
+    else:
+        x_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS, None))
+        weight_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS))
+        bias_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS))
 
-# Declare inputs
-dtype = jnp.bfloat16
-input_shape = (args.batch_size, args.seq_length, args.hidden_in)
-kernel_shape = (args.hidden_in, args.hidden_out)
-bias_shape = (args.hidden_out,)
+    return x_sharding, weight_sharding, bias_sharding
 
-rng = jax.random.PRNGKey(args.seed)
-rng, params_rng = jax.random.split(rng)
-params_rng, kernel_rng = jax.random.split(params_rng)
-params_rng, bias_rng = jax.random.split(params_rng)
-x = jax.random.normal(rng, input_shape, dtype=jnp.bfloat16)
-kernel = jax.random.normal(kernel_rng, kernel_shape, dtype=jnp.bfloat16)
-bias = jax.random.normal(bias_rng, bias_shape, dtype=jnp.bfloat16)
 
-if myrank == 0:
-    print(
-        f"[{myrank}|{numranks}]\n"
-        + f"  x:        {x.shape}\n"
-        + f"  kernel: {kernel.shape}\n"
-        + f"  bias:   {bias.shape}\n"
+def _create_mesh(args):
+    """Create mesh configuration with proper validation."""
+    num_gpu = jax.device_count()
+    assert num_gpu == numranks, f"Requires {num_gpu} processes for {num_gpu} GPUs, got {numranks}!"
+    num_gpu_dp = 2 if args.enable_data_parallel else 1
+    assert (
+        num_gpu > 1 and num_gpu % num_gpu_dp == 0
+    ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
+    
+    num_gpu_tp = num_gpu // num_gpu_dp
+    assert (
+        num_gpu_tp > 1
+    ), f"Number of GPUs for tensor parallelism ({num_gpu_tp}) must be > 1"
+    print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")
+    
+    device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
+    mesh = jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS))
+    jax.sharding.set_mesh(mesh)
+
+    return mesh
+
+def _ref_value_and_grad_dense(x, weight, bias):
+    mean_fn = lambda x, weight, bias: jnp.mean(tex.dense(x, weight, bias=bias, contracting_dims=((2,), (0,))))
+    return jax.jit(jax.value_and_grad(mean_fn, (0, 1, 2)))(x, weight, bias)
+
+def _primitive_value_and_grad_dense(x, weight, bias, cgemm_config_set):
+    mean_fn = lambda x, weight, bias, cgemm_config_set: jnp.mean(tex.dense(x, weight, bias=bias, contracting_dims=((2,), (0,)), cgemm_config_set=cgemm_config_set))
+    return jax.jit(jax.value_and_grad(mean_fn, (0, 1, 2), static_argnums=(3,)))(x, weight, bias, cgemm_config_set)
+
+
+def run_dense_grad_tests(args, mesh=None):
+    """Execute Dense Gradient tests."""
+    print(args)
+    # Collective GEMM requires Shardy partitioner to be disabled
+    jax.config.update("jax_use_shardy_partitioner", False)
+
+    # Use provided mesh and shardings if available, otherwise create new ones
+    if mesh is None:
+        mesh = _create_mesh(args)
+    else:
+        # Use provided mesh and shardings
+        print(f"Using provided mesh: {mesh}")
+
+    # Create test data
+    rng = jax.random.PRNGKey(0)
+    rng, x_rng, weight_rng, bias_rng = jax.random.split(rng, 4)
+    x = jax.random.normal(
+        x_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16
     )
+    weight = jax.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16)
+    bias = jax.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
 
-fp8_recipe = None  # For now
+    with mesh, fp8_autocast(
+        enabled=False,
+        fp8_recipe=None,
+        mesh_resource=MeshResource(dp_resource=DEVICE_DP_AXIS, tpsp_resource=DEVICE_TPSP_AXIS),
+    ):
+        print(f"Device mesh: {mesh}")
 
+        # Collective GEMM configs need to be created under the mesh_resource context
+        collective_op = CollectiveOp.ALL_GATHER if args.collective_type == "all_gather" else CollectiveOp.REDUCE_SCATTER
+        cgemm_config_set = CollectiveGemmConfigSet.create(forward_collective_op=collective_op)
 
-# Single GPU evaluation
-def eval_ref(x_, kernel_, bias_):
-    output_ = dense(x_, kernel_, bias_, contracting_dims=((x_.ndim - 1,), (0,)))
-    return jnp.mean(output_)
+        x_sharding, weight_sharding, bias_sharding = _get_operand_sharding(mesh, is_with_dp=args.enable_data_parallel)
+        x_sharded = jax.device_put(x, x_sharding)
+        weight_sharded = jax.device_put(weight, weight_sharding)
+        bias_sharded = jax.device_put(bias, bias_sharding)
 
-
-with te.fp8_autocast(enabled=fp8_recipe is not None, fp8_recipe=fp8_recipe):
-    ref_output, ref_grads = jax.jit(jax.value_and_grad(eval_ref, range(3)))(x, kernel, bias)
-
-# Device mesh and logical axis resources
-FSDP_AXIS = "fsdp"
-DP_AXIS = "data"
-TP_AXIS = "tensor_sequence"
-
-mesh_shape = {
-    TP_AXIS: args.tp,
-    DP_AXIS: args.dp,
-    FSDP_AXIS: args.fsdp,
-}
-
-mesh_resource = MeshResource(
-    dp_resource=None if args.dp == 1 else DP_AXIS,
-    fsdp_resource=None if args.fsdp == 1 else FSDP_AXIS,
-    tp_resource=None if args.tp == 1 else TP_AXIS,
-)
-devices = mesh_utils.create_device_mesh((n_gpus,), devices=jax.devices()[:n_gpus])
-mesh = Mesh(np.array(devices).reshape(tuple(mesh_shape.values())), tuple(mesh_shape.keys()))
-if myrank == 0:
-    print(f"[{myrank}|{numranks}] Device mesh: {mesh}\n")
-
-if args.comm_type == "AG":
-    input_specs = [(FSDP_AXIS, DP_AXIS), TP_AXIS, None]
-    kernel_specs = [FSDP_AXIS, TP_AXIS]
-    bias_specs = [
-        TP_AXIS,
-    ]
-else:  # "RS"
-    input_specs = [(FSDP_AXIS, DP_AXIS), None, TP_AXIS]
-    kernel_specs = [TP_AXIS, FSDP_AXIS]
-    bias_specs = [
-        None,
-    ]
-
-
-# Multi GPU evaluation
-def eval(x_, kernel_, bias_, comm_overlaps_):
-    _output = dense(
-        x_,
-        kernel_,
-        bias_,
-        contracting_dims=((x_.ndim - 1,), (0,)),
-        comm_overlaps=comm_overlaps_,
-    )
-    return jnp.mean(_output)
-
-
-with (
-    mesh,
-    global_shard_guard(mesh_resource),
-    te.fp8_autocast(
-        enabled=fp8_recipe is not None,
-        fp8_recipe=fp8_recipe,
-        mesh_resource=mesh_resource,
-    ),
-):
-    # Comm+GEMM overlap configs
-    # TODO: make a CommOverlapHelperSet.create()
-    buffer_shape = list(input_shape).copy()
-    buffer_shape[0] = buffer_shape[0] // (args.dp * args.fsdp)
-    fprop_1_overlap = CommOverlapHelper(
-        comm_type=(tex.CommOverlapType.RS if args.comm_type == "RS" else tex.CommOverlapType.AG),
-        method=tex.CommOverlapMethod.RING_EXCHANGE,
-        buffer_shape=buffer_shape,
-    )
-    comm_overlaps = CommOverlapHelperSet(fprop=fprop_1_overlap)
-
-    x_sharding = NamedSharding(mesh, PartitionSpec(*input_specs))
-    kernel_sharding = NamedSharding(mesh, PartitionSpec(*kernel_specs))
-    bias_sharding = NamedSharding(mesh, PartitionSpec(*bias_specs))
-    x = jax.device_put(x, x_sharding)
-    kernel = jax.device_put(kernel, kernel_sharding)
-    bias = jax.device_put(bias, bias_sharding)
-
-    input_shardings = (x_sharding, kernel_sharding, bias_sharding)
-    output_shardings = (NamedSharding(mesh, PartitionSpec()), input_shardings)
-
-    # TODO
-    jitted_value_and_grad = jax.jit(
-        jax.value_and_grad(eval, range(3)),
-        static_argnums=(3,),
-        in_shardings=input_shardings,
-        out_shardings=output_shardings,
-    )
-
-    output, grads = jitted_value_and_grad(x, kernel, bias, comm_overlaps)
-
-assertion_dtype = jnp.bfloat16
-assert_allclose(output, ref_output, dtype=assertion_dtype)
-
-labels = ("dX", "dKernel", "dBias")
-for i, (ref, target) in enumerate(zip(ref_grads, grads)):
-    if myrank == 0:
-        print(
-            f"[{myrank}|{numranks}] {labels[i]} : {target.shape}\n"
-            + f"  Sharding: {target.sharding.spec}\n"
+        ref_output, ref_grads = _ref_value_and_grad_dense(x, weight, bias)
+        sharded_output, sharded_grads = _primitive_value_and_grad_dense(x_sharded, weight_sharded, bias_sharded, cgemm_config_set)
+        gathered_output = jax.lax.with_sharding_constraint(
+            sharded_output, NamedSharding(mesh, PartitionSpec(None))
         )
-    gathered = jax.lax.with_sharding_constraint(target, NamedSharding(mesh, PartitionSpec(None)))
-    jax.block_until_ready(gathered)
-    assert_allclose(ref, gathered, dtype=assertion_dtype)
+        jax.block_until_ready(gathered_output)
+        gathered_grads = []
+        for grad in sharded_grads:
+            gathered_grads.append(jax.lax.with_sharding_constraint(grad, NamedSharding(mesh, PartitionSpec(None))))
+        jax.block_until_ready(gathered_grads)
+    
+    if args.enable_result_check and myrank == 0:
+        assert_allclose(ref_output, gathered_output)
+        for ref_grad, gathered_grad in zip(ref_grads, gathered_grads):
+            assert_allclose(ref_grad, gathered_grad)
 
-tex.destroy_all_comm_overlap_buffers()
+
+def dense_grad_parser(args):
+    """Test settings."""
+    parser = argparse.ArgumentParser(description="JAX Collective Dense Gradient Test")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        metavar="N",
+        help="input batch size (default: 4)",
+    )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=2048,
+        metavar="N",
+        help="sequence length (default: 2048)",
+    )
+    parser.add_argument(
+        "--hidden-in",
+        type=int,
+        default=1024,
+        metavar="N",
+        help="input hidden dimension (default: 1024)",
+    )
+    parser.add_argument(
+        "--hidden-out",
+        type=int,
+        default=2048,
+        metavar="N",
+        help="output hidden dimension (default: 2048)",
+    )
+    parser.add_argument(
+        "--collective-type",
+        type=str,
+        default="all_gather",
+        choices=["all_gather", "reduce_scatter"],
+        help="Collective operation type (default: all_gather)",
+    )
+    parser.add_argument(
+        "--fp8-recipe",
+        type=str,
+        default="DelayedScaling",
+        help="FP8 recipe (default: DelayedScaling)",
+    )
+    parser.add_argument(
+        "--enable-data-parallel",
+        action="store_true",
+        default=False,
+        help="Enable data parallel (default: False)",
+    )
+    parser.add_argument(
+        "--enable-result-check",
+        action="store_true",
+        default=False,
+        help="Enable result check (default: False)",
+    )
+    return parser.parse_args(args)
+
+
+class TestCollectiveDenseGradient(unittest.TestCase):
+    """Collective Dense Gradient unittests"""
+
+    # is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
+    # is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+
+    def setUp(self):
+        """Set up test environment for pytest execution."""
+        # Create mesh once for all tests 
+        self.mesh = _create_mesh(self.args)
+        jax.sharding.set_mesh(self.mesh)
+        self.args.enable_result_check = True
+
+    def tearDown(self):
+        """Clean up after each test."""
+        # Clear the mesh to prevent interference between tests
+        jax.sharding.set_mesh(None)
+
+    def test_te_bf16_all_gather(self):
+        """Test Collective Dense Gradient with AllGather"""
+        self.args.collective_type = "all_gather"
+        run_dense_grad_tests(self.args, self.mesh)
+
+    def test_te_bf16_reduce_scatter(self):
+        """Test Collective Dense Gradient with ReduceScatter"""
+        self.args.collective_type = "reduce_scatter"
+        run_dense_grad_tests(self.args, self.mesh)
+
+    def test_te_bf16_all_gather_with_dp(self):
+        """Test Collective Dense Gradient with AllGather"""
+        self.args.enable_data_parallel = True
+        run_dense_grad_tests(self.args, self.mesh)
+
+    def test_te_bf16_reduce_scatter_with_dp(self):
+        """Test Collective Dense Gradient with ReduceScatter"""
+        self.args.enable_data_parallel = True
+        self.args.collective_type = "reduce_scatter"  
+        run_dense_grad_tests(self.args, self.mesh)
+
+
+if __name__ == "__main__":
+    run_dense_grad_tests(dense_grad_parser(None), mesh=None)
