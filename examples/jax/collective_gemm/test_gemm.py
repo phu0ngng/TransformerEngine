@@ -51,24 +51,6 @@ def _setup_mesh_and_sharding(num_gpu_dp, num_gpu_tp):
     return mesh, x_sharding, weight_sharding, bias_sharding
 
 
-def _create_cgemm_configs(x, weight, collective_type):
-    if collective_type == "all_gather":
-        collective_op = CollectiveOp.ALL_GATHER
-        buffer_shape = x.shape
-    elif collective_type == "reduce_scatter":
-        collective_op = CollectiveOp.REDUCE_SCATTER
-        buffer_shape = (*x.shape[:-1], *weight.shape[1:])
-    else:
-        raise ValueError(f"Invalid collective type: {collective_type}")
-
-    cgemm_config = CollectiveGemmConfig.create(
-        buffer_shape=buffer_shape,
-        dtype=x.dtype,
-        collective_op=collective_op,
-    )
-    return cgemm_config
-
-
 def run_gemm_tests(args):
     """Execute GEMM tests."""
     print(args)
@@ -112,16 +94,18 @@ def run_gemm_tests(args):
         print(f"Device mesh: {mesh}")
 
         # Collective GEMM configs need to be created under the mesh_resource context
-        cgemm_config = _create_cgemm_configs(x, weight, args.collective_type)
+        collective_op = CollectiveOp.ALL_GATHER if args.collective_type == "all_gather" else CollectiveOp.REDUCE_SCATTER
+        cgemm_config = CollectiveGemmConfig.create(collective_op=collective_op)
 
         x_sharded = jax.device_put(x, x_sharding)
         weight_sharded = jax.device_put(weight, weight_sharding)
-        # bias_sharded = jax.device_put(bias, bias_sharding)
+        bias_sharded = jax.device_put(bias, bias_sharding)
 
-        ref_output = tex.gemm(x, weight, contracting_dims=((2,), (0,)))
+        ref_output = tex.gemm(x, weight, bias=bias, contracting_dims=((2,), (0,)))
         sharded_output = tex.gemm(
             x_sharded,
             weight_sharded,
+            bias=bias,
             contracting_dims=((2,), (0,)),
             cgemm_config=cgemm_config,
         )
@@ -141,28 +125,28 @@ def gemm_parser(args):
         type=int,
         default=4,
         metavar="N",
-        help="input batch size (default: 32)",
+        help="input batch size (default: 4)",
     )
     parser.add_argument(
         "--seq-len",
         type=int,
-        default=1024,
+        default=2048,
         metavar="N",
-        help="sequence length (default: 128)",
+        help="sequence length (default: 2048)",
     )
     parser.add_argument(
         "--hidden-in",
         type=int,
-        default=512,
+        default=1024,
         metavar="N",
-        help="input hidden dimension (default: 256)",
+        help="input hidden dimension (default: 1024)",
     )
     parser.add_argument(
         "--hidden-out",
         type=int,
-        default=256,
+        default=2048,
         metavar="N",
-        help="output hidden dimension (default: 512)",
+        help="output hidden dimension (default: 2048)",
     )
     parser.add_argument(
         "--collective-type",
@@ -179,36 +163,10 @@ def gemm_parser(args):
     )
     parser.add_argument(
         "--enable-data-parallel",
-        action="store_true",
+        type=bool,
         default=False,
         help="Enable data parallel (default: False)",
     )
-    parser.add_argument(
-        "--num-gpu-dp",
-        type=int,
-        default=2,
-        help="Number of data parallel GPUs (default: 2)",
-    )
-    parser.add_argument(
-        "--num-gpu-tp",
-        type=int,
-        default=2,
-        help="Number of tensor parallel GPUs (default: 2)",
-    )
-    parser.add_argument(
-        "--dtype",
-        type=str,
-        default="bfloat16",
-        choices=["bfloat16", "float16", "float32"],
-        help="Data type for tensors (default: bfloat16)",
-    )
-    parser.add_argument(
-        "--validate",
-        action="store_true",
-        default=True,
-        help="Validate outputs (default: True)",
-    )
-
     return parser.parse_args(args)
 
 
@@ -230,6 +188,21 @@ class TestCollectiveGemm(unittest.TestCase):
 
     def test_te_bf16_reduce_scatter(self):
         """Test Collective GEMM with ReduceScatter"""
+        self.args.collective_type = "reduce_scatter"  # Modify existing args
+        ref_output, output = run_gemm_tests(self.args)
+        if myrank == 0:
+            assert_allclose(ref_output, output)
+
+    def test_te_bf16_all_gather_with_dp(self):
+        """Test Collective GEMM with AllGather"""
+        self.args.enable_data_parallel = True
+        ref_output, output = run_gemm_tests(self.args)
+        if myrank == 0:
+            assert_allclose(ref_output, output)
+
+    def test_te_bf16_reduce_scatter_with_dp(self):
+        """Test Collective GEMM with ReduceScatter"""
+        self.args.enable_data_parallel = True
         self.args.collective_type = "reduce_scatter"  # Modify existing args
         ref_output, output = run_gemm_tests(self.args)
         if myrank == 0:

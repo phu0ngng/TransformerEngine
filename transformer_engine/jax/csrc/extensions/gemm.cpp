@@ -111,10 +111,10 @@ class CollectiveGemmPlanRegistry {
     return instance;
   }
 
-  CommOverlapCore *get_executor(CollectiveGemmConfig cgemm_config) {
+  CommOverlapCore *get_executor(std::vector<size_t> buffer_shape, DType dtype, CollectiveGemmConfig cgemm_config) {
     int64_t plan_id = 0;
-    hash_combine(plan_id, static_cast<int>(cgemm_config.collective_op), cgemm_config.buffer_first_dim, cgemm_config.buffer_second_dim, cgemm_config.dtype,
-                 cgemm_config.tp_size, cgemm_config.num_splits, cgemm_config.num_max_streams,
+    hash_combine(plan_id,  buffer_shape[0], buffer_shape[1], static_cast<size_t>(dtype),
+                 static_cast<int>(cgemm_config.collective_op), cgemm_config.tp_size, cgemm_config.num_splits, cgemm_config.num_max_streams,
                  cgemm_config.gemm_priority, cgemm_config.comm_priority, cgemm_config.num_comm_sm, cgemm_config.use_ce, cgemm_config.aggregate_ag);
 
     // Check if plan already exists
@@ -124,14 +124,10 @@ class CollectiveGemmPlanRegistry {
     }
 
     // Create new plan
-    auto buffer_shape = std::vector<size_t>{
-      static_cast<size_t>(cgemm_config.buffer_first_dim),
-      static_cast<size_t>(cgemm_config.buffer_second_dim)
-    };
     std::unique_ptr<CommOverlapCore> executor;
     executor = std::make_unique<CommOverlapP2PBase>(
       buffer_shape,
-      static_cast<transformer_engine::DType>(cgemm_config.dtype),
+      dtype,
       cgemm_config.tp_size,
       get_nvte_collective_op(cgemm_config.collective_op),
       cgemm_config.num_max_streams,
@@ -231,7 +227,18 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                      rhs_transposed, lhs_transposed, grad, workspace_.data(), false,
                      use_split_accumulator, num_math_sm, stream);
   } else {
-    auto executor = CollectiveGemmPlanRegistry::getInstance().get_executor(cgemm_config);
+    std::vector<size_t> buffer_shape {0, 0};
+    DType buffer_dtype;
+    if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER){
+      buffer_shape[0] = lhs_shape[0] * cgemm_config.tp_size;
+      buffer_shape[1] = lhs_shape[1];
+      buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
+    } else if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER){
+      buffer_shape[0] = out_shape[0] * cgemm_config.tp_size;
+      buffer_shape[1] = out_shape[1];
+      buffer_dtype = out_dtype;
+    }
+    auto executor = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype, cgemm_config);
     auto tp_size = executor->get_tp_size();
     if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
       auto out_ = TensorWrapper(executor->get_ubuf_dptr(), out_shape, out_dtype);

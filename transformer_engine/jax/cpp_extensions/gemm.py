@@ -40,11 +40,10 @@ from ..quantize import (
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
 )
-from .misc import get_padded_spec, jax_dtype_to_te_dtype
+from .misc import get_padded_spec
 from ..sharding import (
     global_mesh_resource,
     tpsp_axis_size,
-    dp_or_fsdp_axis_size,
 )
 
 
@@ -189,8 +188,6 @@ class CollectiveGemmConfig:
     Configuration object that carries collective GEMM configuration
     """
     collective_op: JAXX_Collective_Op
-    buffer_shape: Sequence[int]
-    dtype: jnp.dtype
     num_max_streams: int
     lowering_cgemm_attrs: dict = field(default_factory=dict)
 
@@ -199,8 +196,6 @@ class CollectiveGemmConfig:
 
     @staticmethod
     def create(
-        buffer_shape: Sequence[int],
-        dtype: jnp.dtype,
         collective_op: JAXX_Collective_Op,
         num_splits: int = None,
         num_max_streams: int = 3,       # Why 3?
@@ -212,30 +207,15 @@ class CollectiveGemmConfig:
     ):
         """Create a CollectiveGemmConfig with all values properly set and initialize the Userbuffer"""
 
-        assert len(buffer_shape) >= 2, f"{buffer_shape} is not a valid buffer shape."
-
         tp_size = tpsp_axis_size() if not collective_op.is_none else 1
-        dp_size = dp_or_fsdp_axis_size() if not collective_op.is_none else 1
 
         # Set conditional defaults for config options not specified
         num_splits = num_splits or tp_size
         num_comm_sm = num_comm_sm or 0
 
-        # Handle buffer shape collapsing
-        if buffer_shape is not None and len(buffer_shape) > 2:
-            buffer_shape = (reduce(operator.mul, buffer_shape[:-1]), buffer_shape[-1])
-
-        # Correct buffer shape for DP/FSDP
-        buffer_shape = (buffer_shape[0] // dp_size, buffer_shape[1])
-
         # Create the communication plan
-        print(f"Config to create plan_id collective_op{collective_op}, buffer_shape={buffer_shape}, dtype={dtype}, tp_size={tp_size}")
-        import numpy as np
         lowering_cgemm_attrs = {
             "collective_op": int(collective_op.value),
-            "buffer_first_dim": int(buffer_shape[0]),
-            "buffer_second_dim": int(buffer_shape[1]),
-            "dtype": int(jax_dtype_to_te_dtype(dtype)),
             "tp_size": int(tp_size),
             "num_splits": int(num_splits),
             "num_max_streams": int(num_max_streams),
@@ -249,8 +229,6 @@ class CollectiveGemmConfig:
         # Create the instance
         instance = CollectiveGemmConfig(
             collective_op=collective_op,
-            buffer_shape=buffer_shape,
-            dtype=dtype,
             num_max_streams=num_max_streams,
             lowering_cgemm_attrs=lowering_cgemm_attrs,
         )
@@ -260,9 +238,6 @@ class CollectiveGemmConfig:
     def __post_init__(self):
         """Validate the configuration after initialization."""
         if not self.collective_op.is_none:
-            assert (
-                self.buffer_shape is not None and len(self.buffer_shape) == 2
-            ), f"{self.buffer_shape} is not a valid buffer shape."
             assert tpsp_axis_size() > 1, (
                 "Communication + GEMM overlap requires a valid TP axis size. Got TP axis size"
                 f" {tpsp_axis_size()}."
@@ -283,10 +258,6 @@ class CollectiveGemmConfigSet:
 
     @staticmethod
     def create(
-        lhs_shape: Sequence[int],
-        rhs_shape: Sequence[int],
-        contracting_dims: Tuple[Sequence[int], Sequence[int]],
-        dtype: jnp.dtype,
         forward_collective_op: CollectiveOp,
         num_splits: int = None,
         num_max_streams: int = 3,
@@ -296,26 +267,14 @@ class CollectiveGemmConfigSet:
         use_ce: bool = True,
         aggregate_ag: bool = False,
     ):
-        lhs_non_cdims = get_non_contracting_dims(len(lhs_shape), contracting_dims[0])
-        rhs_non_cdims = get_non_contracting_dims(len(rhs_shape), contracting_dims[1])
-        output_shape = (
-            *[lhs_shape[i] for i in lhs_non_cdims],
-            *[rhs_shape[i] for i in rhs_non_cdims],
-        )
-
         if forward_collective_op.is_all_gather:
-            buffer_shape = lhs_shape
             backward_collective_op = CollectiveOp.REDUCE_SCATTER
         elif forward_collective_op.is_reduce_scatter:
-            buffer_shape = output_shape
             backward_collective_op = CollectiveOp.ALL_GATHER
         else:
-            buffer_shape = (0, 0)
             backward_collective_op = CollectiveOp.NONE
 
         forward = CollectiveGemmConfig.create(
-            buffer_shape,
-            dtype,
             forward_collective_op,
             num_splits,
             num_max_streams,
@@ -327,8 +286,6 @@ class CollectiveGemmConfigSet:
         )
 
         backward = CollectiveGemmConfig.create(
-            buffer_shape,
-            dtype,
             backward_collective_op,
             num_splits,
             num_max_streams,
@@ -341,19 +298,9 @@ class CollectiveGemmConfigSet:
         return CollectiveGemmConfigSet(forward=forward, backward=backward)
 
 
-noop_cgemm_config = CollectiveGemmConfig.create(
-    buffer_shape=(0, 0),
-    dtype=jnp.bfloat16,
-    collective_op=CollectiveOp.NONE,
-)
+noop_cgemm_config = CollectiveGemmConfig.create(collective_op=CollectiveOp.NONE)
 
-noop_cgemm_config_set = CollectiveGemmConfigSet.create(
-    lhs_shape=(0, 0),
-    rhs_shape=(0, 0),
-    contracting_dims=((), ()),
-    dtype=jnp.bfloat16,
-    forward_collective_op=CollectiveOp.NONE,
-)
+noop_cgemm_config_set = CollectiveGemmConfigSet.create(forward_collective_op=CollectiveOp.NONE)
 
 
 class GemmPrimitive(BasePrimitive):
