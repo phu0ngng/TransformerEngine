@@ -303,6 +303,20 @@ noop_cgemm_config = CollectiveGemmConfig.create(collective_op=CollectiveOp.NONE)
 noop_cgemm_config_set = CollectiveGemmConfigSet.create(forward_collective_op=CollectiveOp.NONE)
 
 
+@partial(jax.jit, static_argnums=(1,))
+def _cgemm_output_reorder(output, sequence_dim):
+    assert sequence_dim >= 0, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+    original_shape = output.shape
+    reshaped = output.reshape(-1,
+                              tpsp_axis_size(),
+                              int(original_shape[sequence_dim] / tpsp_axis_size()),
+                              *original_shape[sequence_dim+1:],
+                              )
+    reordered = reshaped.transpose(1, 0, 2, *range(3, reshaped.ndim))
+    output = reordered.reshape(original_shape)
+    return output
+
+
 class GemmPrimitive(BasePrimitive):
     """
     Primitive for cuBLAS GEMM
@@ -401,9 +415,11 @@ class GemmPrimitive(BasePrimitive):
 
         # Adjust output shape for comm+GEMM overlap
         if not cgemm_config.collective_op.is_none and not is_outer:  # Inner abstract
+            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             overlap_out_shape = list(out_shape).copy()
             if cgemm_config.collective_op.is_all_gather:
-                overlap_out_shape[sequence_dim] *= tpsp_axis_size()
+                overlap_out_shape[1] *= tpsp_axis_size()
+                jax.debug.print("overlap_out_shape {x}", x=overlap_out_shape)
             else:  # RS
                 overlap_out_shape[sequence_dim] = (
                     overlap_out_shape[sequence_dim] // tpsp_axis_size()
@@ -527,8 +543,7 @@ class GemmPrimitive(BasePrimitive):
         return jax.ffi.ffi_lowering(
             GemmPrimitive.name,
             operand_output_aliases=operand_output_aliases,
-    )(ctx, *args, **kwargs, cgemm_config=cgemm_config.lowering_cgemm_attrs)
-
+        )(ctx, *args, **kwargs, cgemm_config=cgemm_config.lowering_cgemm_attrs)
 
     @staticmethod
     def impl(
@@ -550,7 +565,6 @@ class GemmPrimitive(BasePrimitive):
         is_outer,
         cgemm_config,
     ):
-        del is_outer
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
         lhs_transposed, rhs_transposed = _get_gemm_layout(
             (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
@@ -570,7 +584,7 @@ class GemmPrimitive(BasePrimitive):
             flatten_axis=min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
         )
 
-        outputs = GemmPrimitive.inner_primitive.bind(
+        (output, bias_grad, pre_gelu_out, _, _, _) = GemmPrimitive.inner_primitive.bind(
             lhs,
             lhs_scale_inv,
             rhs,
@@ -587,9 +601,20 @@ class GemmPrimitive(BasePrimitive):
             cgemm_config=cgemm_config,
             transpose_batch_sequence=transpose_batch_sequence,
             sequence_dim=sequence_dim,
-            is_outer=False,
+            is_outer=is_outer,
         )
-        return outputs[:-3]  # discard workspace arrays
+        if not cgemm_config.collective_op.is_none and not transpose_batch_sequence and not is_outer:
+            assert sequence_dim >= 0, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            original_shape = output.shape
+            reshaped = output.reshape(-1,
+                                      tpsp_axis_size(),
+                                      int(original_shape[sequence_dim] / tpsp_axis_size()),
+                                      *original_shape[sequence_dim+1:],
+                                      )
+            reordered = reshaped.transpose(1, 0, 2, *range(3, reshaped.ndim))
+            output = reordered.reshape(original_shape)
+
+        return [output, bias_grad, pre_gelu_out]
 
     @staticmethod
     def batcher(
@@ -657,17 +682,6 @@ class GemmPrimitive(BasePrimitive):
 
         gsr = global_mesh_resource()
 
-        # Ensure that tensor sequence parallelism is not used via setting tp_resource
-        if gsr.tp_resource is not None:
-            for i in range(len(lhs_specs) - 1):
-                if lhs_specs[i] == gsr.tp_resource and lhs_specs[i + 1] == gsr.tp_resource:
-                    warnings.warn(
-                        "Tensor sequence parallelism is detected as"
-                        f" tp_resource='{gsr.tp_resource}' appears twice consecutively in"
-                        f" lhs_specs: {lhs_specs}. Please setting MeshResource.tpsp_resource for"
-                        " tensor sequence parallelism to avoid potential issues."
-                    )
-
         lhs_ndim, rhs_ndim = map(len, (lhs_specs, rhs_specs))
         lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs_ndim, rhs_ndim), contracting_dims)
         lhs_non_cdims, rhs_non_cdims = map(
@@ -692,24 +706,7 @@ class GemmPrimitive(BasePrimitive):
 
         # Find sequence dimension in lhs_specs if tensor sequence parallel is enabled
         # We only do CollectiveGemm AG on the x or dY and CollectiveGemm RS on the Y or dX thus they always the LHS and have sequence dim
-        if cgemm_config.collective_op.is_all_gather:
-            # For all-gather: find consecutive pair of tpsp_resource
-            batch_sequence_pairs = [
-                (i, i + 1)
-                for i in range(len(lhs_specs) - 1)
-                if lhs_specs[i] == gsr.tpsp_resource and lhs_specs[i + 1] == gsr.tpsp_resource
-            ]
-            assert len(batch_sequence_pairs) == 1, (
-                "Unable to detect the sequence dim as tpsp_resource does not appear exactly twice"
-                f" consecutively in lhs_specs: {lhs_specs}"
-            )
-            sequence_dim = (
-                batch_sequence_pairs[0][0]
-                if transpose_batch_sequence
-                else batch_sequence_pairs[0][1]
-            )
-        elif cgemm_config.collective_op.is_reduce_scatter:
-            # For reduce-scatter: find single tpsp_resource occurrence
+        if not cgemm_config.collective_op.is_none:
             try:
                 tpsp_idx = lhs_specs.index(gsr.tpsp_resource)
             except ValueError as exc:
@@ -717,11 +714,12 @@ class GemmPrimitive(BasePrimitive):
                     f"tpsp_resource '{gsr.tpsp_resource}' is not found in lhs_specs: {lhs_specs}."
                     " Please check your sharding configuration."
                 ) from exc
-            assert reduce_spec == gsr.tpsp_resource, (
-                "Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got"
-                f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
-            )
-            sequence_dim = tpsp_idx if transpose_batch_sequence else tpsp_idx + 1
+            if cgemm_config.collective_op.is_reduce_scatter:
+                assert reduce_spec == gsr.tpsp_resource, (
+                    "Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got"
+                        f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
+                )
+            sequence_dim = tpsp_idx
 
         if reduce_spec is not None:
             # Other non-reduce cdims (if exists) need to be unsharded
@@ -764,7 +762,14 @@ class GemmPrimitive(BasePrimitive):
         out_specs = lhs_non_cspecs + rhs_non_cspecs
 
         # Only do AG Sequence dim if not Overlap RS
-        if cgemm_config.collective_op.is_reduce_scatter:
+        if cgemm_config.collective_op.is_all_gather:
+            assert sequence_dim <= len(
+                lhs_non_cspecs
+            ), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
+            out_specs = (
+                out_specs[:sequence_dim] + (None,) + out_specs[sequence_dim + 1 :]
+            )
+        elif cgemm_config.collective_op.is_reduce_scatter:
             assert sequence_dim <= len(
                 lhs_non_cspecs
             ), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
@@ -785,6 +790,9 @@ class GemmPrimitive(BasePrimitive):
         # Bias and Pre-GeLU sharding is based on GEMM output before any scatter
         bias_specs = tuple(list(rhs_non_cspecs).copy())
         gelu_specs = tuple(list(out_specs).copy())
+
+        if not cgemm_config.collective_op.is_none:
+            assert sequence_dim >= 0, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
 
         return (
             (lhs_specs, rhs_specs, bias_specs, gelu_specs),
@@ -1090,6 +1098,7 @@ def _te_gemm(
 
     # Dummy empties for bias, gelu and aux_in
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype
+    print(f"out_dtype = {out_dtype} and lhs_data.dtype = {lhs_data.dtype}")
     if bias is None or not (fuse_bias and not grad):
         bias = jnp.empty(0, dtype=out_dtype)
     if gelu_input is None or not (fuse_gelu and grad):
@@ -1518,6 +1527,7 @@ def gemm(
         rhs_quantizer=rhs_quantizer,
         contracting_dims=contracting_dims,
         transpose_batch_sequence=transpose_batch_sequence,
+        cgemm_config=cgemm_config,
         **kwargs,
     )
 

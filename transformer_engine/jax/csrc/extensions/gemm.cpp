@@ -232,6 +232,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
     if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER){
       buffer_shape[0] = lhs_shape[0] * cgemm_config.tp_size;
       buffer_shape[1] = lhs_shape[1];
+      out_shape[0] = out_shape[0] * cgemm_config.tp_size;
       buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
     } else if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER){
       buffer_shape[0] = out_shape[0] * cgemm_config.tp_size;
@@ -258,9 +259,13 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 
       // TODO: Don't we need to copy the output back to the original buffer?
     } else if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
-      auto aux_out_ = TensorWrapper();  // Empty
+      auto aux_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);  // Empty
 
       auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
+      NVTE_CHECK(out_.numel() == output->element_count(),
+                 "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(), " elements ",
+                 to_string_like(out_shape), " but got ", output->element_count(), " elements ",
+                 to_string_like(output->dimensions()));
       // Copy the distributed LHS operand into the local chunk of the communication buffer
       executor->copy_into_buffer(stream, lhs_, true, make_lhs_rowwise);
 
