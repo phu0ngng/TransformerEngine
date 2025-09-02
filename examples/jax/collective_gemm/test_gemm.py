@@ -61,13 +61,13 @@ def _create_mesh(args):
     assert (
         num_gpu > 1 and num_gpu % num_gpu_dp == 0
     ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
-    
+
     num_gpu_tp = num_gpu // num_gpu_dp
     assert (
         num_gpu_tp > 1
     ), f"Number of GPUs for tensor parallelism ({num_gpu_tp}) must be > 1"
     print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")
-    
+
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
     mesh = jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS))
     jax.sharding.set_mesh(mesh)
@@ -190,10 +190,12 @@ class TestCollectiveGemm(unittest.TestCase):
 
     def setUp(self):
         """Set up test environment for pytest execution."""
-        # Create mesh once for all tests 
+        # Init the arg parser
+        self.args = gemm_parser(["--batch-size", "4"])
+        # Create mesh once for all tests
         self.mesh = _create_mesh(self.args)
         jax.sharding.set_mesh(self.mesh)
-        
+
     def tearDown(self):
         """Clean up after each test."""
         # Clear the mesh to prevent interference between tests
@@ -223,7 +225,7 @@ class TestCollectiveGemm(unittest.TestCase):
     def test_te_bf16_reduce_scatter_with_dp(self):
         """Test Collective GEMM with ReduceScatter"""
         self.args.enable_data_parallel = True
-        self.args.collective_type = "reduce_scatter"  
+        self.args.collective_type = "reduce_scatter"
         ref_output, output = run_gemm_tests(self.args, self.mesh)
         if myrank == 0:
             assert_allclose(ref_output, output)
