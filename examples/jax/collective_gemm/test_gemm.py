@@ -39,37 +39,54 @@ assert (
 ), f"[{myrank}|{numranks}] Expected 1 GPU per process, found {jax.local_device_count()}"
 
 
-def _setup_mesh_and_sharding(num_gpu_dp, num_gpu_tp):
-    device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
-    mesh = jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS))
-    # jax.sharding.set_mesh(mesh)
+def _get_operand_sharding(mesh, is_with_dp=False):
 
-    x_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS, None))
-    weight_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS))
-    bias_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS))
+    if is_with_dp:
+        x_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS, None))
+        weight_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS))
+        bias_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS))
+    else:
+        x_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS, None))
+        weight_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS))
+        bias_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS))
 
-    return mesh, x_sharding, weight_sharding, bias_sharding
+    return x_sharding, weight_sharding, bias_sharding
 
 
-def run_gemm_tests(args):
-    """Execute GEMM tests."""
-    print(args)
-    # Collective GEMM requires Shardy partitioner to be disabled
-    jax.config.update("jax_use_shardy_partitioner", False)
-
-    # Setup mesh
+def _create_mesh(args):
+    """Create mesh configuration with proper validation."""
     num_gpu = jax.device_count()
     assert num_gpu == numranks, f"Requires {num_gpu} processes for {num_gpu} GPUs, got {numranks}!"
     num_gpu_dp = 2 if args.enable_data_parallel else 1
     assert (
         num_gpu > 1 and num_gpu % num_gpu_dp == 0
     ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
-
+    
     num_gpu_tp = num_gpu // num_gpu_dp
     assert (
         num_gpu_tp > 1
-    ), "Number of tensor parallel GPUs must be greater than 1 for Collective GEMM"
+    ), f"Number of GPUs for tensor parallelism ({num_gpu_tp}) must be > 1"
     print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")
+    
+    device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
+    mesh = jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS))
+    jax.sharding.set_mesh(mesh)
+
+    return mesh
+
+
+def run_gemm_tests(args, mesh=None):
+    """Execute GEMM tests."""
+    print(args)
+    # Collective GEMM requires Shardy partitioner to be disabled
+    jax.config.update("jax_use_shardy_partitioner", False)
+
+    # Use provided mesh and shardings if available, otherwise create new ones
+    if mesh is None:
+        mesh = _create_mesh(args)
+    else:
+        # Use provided mesh and shardings
+        print(f"Using provided mesh: {mesh}")
 
     # Create test data
     rng = jax.random.PRNGKey(0)
@@ -79,12 +96,6 @@ def run_gemm_tests(args):
     )
     weight = jax.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16)
     bias = jax.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
-
-    # Setup mesh and sharding
-    mesh, x_sharding, weight_sharding, bias_sharding = _setup_mesh_and_sharding(
-        num_gpu_dp, num_gpu_tp
-    )
-    jax.sharding.set_mesh(mesh)
 
     with mesh, fp8_autocast(
         enabled=False,
@@ -97,6 +108,7 @@ def run_gemm_tests(args):
         collective_op = CollectiveOp.ALL_GATHER if args.collective_type == "all_gather" else CollectiveOp.REDUCE_SCATTER
         cgemm_config = CollectiveGemmConfig.create(collective_op=collective_op)
 
+        x_sharding, weight_sharding, bias_sharding = _get_operand_sharding(mesh, is_with_dp=args.enable_data_parallel)
         x_sharded = jax.device_put(x, x_sharding)
         weight_sharded = jax.device_put(weight, weight_sharding)
         bias_sharded = jax.device_put(bias, bias_sharding)
@@ -105,7 +117,7 @@ def run_gemm_tests(args):
         sharded_output = tex.gemm(
             x_sharded,
             weight_sharded,
-            bias=bias,
+            bias=bias_sharded,
             contracting_dims=((2,), (0,)),
             cgemm_config=cgemm_config,
         )
@@ -178,36 +190,44 @@ class TestCollectiveGemm(unittest.TestCase):
 
     def setUp(self):
         """Set up test environment for pytest execution."""
-        self.args = gemm_parser(["--collective-type", "all_gather"])
+        # Create mesh once for all tests 
+        self.mesh = _create_mesh(self.args)
+        jax.sharding.set_mesh(self.mesh)
+        
+    def tearDown(self):
+        """Clean up after each test."""
+        # Clear the mesh to prevent interference between tests
+        jax.sharding.set_mesh(None)
 
     def test_te_bf16_all_gather(self):
         """Test Collective GEMM with AllGather"""
-        ref_output, output = run_gemm_tests(self.args)
+        self.args.collective_type = "all_gather"
+        ref_output, output = run_gemm_tests(self.args, self.mesh)
         if myrank == 0:
             assert_allclose(ref_output, output)
 
     def test_te_bf16_reduce_scatter(self):
         """Test Collective GEMM with ReduceScatter"""
-        self.args.collective_type = "reduce_scatter"  # Modify existing args
-        ref_output, output = run_gemm_tests(self.args)
+        self.args.collective_type = "reduce_scatter"
+        ref_output, output = run_gemm_tests(self.args, self.mesh)
         if myrank == 0:
             assert_allclose(ref_output, output)
 
     def test_te_bf16_all_gather_with_dp(self):
         """Test Collective GEMM with AllGather"""
         self.args.enable_data_parallel = True
-        ref_output, output = run_gemm_tests(self.args)
+        ref_output, output = run_gemm_tests(self.args, self.mesh)
         if myrank == 0:
             assert_allclose(ref_output, output)
 
     def test_te_bf16_reduce_scatter_with_dp(self):
         """Test Collective GEMM with ReduceScatter"""
         self.args.enable_data_parallel = True
-        self.args.collective_type = "reduce_scatter"  # Modify existing args
-        ref_output, output = run_gemm_tests(self.args)
+        self.args.collective_type = "reduce_scatter"  
+        ref_output, output = run_gemm_tests(self.args, self.mesh)
         if myrank == 0:
             assert_allclose(ref_output, output)
 
 
 if __name__ == "__main__":
-    run_gemm_tests(gemm_parser(None))
+    run_gemm_tests(gemm_parser(None), mesh=None)
