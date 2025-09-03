@@ -58,3 +58,12 @@ def assert_allclose(
 
     # Check if tensors are close
     np.testing.assert_allclose(actual, desired, **tols, **kwargs)
+
+
+def assert_allclose_print_index(ref_output, gathered_output, rtol=1e-5, atol=1e-8):
+    if not jnp.allclose(ref_output, gathered_output, rtol=rtol, atol=atol):
+        diff = jnp.abs(ref_output - gathered_output)
+        mask = diff > (atol + rtol * jnp.abs(gathered_output))
+        print(mask.astype(int))
+        print(jnp.where(mask, diff, 0))
+

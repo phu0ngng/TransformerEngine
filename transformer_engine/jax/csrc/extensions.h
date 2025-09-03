@@ -120,7 +120,7 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
-
+XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 
 struct CollectiveGemmConfig {
   JAXX_Collective_Op collective_op;

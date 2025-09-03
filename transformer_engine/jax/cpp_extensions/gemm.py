@@ -949,6 +949,8 @@ class GemmPrimitive(BasePrimitive):
             )
 
             if reduce_spec is not None and not cgemm_config.collective_op.is_reduce_scatter:
+                # TODO: add an option here to do AR in FP32 for unittest
+                # outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
                 outputs[0] = jax.lax.psum(outputs[0].astype(jnp.float32), reduce_spec).astype(out_dtype)
 
             return outputs

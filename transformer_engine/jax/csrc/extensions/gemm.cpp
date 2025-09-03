@@ -154,6 +154,69 @@ class CollectiveGemmPlanRegistry {
   std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> plan_map;
 };
 
+Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
+                                 Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
+                                 Result_Type output, Result_Type bias_grad, Result_Type pre_gelu_out,
+                                 Result_Type lhs_swizzle, Result_Type rhs_swizzle, Result_Type workspace,
+                                 JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary, int64_t rhs_axis_boundary, bool lhs_transposed,
+                                 bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
+                                 bool use_split_accumulator, CollectiveGemmConfig cgemm_config) {
+  // Init cublas handler
+  nvte_cublas_handle_init();
+
+  // Init UB buffer
+  if (cgemm_config.collective_op != JAXX_Collective_Op::NONE){
+
+    std::vector<size_t> lhs_shape = {product(lhs.dimensions(), 0, lhs_axis_boundary),
+                                     product(lhs.dimensions(), lhs_axis_boundary, lhs.dimensions().size())};
+    std::vector<size_t> rhs_shape = {product(rhs.dimensions(), 0, rhs_axis_boundary),
+                                     product(rhs.dimensions(), rhs_axis_boundary, rhs.dimensions().size())};
+
+    std::vector<size_t> out_shape = {(lhs_transposed) ? lhs_shape[1] : lhs_shape[0],
+      (rhs_transposed) ? rhs_shape[0] : rhs_shape[1]};
+
+    std::vector<size_t> buffer_shape {0, 0};
+    DType buffer_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
+    if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER){
+      buffer_shape[0] = lhs_shape[0] * cgemm_config.tp_size;
+      buffer_shape[1] = lhs_shape[1];
+      out_shape[0] = out_shape[0] * cgemm_config.tp_size;
+      buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
+    } else if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER){
+      buffer_shape[0] = out_shape[0];
+      buffer_shape[1] = out_shape[1];
+      out_shape[0] = out_shape[0] / cgemm_config.tp_size;
+    }
+    auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype, cgemm_config);
+  }
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
+                              FFI::Bind<FFI_Prepare>()
+                              .Arg<Buffer_Type>()      // lhs
+                              .Arg<Buffer_Type>()      // lhs_scale_inv
+                              .Arg<Buffer_Type>()      // rhs
+                              .Arg<Buffer_Type>()      // rhs_scale_inv
+                              .Arg<Buffer_Type>()      // bias
+                              .Arg<Buffer_Type>()      // gelu_input
+                              .Ret<Buffer_Type>()      // output
+                              .Ret<Buffer_Type>()      // bias_grad
+                              .Ret<Buffer_Type>()      // pre_gelu_out
+                              .Ret<Buffer_Type>()      // lhs_swizzled
+                              .Ret<Buffer_Type>()      // rhs_swizzled
+                              .Ret<Buffer_Type>()      // workspace
+                              .Attr<JAXX_Scaling_Mode>("scaling_mode")
+                              .Attr<int64_t>("lhs_axis_boundary")
+                              .Attr<int64_t>("rhs_axis_boundary")
+                              .Attr<bool>("lhs_transposed")
+                              .Attr<bool>("rhs_transposed")
+                              .Attr<bool>("fuse_bias")
+                              .Attr<bool>("fuse_gelu")
+                              .Attr<bool>("grad")
+                              .Attr<bool>("use_split_accumulator")
+                              .Attr<CollectiveGemmConfig>("cgemm_config"),
+                              FFI_CudaGraph_Traits);
 
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,

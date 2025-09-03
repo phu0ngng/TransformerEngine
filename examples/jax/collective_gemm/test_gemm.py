@@ -13,13 +13,13 @@ import jax.numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec, NamedSharding
 
-from common import assert_allclose
+from common import assert_allclose, assert_allclose_print_index
 
 import transformer_engine.jax.cpp_extensions as tex
 
 # from transformer_engine.jax.quantize import is_fp8_available, ScalingMode, Quantizer, QuantizeConfig, fp8_autocast
 from transformer_engine.jax.quantize import fp8_autocast
-from transformer_engine.jax.cpp_extensions.gemm import CollectiveGemmConfig, CollectiveOp
+from transformer_engine.jax.cpp_extensions.gemm import CollectiveGemmConfig, CollectiveOp, noop_cgemm_config
 from transformer_engine.jax.sharding import MeshResource
 
 DEVICE_DP_AXIS = "data"
@@ -39,16 +39,17 @@ assert (
 ), f"[{myrank}|{numranks}] Expected 1 GPU per process, found {jax.local_device_count()}"
 
 
-def _get_operand_sharding(mesh, is_with_dp=False):
+def _get_operand_sharding(mesh, collective_op, is_with_dp):
 
-    if is_with_dp:
-        x_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS, None))
+    dp_axis = DEVICE_DP_AXIS if is_with_dp else None
+    if collective_op == CollectiveOp.ALL_GATHER:
+        x_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, DEVICE_TPSP_AXIS, None))
         weight_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS))
         bias_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS))
-    else:
-        x_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS, None))
-        weight_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS))
-        bias_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS))
+    else:   # RS
+        x_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, None, DEVICE_TPSP_AXIS))
+        weight_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS, None))
+        bias_sharding = NamedSharding(mesh, PartitionSpec(None))
 
     return x_sharding, weight_sharding, bias_sharding
 
@@ -74,14 +75,15 @@ def _create_mesh(args):
 
     return mesh
 
-def _jitted_cgemm(x, weight, bias, contracting_dims, cgemm_config):
+
+def _jitted_cgemm(x, weight, contracting_dims, cgemm_config):
     return jax.jit(tex.gemm, static_argnames=("contracting_dims", "cgemm_config"))(
         x,
         weight,
-        bias=bias,
         contracting_dims=contracting_dims,
         cgemm_config=cgemm_config,
     )
+
 
 def run_gemm_tests(args, mesh=None):
     """Execute GEMM tests."""
@@ -98,12 +100,13 @@ def run_gemm_tests(args, mesh=None):
 
     # Create test data
     rng = jax.random.PRNGKey(0)
+    dtype = jnp.bfloat16
     rng, x_rng, weight_rng, bias_rng = jax.random.split(rng, 4)
     x = jax.random.normal(
-        x_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16
+        x_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=dtype
     )
-    weight = jax.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16)
-    bias = jax.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
+    weight = jax.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=dtype)
+    bias = jax.random.normal(bias_rng, (args.hidden_out,), dtype=dtype)
 
     with mesh, fp8_autocast(
         enabled=False,
@@ -116,22 +119,31 @@ def run_gemm_tests(args, mesh=None):
         collective_op = CollectiveOp.ALL_GATHER if args.collective_type == "all_gather" else CollectiveOp.REDUCE_SCATTER
         cgemm_config = CollectiveGemmConfig.create(collective_op=collective_op)
 
-        x_sharding, weight_sharding, bias_sharding = _get_operand_sharding(mesh, is_with_dp=args.enable_data_parallel)
+        x_sharding, weight_sharding, bias_sharding = _get_operand_sharding(mesh, collective_op, args.enable_data_parallel)
         x_sharded = jax.device_put(x, x_sharding)
         weight_sharded = jax.device_put(weight, weight_sharding)
         bias_sharded = jax.device_put(bias, bias_sharding)
 
-        ref_output = tex.gemm(x, weight, bias=bias, contracting_dims=((2,), (0,)))
-        sharded_output = _jitted_cgemm(x_sharded, weight_sharded, bias_sharded,
+        ref_output = _jitted_cgemm(x_sharded, weight_sharded,
+                                   contracting_dims=((2,), (0,)),
+                                   cgemm_config=noop_cgemm_config)
+        sharded_output = _jitted_cgemm(x_sharded, weight_sharded,
                                        contracting_dims=((2,), (0,)),
                                        cgemm_config=cgemm_config)
+        gathered_ref_output = jax.lax.with_sharding_constraint(
+            ref_output, NamedSharding(mesh, PartitionSpec(None))
+        )
         gathered_output = jax.lax.with_sharding_constraint(
             sharded_output, NamedSharding(mesh, PartitionSpec(None))
         )
+        jax.block_until_ready(gathered_ref_output)
         jax.block_until_ready(gathered_output)
 
     if args.enable_result_check and myrank == 0:
-        assert_allclose(ref_output, gathered_output)
+        assert_allclose(gathered_ref_output, gathered_output)
+        # assert_allclose(gathered_ref_output, gathered_output, atol=1e-3, rtol=2e-2)
+        # assert_allclose_print_index(gathered_ref_output, gathered_output)
+        # assert_allclose_print_index(gathered_ref_output, gathered_output, rtol=1e-2, atol=1e-5)
 
 
 def gemm_parser(args):
@@ -147,7 +159,7 @@ def gemm_parser(args):
     parser.add_argument(
         "--seq-len",
         type=int,
-        default=2048,
+        default=128,
         metavar="N",
         help="sequence length (default: 2048)",
     )
@@ -218,22 +230,39 @@ class TestCollectiveGemm(unittest.TestCase):
         self.args.collective_type = "all_gather"
         run_gemm_tests(self.args, self.mesh)
 
-    # def test_te_bf16_reduce_scatter(self):
-    #     """Test Collective GEMM with ReduceScatter"""
-    #     self.args.collective_type = "reduce_scatter"
-    #     run_gemm_tests(self.args, self.mesh)
-    #
-    # def test_te_bf16_all_gather_with_dp(self):
-    #     """Test Collective GEMM with AllGather"""
-    #     self.args.enable_data_parallel = True
-    #     run_gemm_tests(self.args, self.mesh)
-    #
-    # def test_te_bf16_reduce_scatter_with_dp(self):
-    #     """Test Collective GEMM with ReduceScatter"""
-    #     self.args.enable_data_parallel = True
-    #     self.args.collective_type = "reduce_scatter"
-    #     run_gemm_tests(self.args, self.mesh)
-    #
+    def test_te_bf16_reduce_scatter(self):
+        """Test Collective GEMM with ReduceScatter"""
+        self.args.collective_type = "reduce_scatter"
+        run_gemm_tests(self.args, self.mesh)
+
+
+class TestCollectiveGemmWithDP(unittest.TestCase):
+    """Collective GEMM with DP unittests"""
+
+    def setUp(self):
+        """Set up test environment for pytest execution."""
+        # Init the arg parser
+        self.args = gemm_parser(["--batch-size", "4"])
+        # Create mesh once for all tests
+        self.args.enable_data_parallel = True
+        self.mesh = _create_mesh(self.args)
+        jax.sharding.set_mesh(self.mesh)
+        self.args.enable_result_check = True
+
+    def tearDown(self):
+        """Clean up after each test."""
+        # Clear the mesh to prevent interference between tests
+        jax.sharding.set_mesh(None)
+
+    def test_te_bf16_all_gather_with_dp(self):
+        """Test Collective GEMM with AllGather"""
+        self.args.collective_type = "all_gather"
+        run_gemm_tests(self.args, self.mesh)
+
+    def test_te_bf16_reduce_scatter_with_dp(self):
+        """Test Collective GEMM with ReduceScatter"""
+        self.args.collective_type = "reduce_scatter"
+        run_gemm_tests(self.args, self.mesh)
 
 if __name__ == "__main__":
     run_gemm_tests(gemm_parser(None), mesh=None)
