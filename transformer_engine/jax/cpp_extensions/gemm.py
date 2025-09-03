@@ -211,7 +211,7 @@ class CollectiveGemmConfig:
 
         # Set conditional defaults for config options not specified
         num_splits = num_splits or tp_size
-        num_comm_sm = num_comm_sm or 0
+        num_comm_sm = num_comm_sm or 2
 
         # Create the communication plan
         lowering_cgemm_attrs = {
@@ -424,6 +424,7 @@ class GemmPrimitive(BasePrimitive):
                 overlap_out_shape[sequence_dim] = (
                     overlap_out_shape[sequence_dim] // tpsp_axis_size()
                 )
+            assert out_dtype == jnp.bfloat16, f"Unsupported out_dtype={out_dtype}"
             output = jax.core.ShapedArray(shape=overlap_out_shape, dtype=out_dtype)
 
         # Validate bias -- shape always depends on pure GEMM output
@@ -583,6 +584,17 @@ class GemmPrimitive(BasePrimitive):
             is_colwise=not rhs_transposed,
             flatten_axis=min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
         )
+        # Alter lhs blocks so that CGEMM RS outputs correctly
+        if cgemm_config.collective_op.is_reduce_scatter and not transpose_batch_sequence and not is_outer:
+            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+            original_shape = lhs.shape
+            reshaped = lhs.reshape(original_shape[0],
+                                   tpsp_axis_size(),
+                                   int(original_shape[1] / tpsp_axis_size()),
+                                   *original_shape[2:],
+                                   )
+            reordered = reshaped.transpose(1, 0, 2, *range(3, reshaped.ndim))
+            lhs = reordered.reshape(original_shape)
 
         (output, bias_grad, pre_gelu_out, _, _, _) = GemmPrimitive.inner_primitive.bind(
             lhs,
@@ -603,13 +615,14 @@ class GemmPrimitive(BasePrimitive):
             sequence_dim=sequence_dim,
             is_outer=is_outer,
         )
-        if not cgemm_config.collective_op.is_none and not transpose_batch_sequence and not is_outer:
-            assert sequence_dim >= 0, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
+        # Alter output blocks for CGEMM AG
+        if cgemm_config.collective_op.is_all_gather and not transpose_batch_sequence and not is_outer:
+            assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = output.shape
-            reshaped = output.reshape(-1,
-                                      tpsp_axis_size(),
-                                      int(original_shape[sequence_dim] / tpsp_axis_size()),
-                                      *original_shape[sequence_dim+1:],
+            reshaped = output.reshape(tpsp_axis_size(),
+                                      original_shape[0],
+                                      int(original_shape[1] / tpsp_axis_size()),
+                                      *original_shape[2:],
                                       )
             reordered = reshaped.transpose(1, 0, 2, *range(3, reshaped.ndim))
             output = reordered.reshape(original_shape)
@@ -705,8 +718,8 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim = None
 
         # Find sequence dimension in lhs_specs if tensor sequence parallel is enabled
-        # We only do CollectiveGemm AG on the x or dY and CollectiveGemm RS on the Y or dX thus they always the LHS and have sequence dim
-        if not cgemm_config.collective_op.is_none:
+        # We only do CollectiveGemm AG on the x or dY thus they always the LHS and have sequence dim
+        if cgemm_config.collective_op.is_all_gather:
             try:
                 tpsp_idx = lhs_specs.index(gsr.tpsp_resource)
             except ValueError as exc:
@@ -714,12 +727,17 @@ class GemmPrimitive(BasePrimitive):
                     f"tpsp_resource '{gsr.tpsp_resource}' is not found in lhs_specs: {lhs_specs}."
                     " Please check your sharding configuration."
                 ) from exc
-            if cgemm_config.collective_op.is_reduce_scatter:
-                assert reduce_spec == gsr.tpsp_resource, (
-                    "Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got"
-                        f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
-                )
             sequence_dim = tpsp_idx
+            assert (sequence_dim == 1) ^ transpose_batch_sequence, (
+                f"CollectiveGEMM supports only (sequence_dim=1 and transpose_batch_sequence=False) or (sequence_dim=0 and transpose_batch_sequence=True). Received: sequence_dim={sequence_dim}, transpose_batch_sequence={transpose_batch_sequence}."
+            )
+
+        elif cgemm_config.collective_op.is_reduce_scatter:
+            assert reduce_spec == gsr.tpsp_resource, (
+                "Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got"
+                    f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
+            )
+            sequence_dim = int(not transpose_batch_sequence)
 
         if reduce_spec is not None:
             # Other non-reduce cdims (if exists) need to be unsharded
@@ -931,7 +949,8 @@ class GemmPrimitive(BasePrimitive):
             )
 
             if reduce_spec is not None and not cgemm_config.collective_op.is_reduce_scatter:
-                outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
+                outputs[0] = jax.lax.psum(outputs[0].astype(jnp.float32), reduce_spec).astype(out_dtype)
+
             return outputs
 
         return mesh, _sharded_impl, out_shardings, arg_shardings

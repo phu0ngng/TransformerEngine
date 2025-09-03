@@ -13,6 +13,7 @@
 
 #include "../extensions.h"
 #include "common/util/cuda_runtime.h"
+#include "common.h"
 #include "common/util/string.h"
 #include "common/util/system.h"
 #include "transformer_engine/swizzle.h"
@@ -228,34 +229,30 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                      use_split_accumulator, num_math_sm, stream);
   } else {
     std::vector<size_t> buffer_shape {0, 0};
-    DType buffer_dtype;
+    DType buffer_dtype = out_dtype;
     if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER){
       buffer_shape[0] = lhs_shape[0] * cgemm_config.tp_size;
       buffer_shape[1] = lhs_shape[1];
       out_shape[0] = out_shape[0] * cgemm_config.tp_size;
       buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
     } else if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER){
-      buffer_shape[0] = out_shape[0] * cgemm_config.tp_size;
+      buffer_shape[0] = out_shape[0];
       buffer_shape[1] = out_shape[1];
-      buffer_dtype = out_dtype;
+      out_shape[0] = out_shape[0] / cgemm_config.tp_size;
     }
     auto executor = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype, cgemm_config);
-    auto tp_size = executor->get_tp_size();
     if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
-      auto out_ = TensorWrapper(executor->get_ubuf_dptr(), out_shape, out_dtype);
+      auto ubuf_out_ = TensorWrapper(executor->get_ubuf_dptr(), buffer_shape, out_dtype);
       // Prepare the auxiliary buffer for the reduce-scattered GEMM output
-      auto rs_out_shape = std::vector<size_t>(out_shape);
-      rs_out_shape.at(0) /= tp_size;
-      auto rs_out_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
-      auto rs_out_ = TensorWrapper(output->untyped_data(), rs_out_shape, rs_out_dtype);
-      NVTE_CHECK(rs_out_.numel() == output->element_count(),
-                 "cuBLAS GEMM->RS overlap output buffer is sized incorrectly, expected ",
-                 rs_out_.numel(), " elements ", to_string_like(rs_out_shape), " but got ",
-                 output->element_count(), " elements ", to_string_like(output->dimensions()));
+      auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
+      NVTE_CHECK(out_.numel() == output->element_count(),
+                 "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(), " elements ",
+                 to_string_like(out_shape), " but got ", output->element_count(), " elements ",
+                 to_string_like(output->dimensions()));
 
       // Launch GEMM+RS
-      executor->split_overlap_rs(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
-                                 workspace_, grad, false, use_split_accumulator, rs_out_, stream);
+      executor->split_overlap_rs(rhs_, rhs_transposed, lhs_, lhs_transposed, ubuf_out_, bias_, pre_gelu_,
+                                 workspace_, grad, false, use_split_accumulator, out_, stream);
 
       // TODO: Don't we need to copy the output back to the original buffer?
     } else if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
