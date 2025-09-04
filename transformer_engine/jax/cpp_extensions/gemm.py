@@ -40,7 +40,7 @@ from ..quantize import (
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
 )
-from .misc import get_padded_spec
+from .misc import get_padded_spec, is_all_reduce_in_float32
 from ..sharding import (
     global_mesh_resource,
     tpsp_axis_size,
@@ -188,7 +188,7 @@ class CollectiveGemmConfig:
     """
     Configuration object that carries collective GEMM configuration
     """
-    collective_op: JAXX_Collective_Op
+    collective_op: CollectiveOp
     num_max_streams: int
     lowering_cgemm_attrs: dict = field(default_factory=dict)
 
@@ -197,7 +197,7 @@ class CollectiveGemmConfig:
 
     @staticmethod
     def create(
-        collective_op: JAXX_Collective_Op,
+        collective_op: CollectiveOp,
         num_splits: int = None,
         num_max_streams: int = 3,       # Why 3?
         gemm_priority: int = 0,
@@ -953,9 +953,10 @@ class GemmPrimitive(BasePrimitive):
             )
 
             if reduce_spec is not None and not cgemm_config.collective_op.is_reduce_scatter:
-                # TODO: add an option here to do AR in FP32 for unittest
-                # outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
-                outputs[0] = jax.lax.psum(outputs[0].astype(jnp.float32), reduce_spec).astype(out_dtype)
+                if is_all_reduce_in_float32():  # For unittest only
+                    outputs[0] = jax.lax.psum(outputs[0].astype(jnp.float32), reduce_spec).astype(out_dtype)
+                else:
+                    outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
 
             return outputs
 
