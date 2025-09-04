@@ -20,7 +20,11 @@ from transformer_engine.jax.dense import dense
 
 # from transformer_engine.jax.quantize import is_fp8_available, ScalingMode, Quantizer, QuantizeConfig, fp8_autocast
 from transformer_engine.jax.quantize import fp8_autocast
-from transformer_engine.jax.cpp_extensions.gemm import CollectiveGemmConfigSet, CollectiveOp, noop_cgemm_config_set
+from transformer_engine.jax.cpp_extensions.gemm import (
+    CollectiveGemmConfigSet,
+    CollectiveOp,
+    noop_cgemm_config_set,
+)
 from transformer_engine.jax.sharding import MeshResource
 import transformer_engine.jax.flax as te_flax
 
@@ -29,7 +33,9 @@ NAME_TPSP_AXIS = "tensor_sequence"
 PARAMS_KEY = "params"
 
 jax.clear_caches()
-jax.config.update("jax_use_shardy_partitioner", False)  # CollectiveGEMM does not work with Shardy yet
+jax.config.update(
+    "jax_use_shardy_partitioner", False
+)  # CollectiveGEMM does not work with Shardy yet
 
 # FOR NOW: This script needs to be launched via `mpirun` with 1 process per GPU
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -47,7 +53,7 @@ def _get_logical_axes(collective_op, is_with_dp):
         input_axes = (dp_axis_name, NAME_TPSP_AXIS, None)
         weight_axes = (None, NAME_TPSP_AXIS)
         bias_axes = (NAME_TPSP_AXIS,)
-    else:   # RS
+    else:  # RS
         input_axes = (dp_axis_name, None, NAME_TPSP_AXIS)
         weight_axes = (NAME_TPSP_AXIS, None)
         bias_axes = (None,)
@@ -72,9 +78,7 @@ def _create_mesh(args):
     ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
 
     num_gpu_tp = num_gpu // num_gpu_dp
-    assert (
-        num_gpu_tp > 1
-    ), f"Number of GPUs for tensor parallelism ({num_gpu_tp}) must be > 1"
+    assert num_gpu_tp > 1, f"Number of GPUs for tensor parallelism ({num_gpu_tp}) must be > 1"
     print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
@@ -85,8 +89,20 @@ def _create_mesh(args):
 
 
 def _value_and_grad_dense(x, weight, bias, input_axes, weight_axes, cgemm_config_set):
-    mean_fn = lambda x, weight, bias, input_axes, weight_axes, cgemm_config_set: jnp.mean(dense(x, weight, bias, contracting_dims=((2,), (0,)), input_axes=input_axes, kernel_axes=weight_axes, cgemm_config_set=cgemm_config_set))
-    return jax.jit(jax.value_and_grad(mean_fn, (0, 1, 2)), static_argnums=(3, 4, 5))(x, weight, bias, input_axes, weight_axes, cgemm_config_set)
+    mean_fn = lambda x, weight, bias, input_axes, weight_axes, cgemm_config_set: jnp.mean(
+        dense(
+            x,
+            weight,
+            bias,
+            contracting_dims=((2,), (0,)),
+            input_axes=input_axes,
+            kernel_axes=weight_axes,
+            cgemm_config_set=cgemm_config_set,
+        )
+    )
+    return jax.jit(jax.value_and_grad(mean_fn, (0, 1, 2)), static_argnums=(3, 4, 5))(
+        x, weight, bias, input_axes, weight_axes, cgemm_config_set
+    )
 
 
 def run_dense_grad_tests(args, mesh=None):
@@ -113,10 +129,16 @@ def run_dense_grad_tests(args, mesh=None):
         print(f"Device mesh: {mesh}")
 
         # Collective GEMM configs need to be created under the mesh_resource context
-        collective_op = CollectiveOp.ALL_GATHER if args.collective_type == "all_gather" else CollectiveOp.REDUCE_SCATTER
+        collective_op = (
+            CollectiveOp.ALL_GATHER
+            if args.collective_type == "all_gather"
+            else CollectiveOp.REDUCE_SCATTER
+        )
         cgemm_config_set = CollectiveGemmConfigSet.create(forward_collective_op=collective_op)
 
-        x_sharding, weight_sharding, bias_sharding = _get_operand_sharding(mesh, collective_op, args.enable_data_parallel)
+        x_sharding, weight_sharding, bias_sharding = _get_operand_sharding(
+            mesh, collective_op, args.enable_data_parallel
+        )
         x_sharded = jax.device_put(x, x_sharding)
         weight_sharded = jax.device_put(weight, weight_sharding)
         bias_sharded = jax.device_put(bias, bias_sharding)
@@ -128,15 +150,26 @@ def run_dense_grad_tests(args, mesh=None):
         axis_rules += ((NAME_TPSP_AXIS, NAME_TPSP_AXIS), (NAME_DP_AXIS, NAME_DP_AXIS))
         te_extended_axis_rules = te_flax.extend_logical_axis_rules(axis_rules)
         with flax.linen.logical_axis_rules(te_extended_axis_rules):
-            ref_output, ref_grads = _value_and_grad_dense(x_sharded, weight_sharded, bias_sharded, input_axes, weight_axes, noop_cgemm_config_set)
-            output, sharded_grads = _value_and_grad_dense(x_sharded, weight_sharded, bias_sharded, input_axes, weight_axes, cgemm_config_set)
+            ref_output, ref_grads = _value_and_grad_dense(
+                x_sharded,
+                weight_sharded,
+                bias_sharded,
+                input_axes,
+                weight_axes,
+                noop_cgemm_config_set,
+            )
+            output, sharded_grads = _value_and_grad_dense(
+                x_sharded, weight_sharded, bias_sharded, input_axes, weight_axes, cgemm_config_set
+            )
         jax.block_until_ready(ref_output)
         jax.block_until_ready(output)
         gathered_grads = []
         for grad in sharded_grads:
             # if myrank == 0:
             #     jax.debug.inspect_array_sharding(grad, callback=print)
-            gathered_grads.append(jax.lax.with_sharding_constraint(grad, NamedSharding(mesh, PartitionSpec(None))))
+            gathered_grads.append(
+                jax.lax.with_sharding_constraint(grad, NamedSharding(mesh, PartitionSpec(None)))
+            )
         jax.block_until_ready(gathered_grads)
 
     if args.enable_result_check and myrank == 0:

@@ -19,7 +19,11 @@ import transformer_engine.jax.cpp_extensions as tex
 
 # from transformer_engine.jax.quantize import is_fp8_available, ScalingMode, Quantizer, QuantizeConfig, fp8_autocast
 from transformer_engine.jax.quantize import fp8_autocast
-from transformer_engine.jax.cpp_extensions.gemm import CollectiveGemmConfig, CollectiveOp, noop_cgemm_config
+from transformer_engine.jax.cpp_extensions.gemm import (
+    CollectiveGemmConfig,
+    CollectiveOp,
+    noop_cgemm_config,
+)
 from transformer_engine.jax.sharding import MeshResource
 
 DEVICE_DP_AXIS = "data"
@@ -27,7 +31,9 @@ DEVICE_TPSP_AXIS = "tensor_sequence"
 PARAMS_KEY = "params"
 
 jax.clear_caches()
-jax.config.update("jax_use_shardy_partitioner", False)  # CollectiveGEMM does not work with Shardy yet
+jax.config.update(
+    "jax_use_shardy_partitioner", False
+)  # CollectiveGEMM does not work with Shardy yet
 
 # FOR NOW: This script needs to be launched via `mpirun` with 1 process per GPU
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -46,7 +52,7 @@ def _get_operand_sharding(mesh, collective_op, is_with_dp):
         x_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, DEVICE_TPSP_AXIS, None))
         weight_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS))
         bias_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS))
-    else:   # RS
+    else:  # RS
         x_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, None, DEVICE_TPSP_AXIS))
         weight_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS, None))
         bias_sharding = NamedSharding(mesh, PartitionSpec(None))
@@ -64,9 +70,7 @@ def _create_mesh(args):
     ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
 
     num_gpu_tp = num_gpu // num_gpu_dp
-    assert (
-        num_gpu_tp > 1
-    ), f"Number of GPUs for tensor parallelism ({num_gpu_tp}) must be > 1"
+    assert num_gpu_tp > 1, f"Number of GPUs for tensor parallelism ({num_gpu_tp}) must be > 1"
     print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
@@ -110,20 +114,34 @@ def run_gemm_tests(args, mesh=None):
         print(f"Device mesh: {mesh}")
 
         # Collective GEMM configs need to be created under the mesh_resource context
-        collective_op = CollectiveOp.ALL_GATHER if args.collective_type == "all_gather" else CollectiveOp.REDUCE_SCATTER
+        collective_op = (
+            CollectiveOp.ALL_GATHER
+            if args.collective_type == "all_gather"
+            else CollectiveOp.REDUCE_SCATTER
+        )
         cgemm_config = CollectiveGemmConfig.create(collective_op=collective_op)
 
-        x_sharding, weight_sharding, bias_sharding = _get_operand_sharding(mesh, collective_op, args.enable_data_parallel)
+        x_sharding, weight_sharding, bias_sharding = _get_operand_sharding(
+            mesh, collective_op, args.enable_data_parallel
+        )
         x_sharded = jax.device_put(x, x_sharding)
         weight_sharded = jax.device_put(weight, weight_sharding)
         bias_sharded = jax.device_put(bias, bias_sharding)
 
-        ref_output = _jitted_cgemm(x_sharded, weight_sharded, bias_sharded,
-                                   contracting_dims=((2,), (0,)),
-                                   cgemm_config=noop_cgemm_config)
-        output = _jitted_cgemm(x_sharded, weight_sharded, bias_sharded,
-                                       contracting_dims=((2,), (0,)),
-                                       cgemm_config=cgemm_config)
+        ref_output = _jitted_cgemm(
+            x_sharded,
+            weight_sharded,
+            bias_sharded,
+            contracting_dims=((2,), (0,)),
+            cgemm_config=noop_cgemm_config,
+        )
+        output = _jitted_cgemm(
+            x_sharded,
+            weight_sharded,
+            bias_sharded,
+            contracting_dims=((2,), (0,)),
+            cgemm_config=cgemm_config,
+        )
         gathered_ref_output = jax.lax.with_sharding_constraint(
             ref_output, NamedSharding(mesh, PartitionSpec(None))
         )

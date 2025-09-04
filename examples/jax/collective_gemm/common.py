@@ -66,4 +66,3 @@ def assert_allclose_print_index(ref_output, gathered_output, rtol=1e-5, atol=1e-
         mask = diff > (atol + rtol * jnp.abs(gathered_output))
         print(mask.astype(int))
         print(jnp.where(mask, diff, 0))
-

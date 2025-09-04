@@ -188,6 +188,7 @@ class CollectiveGemmConfig:
     """
     Configuration object that carries collective GEMM configuration
     """
+
     collective_op: CollectiveOp
     num_max_streams: int
     lowering_cgemm_attrs: dict = field(default_factory=dict)
@@ -199,12 +200,12 @@ class CollectiveGemmConfig:
     def create(
         collective_op: CollectiveOp,
         num_splits: int = None,
-        num_max_streams: int = 3,       # Why 3?
+        num_max_streams: int = 3,  # Why 3?
         gemm_priority: int = 0,
         comm_priority: int = 0,
         num_comm_sm: int = None,
         use_ce: bool = True,
-        aggregate_ag: bool = False, # TODO: do we need this?
+        aggregate_ag: bool = False,  # TODO: do we need this?
     ):
         """Create a CollectiveGemmConfig with all values properly set and initialize the Userbuffer"""
 
@@ -308,11 +309,12 @@ noop_cgemm_config_set = CollectiveGemmConfigSet.create(forward_collective_op=Col
 def _cgemm_output_reorder(output, sequence_dim):
     assert sequence_dim >= 0, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
     original_shape = output.shape
-    reshaped = output.reshape(-1,
-                              tpsp_axis_size(),
-                              int(original_shape[sequence_dim] / tpsp_axis_size()),
-                              *original_shape[sequence_dim+1:],
-                              )
+    reshaped = output.reshape(
+        -1,
+        tpsp_axis_size(),
+        int(original_shape[sequence_dim] / tpsp_axis_size()),
+        *original_shape[sequence_dim + 1 :],
+    )
     reordered = reshaped.transpose(1, 0, 2, *range(3, reshaped.ndim))
     output = reordered.reshape(original_shape)
     return output
@@ -585,7 +587,11 @@ class GemmPrimitive(BasePrimitive):
             flatten_axis=min(rhs_cdims) if rhs_transposed else max(rhs_cdims) + 1,
         )
         # Alter lhs blocks so that CGEMM RS outputs correctly
-        if cgemm_config.collective_op.is_reduce_scatter and not transpose_batch_sequence and not is_outer:
+        if (
+            cgemm_config.collective_op.is_reduce_scatter
+            and not transpose_batch_sequence
+            and not is_outer
+        ):
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = lhs.shape
             reshaped = lhs.reshape(
@@ -618,7 +624,11 @@ class GemmPrimitive(BasePrimitive):
             is_outer=is_outer,
         )
         # Alter output blocks for CGEMM AG
-        if cgemm_config.collective_op.is_all_gather and not transpose_batch_sequence and not is_outer:
+        if (
+            cgemm_config.collective_op.is_all_gather
+            and not transpose_batch_sequence
+            and not is_outer
+        ):
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = output.shape
             reshaped = output.reshape(
@@ -733,13 +743,16 @@ class GemmPrimitive(BasePrimitive):
                 ) from exc
             sequence_dim = tpsp_idx
             assert (sequence_dim == 1) ^ transpose_batch_sequence, (
-                f"CollectiveGEMM supports only (sequence_dim=1 and transpose_batch_sequence=False) or (sequence_dim=0 and transpose_batch_sequence=True). Received: sequence_dim={sequence_dim}, transpose_batch_sequence={transpose_batch_sequence}."
+                "CollectiveGEMM supports only (sequence_dim=1 and transpose_batch_sequence=False)"
+                " or (sequence_dim=0 and transpose_batch_sequence=True). Received:"
+                f" sequence_dim={sequence_dim},"
+                f" transpose_batch_sequence={transpose_batch_sequence}."
             )
 
         elif cgemm_config.collective_op.is_reduce_scatter:
             assert reduce_spec == gsr.tpsp_resource, (
                 "Only CollectiveGemm RS with the Reduction over the TPSP axis is supported! Got"
-                    f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
+                f" reduce_spec={reduce_spec}, tpsp_resource={gsr.tpsp_resource}"
             )
             sequence_dim = int(not transpose_batch_sequence)
 
@@ -788,9 +801,7 @@ class GemmPrimitive(BasePrimitive):
             assert sequence_dim <= len(
                 lhs_non_cspecs
             ), f"Sequence dim {sequence_dim} is out of bounds for lhs_non_cspecs: {lhs_non_cspecs}"
-            out_specs = (
-                out_specs[:sequence_dim] + (None,) + out_specs[sequence_dim + 1 :]
-            )
+            out_specs = out_specs[:sequence_dim] + (None,) + out_specs[sequence_dim + 1 :]
         elif cgemm_config.collective_op.is_reduce_scatter:
             assert sequence_dim <= len(
                 lhs_non_cspecs
@@ -954,7 +965,9 @@ class GemmPrimitive(BasePrimitive):
 
             if reduce_spec is not None and not cgemm_config.collective_op.is_reduce_scatter:
                 if is_all_reduce_in_float32():  # For unittest only
-                    outputs[0] = jax.lax.psum(outputs[0].astype(jnp.float32), reduce_spec).astype(out_dtype)
+                    outputs[0] = jax.lax.psum(outputs[0].astype(jnp.float32), reduce_spec).astype(
+                        out_dtype
+                    )
                 else:
                     outputs[0] = jax.lax.psum(outputs[0], reduce_spec)
 

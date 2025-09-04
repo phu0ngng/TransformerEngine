@@ -503,7 +503,7 @@ void destroy_communicator(communicator *comm) {
 void destroy_communicator_mpi(communicator *comm) {
 #ifdef NVTE_UB_WITH_MPI
   auto comm_ptr = static_cast<MPI_Comm>(comm->comm_intra);
-  if (comm_ptr != MPI_COMM_NULL){
+  if (comm_ptr != MPI_COMM_NULL) {
     // MPI_Comm_free(&comm_ptr);    # TODO: this made the program crash
   }
   destroy_communicator(comm);
