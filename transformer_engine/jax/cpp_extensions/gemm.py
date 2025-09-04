@@ -44,6 +44,7 @@ from .misc import get_padded_spec
 from ..sharding import (
     global_mesh_resource,
     tpsp_axis_size,
+    dp_or_fsdp_axis_size,
 )
 
 
@@ -419,7 +420,6 @@ class GemmPrimitive(BasePrimitive):
             overlap_out_shape = list(out_shape).copy()
             if cgemm_config.collective_op.is_all_gather:
                 overlap_out_shape[1] *= tpsp_axis_size()
-                jax.debug.print("overlap_out_shape {x}", x=overlap_out_shape)
             else:  # RS
                 overlap_out_shape[sequence_dim] = (
                     overlap_out_shape[sequence_dim] // tpsp_axis_size()
@@ -588,12 +588,14 @@ class GemmPrimitive(BasePrimitive):
         if cgemm_config.collective_op.is_reduce_scatter and not transpose_batch_sequence and not is_outer:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = lhs.shape
-            reshaped = lhs.reshape(original_shape[0],
-                                   tpsp_axis_size(),
-                                   int(original_shape[1] / tpsp_axis_size()),
-                                   *original_shape[2:],
-                                   )
-            reordered = reshaped.transpose(1, 0, 2, *range(3, reshaped.ndim))
+            reshaped = lhs.reshape(
+                dp_or_fsdp_axis_size(),
+                int(original_shape[0] / dp_or_fsdp_axis_size()),
+                tpsp_axis_size(),
+                int(original_shape[1] / tpsp_axis_size()),
+                *original_shape[2:],
+            )
+            reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
             lhs = reordered.reshape(original_shape)
 
         (output, bias_grad, pre_gelu_out, _, _, _) = GemmPrimitive.inner_primitive.bind(
@@ -619,12 +621,14 @@ class GemmPrimitive(BasePrimitive):
         if cgemm_config.collective_op.is_all_gather and not transpose_batch_sequence and not is_outer:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = output.shape
-            reshaped = output.reshape(tpsp_axis_size(),
-                                      original_shape[0],
-                                      int(original_shape[1] / tpsp_axis_size()),
-                                      *original_shape[2:],
-                                      )
-            reordered = reshaped.transpose(1, 0, 2, *range(3, reshaped.ndim))
+            reshaped = output.reshape(
+                tpsp_axis_size(),
+                dp_or_fsdp_axis_size(),
+                int(original_shape[0] / dp_or_fsdp_axis_size()),
+                int(original_shape[1] / tpsp_axis_size()),
+                *original_shape[2:],
+            )
+            reordered = reshaped.transpose(1, 2, 0, 3, *range(4, reshaped.ndim))
             output = reordered.reshape(original_shape)
 
         return [output, bias_grad, pre_gelu_out]
@@ -1119,7 +1123,6 @@ def _te_gemm(
 
     # Dummy empties for bias, gelu and aux_in
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype
-    print(f"out_dtype = {out_dtype} and lhs_data.dtype = {lhs_data.dtype}")
     if bias is None or not (fuse_bias and not grad):
         bias = jnp.empty(0, dtype=out_dtype)
     if gelu_input is None or not (fuse_gelu and grad):

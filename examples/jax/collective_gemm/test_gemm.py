@@ -91,12 +91,8 @@ def run_gemm_tests(args, mesh=None):
     # Collective GEMM requires Shardy partitioner to be disabled
     jax.config.update("jax_use_shardy_partitioner", False)
 
-    # Use provided mesh and shardings if available, otherwise create new ones
     if mesh is None:
         mesh = _create_mesh(args)
-    else:
-        # Use provided mesh and shardings
-        print(f"Using provided mesh: {mesh}")
 
     # Create test data
     rng = jax.random.PRNGKey(0)
@@ -228,11 +224,13 @@ class TestCollectiveGemm(unittest.TestCase):
     def test_te_bf16_all_gather(self):
         """Test Collective GEMM with AllGather"""
         self.args.collective_type = "all_gather"
+        self.args.batch_size = 16
         run_gemm_tests(self.args, self.mesh)
 
     def test_te_bf16_reduce_scatter(self):
         """Test Collective GEMM with ReduceScatter"""
         self.args.collective_type = "reduce_scatter"
+        self.args.batch_size = 16
         run_gemm_tests(self.args, self.mesh)
 
 
@@ -257,12 +255,21 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def test_te_bf16_all_gather_with_dp(self):
         """Test Collective GEMM with AllGather"""
         self.args.collective_type = "all_gather"
+        self.args.batch_size = 16
+        self.args.seq_len = 32
+        self.args.hidden_in = 32
+        self.args.hidden_out = 32
         run_gemm_tests(self.args, self.mesh)
 
     def test_te_bf16_reduce_scatter_with_dp(self):
         """Test Collective GEMM with ReduceScatter"""
         self.args.collective_type = "reduce_scatter"
+        self.args.batch_size = 16
+        self.args.seq_len = 32
+        self.args.hidden_in = 32
+        self.args.hidden_out = 32
         run_gemm_tests(self.args, self.mesh)
+
 
 if __name__ == "__main__":
     run_gemm_tests(gemm_parser(None), mesh=None)
