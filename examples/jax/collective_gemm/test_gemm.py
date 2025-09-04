@@ -76,10 +76,11 @@ def _create_mesh(args):
     return mesh
 
 
-def _jitted_cgemm(x, weight, contracting_dims, cgemm_config):
+def _jitted_cgemm(x, weight, bias, contracting_dims, cgemm_config):
     return jax.jit(tex.gemm, static_argnames=("contracting_dims", "cgemm_config"))(
         x,
         weight,
+        bias=bias,
         contracting_dims=contracting_dims,
         cgemm_config=cgemm_config,
     )
@@ -120,10 +121,10 @@ def run_gemm_tests(args, mesh=None):
         weight_sharded = jax.device_put(weight, weight_sharding)
         bias_sharded = jax.device_put(bias, bias_sharding)
 
-        ref_output = _jitted_cgemm(x_sharded, weight_sharded,
+        ref_output = _jitted_cgemm(x_sharded, weight_sharded, bias_sharded,
                                    contracting_dims=((2,), (0,)),
                                    cgemm_config=noop_cgemm_config)
-        sharded_output = _jitted_cgemm(x_sharded, weight_sharded,
+        sharded_output = _jitted_cgemm(x_sharded, weight_sharded, bias_sharded,
                                        contracting_dims=((2,), (0,)),
                                        cgemm_config=cgemm_config)
         gathered_ref_output = jax.lax.with_sharding_constraint(
