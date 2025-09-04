@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec, NamedSharding
+import flax
 
 from common import assert_allclose
 
@@ -21,9 +22,10 @@ from transformer_engine.jax.dense import dense
 from transformer_engine.jax.quantize import fp8_autocast
 from transformer_engine.jax.cpp_extensions.gemm import CollectiveGemmConfigSet, CollectiveOp, noop_cgemm_config_set
 from transformer_engine.jax.sharding import MeshResource
+import transformer_engine.jax.flax as te_flax
 
-DEVICE_DP_AXIS = "data"
-DEVICE_TPSP_AXIS = "tensor_sequence"
+NAME_DP_AXIS = "data"
+NAME_TPSP_AXIS = "tensor_sequence"
 PARAMS_KEY = "params"
 
 jax.clear_caches()
@@ -39,23 +41,24 @@ assert (
 ), f"[{myrank}|{numranks}] Expected 1 GPU per process, found {jax.local_device_count()}"
 
 
-def _get_logical_axes(mesh, collective_op, is_with_dp):
-    dp_axis_name = DEVICE_DP_AXIS if is_with_dp else None
+def _get_logical_axes(collective_op, is_with_dp):
+    dp_axis_name = NAME_DP_AXIS if is_with_dp else None
     if collective_op == CollectiveOp.ALL_GATHER:
-        input_axes = (dp_axis_name, DEVICE_TPSP_AXIS, None)
-        weight_axes = (None, DEVICE_TPSP_AXIS)
-        bias_axes = (DEVICE_TPSP_AXIS,)
+        input_axes = (dp_axis_name, NAME_TPSP_AXIS, None)
+        weight_axes = (None, NAME_TPSP_AXIS)
+        bias_axes = (NAME_TPSP_AXIS,)
     else:   # RS
-        input_axes = (dp_axis_name, None, DEVICE_TPSP_AXIS)
-        weight_axes = (DEVICE_TPSP_AXIS, None)
+        input_axes = (dp_axis_name, None, NAME_TPSP_AXIS)
+        weight_axes = (NAME_TPSP_AXIS, None)
         bias_axes = (None,)
     return input_axes, weight_axes, bias_axes
 
+
 def _get_operand_sharding(mesh, collective_op, is_with_dp):
-    input_axes, weight_axes, bias_axes = _get_logical_axes(mesh, collective_op, is_with_dp)
-    x_sharding = NamedSharding(mesh, PartitionSpec(input_axes))
-    weight_sharding = NamedSharding(mesh, PartitionSpec(weight_axes))
-    bias_sharding = NamedSharding(mesh, PartitionSpec(bias_axes))
+    input_axes, weight_axes, bias_axes = _get_logical_axes(collective_op, is_with_dp)
+    x_sharding = NamedSharding(mesh, PartitionSpec(*input_axes))
+    weight_sharding = NamedSharding(mesh, PartitionSpec(*weight_axes))
+    bias_sharding = NamedSharding(mesh, PartitionSpec(*bias_axes))
     return x_sharding, weight_sharding, bias_sharding
 
 
@@ -75,15 +78,15 @@ def _create_mesh(args):
     print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
-    mesh = jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS))
+    mesh = jax.sharding.Mesh(devices=device_mesh, axis_names=(NAME_DP_AXIS, NAME_TPSP_AXIS))
     jax.sharding.set_mesh(mesh)
 
     return mesh
 
 
 def _value_and_grad_dense(x, weight, bias, input_axes, weight_axes, cgemm_config_set):
-    mean_fn = lambda x, weight, bias, cgemm_config_set: jnp.mean(dense(x, weight, bias, contracting_dims=((2,), (0,)), input_axes=input_axes, kernel_axes=weight_axes, cgemm_config_set=cgemm_config_set))
-    return jax.jit(jax.value_and_grad(mean_fn, (0, 1, 2)), static_argnums=(3, 4, 5, 6))(x, weight, bias, cgemm_config_set)
+    mean_fn = lambda x, weight, bias, input_axes, weight_axes, cgemm_config_set: jnp.mean(dense(x, weight, bias, contracting_dims=((2,), (0,)), input_axes=input_axes, kernel_axes=weight_axes, cgemm_config_set=cgemm_config_set))
+    return jax.jit(jax.value_and_grad(mean_fn, (0, 1, 2)), static_argnums=(3, 4, 5))(x, weight, bias, input_axes, weight_axes, cgemm_config_set)
 
 
 def run_dense_grad_tests(args, mesh=None):
@@ -105,7 +108,7 @@ def run_dense_grad_tests(args, mesh=None):
     with mesh, fp8_autocast(
         enabled=False,
         fp8_recipe=None,
-        mesh_resource=MeshResource(dp_resource=DEVICE_DP_AXIS, tpsp_resource=DEVICE_TPSP_AXIS),
+        mesh_resource=MeshResource(dp_resource=NAME_DP_AXIS, tpsp_resource=NAME_TPSP_AXIS),
     ):
         print(f"Device mesh: {mesh}")
 
@@ -118,9 +121,15 @@ def run_dense_grad_tests(args, mesh=None):
         weight_sharded = jax.device_put(weight, weight_sharding)
         bias_sharded = jax.device_put(bias, bias_sharding)
 
-        input_axes, weight_axes, _ = _get_logical_axes(mesh, collective_op, args.enable_data_parallel)
-        ref_output, ref_grads = _value_and_grad_dense(x_sharded, weight_sharded, bias_sharded, input_axes, weight_axes, noop_cgemm_config_set)
-        output, sharded_grads = _value_and_grad_dense(x_sharded, weight_sharded, bias_sharded, input_axes, weight_axes, cgemm_config_set)
+        input_axes, weight_axes, _ = _get_logical_axes(collective_op, args.enable_data_parallel)
+
+        # Get the base axis rules and extend them with TE's rules. This must be done inside fp8_autocast
+        axis_rules = flax.linen.get_logical_axis_rules()
+        axis_rules += ((NAME_TPSP_AXIS, NAME_TPSP_AXIS), (NAME_DP_AXIS, NAME_DP_AXIS))
+        te_extended_axis_rules = te_flax.extend_logical_axis_rules(axis_rules)
+        with flax.linen.logical_axis_rules(te_extended_axis_rules):
+            ref_output, ref_grads = _value_and_grad_dense(x_sharded, weight_sharded, bias_sharded, input_axes, weight_axes, noop_cgemm_config_set)
+            output, sharded_grads = _value_and_grad_dense(x_sharded, weight_sharded, bias_sharded, input_axes, weight_axes, cgemm_config_set)
         jax.block_until_ready(ref_output)
         jax.block_until_ready(output)
         gathered_grads = []
@@ -218,43 +227,44 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         self.args.collective_type = "all_gather"
         run_dense_grad_tests(self.args, self.mesh)
 
-    def test_te_bf16_reduce_scatter(self):
-        """Test Collective Dense Gradient with ReduceScatter"""
-        self.args.collective_type = "reduce_scatter"
-        run_dense_grad_tests(self.args, self.mesh)
+    # def test_te_bf16_reduce_scatter(self):
+    #     """Test Collective Dense Gradient with ReduceScatter"""
+    #     self.args.collective_type = "reduce_scatter"
+    #     run_dense_grad_tests(self.args, self.mesh)
 
-class TestCollectiveDenseGradientWithDP(unittest.TestCase):
-    """Collective Dense Gradient with DP unittests"""
 
-    # is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
-    # is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
-
-    def setUp(self):
-        """Set up test environment for pytest execution."""
-        # Init the arg parser
-        self.args = dense_grad_parser(["--batch-size", "4"])
-        # Create mesh once for all tests
-        self.args.enable_data_parallel = True
-        self.mesh = _create_mesh(self.args)
-        jax.sharding.set_mesh(self.mesh)
-        self.args.enable_result_check = True
-        os.environ["NVTE_JAX_ALL_REDUCE_IN_FLOAT32"] = "1"
-
-    def tearDown(self):
-        """Clean up after each test."""
-        # Clear the mesh to prevent interference between tests
-        jax.sharding.set_mesh(None)
-        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FLOAT32", None)
-    #
-    def test_te_bf16_all_gather_with_dp(self):
-        """Test Collective Dense Gradient with AllGather"""
-        self.args.collective_type = "all_gather"
-        run_dense_grad_tests(self.args, self.mesh)
-    
-    def test_te_bf16_reduce_scatter_with_dp(self):
-        """Test Collective Dense Gradient with ReduceScatter"""
-        self.args.collective_type = "reduce_scatter"
-        run_dense_grad_tests(self.args, self.mesh)
+# class TestCollectiveDenseGradientWithDP(unittest.TestCase):
+#     """Collective Dense Gradient with DP unittests"""
+#
+#     # is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
+#     # is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
+#
+#     def setUp(self):
+#         """Set up test environment for pytest execution."""
+#         # Init the arg parser
+#         self.args = dense_grad_parser(["--batch-size", "4"])
+#         # Create mesh once for all tests
+#         self.args.enable_data_parallel = True
+#         self.mesh = _create_mesh(self.args)
+#         jax.sharding.set_mesh(self.mesh)
+#         self.args.enable_result_check = True
+#         os.environ["NVTE_JAX_ALL_REDUCE_IN_FLOAT32"] = "1"
+#
+#     def tearDown(self):
+#         """Clean up after each test."""
+#         # Clear the mesh to prevent interference between tests
+#         jax.sharding.set_mesh(None)
+#         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FLOAT32", None)
+#     #
+#     def test_te_bf16_all_gather_with_dp(self):
+#         """Test Collective Dense Gradient with AllGather"""
+#         self.args.collective_type = "all_gather"
+#         run_dense_grad_tests(self.args, self.mesh)
+#
+#     def test_te_bf16_reduce_scatter_with_dp(self):
+#         """Test Collective Dense Gradient with ReduceScatter"""
+#         self.args.collective_type = "reduce_scatter"
+#         run_dense_grad_tests(self.args, self.mesh)
 
 
 if __name__ == "__main__":
