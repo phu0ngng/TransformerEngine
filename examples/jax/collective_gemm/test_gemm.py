@@ -91,19 +91,16 @@ def run_gemm_tests(args, mesh=None):
     print(args)
     # Collective GEMM requires Shardy partitioner to be disabled
     jax.config.update("jax_use_shardy_partitioner", False)
-
-    if mesh is None:
-        mesh = _create_mesh(args)
+    mesh = mesh or _create_mesh(args)
 
     # Create test data
     rng = jax.random.PRNGKey(0)
-    dtype = jnp.bfloat16
     rng, x_rng, weight_rng, bias_rng = jax.random.split(rng, 4)
     x = jax.random.normal(
-        x_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=dtype
+        x_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16
     )
-    weight = jax.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=dtype)
-    bias = jax.random.normal(bias_rng, (args.hidden_out,), dtype=dtype)
+    weight = jax.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16)
+    bias = jax.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
 
     with mesh, fp8_autocast(
         enabled=False,
@@ -124,14 +121,14 @@ def run_gemm_tests(args, mesh=None):
         ref_output = _jitted_cgemm(x_sharded, weight_sharded, bias_sharded,
                                    contracting_dims=((2,), (0,)),
                                    cgemm_config=noop_cgemm_config)
-        sharded_output = _jitted_cgemm(x_sharded, weight_sharded, bias_sharded,
+        output = _jitted_cgemm(x_sharded, weight_sharded, bias_sharded,
                                        contracting_dims=((2,), (0,)),
                                        cgemm_config=cgemm_config)
         gathered_ref_output = jax.lax.with_sharding_constraint(
             ref_output, NamedSharding(mesh, PartitionSpec(None))
         )
         gathered_output = jax.lax.with_sharding_constraint(
-            sharded_output, NamedSharding(mesh, PartitionSpec(None))
+            output, NamedSharding(mesh, PartitionSpec(None))
         )
         jax.block_until_ready(gathered_ref_output)
         jax.block_until_ready(gathered_output)
