@@ -226,29 +226,27 @@ class TestCollectiveGemm(unittest.TestCase):
     def setUp(self):
         """Set up test environment for pytest execution."""
         # Init the arg parser
-        self.args = gemm_parser(["--batch-size", "4"])
+        self.args = gemm_parser(["--batch-size", "1"])
         # Create mesh once for all tests
         self.mesh = _create_mesh(self.args)
         jax.sharding.set_mesh(self.mesh)
         self.args.enable_result_check = True
-        os.environ["NVTE_JAX_ALL_REDUCE_IN_FLOAT32"] = "1"
+        os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
 
     def tearDown(self):
         """Clean up after each test."""
         # Clear the mesh to prevent interference between tests
         jax.sharding.set_mesh(None)
-        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FLOAT32", None)
+        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_all_gather(self):
         """Test Collective GEMM with AllGather"""
         self.args.collective_type = "all_gather"
-        self.args.batch_size = 16
         run_gemm_tests(self.args, self.mesh)
 
     def test_te_bf16_reduce_scatter(self):
         """Test Collective GEMM with ReduceScatter"""
         self.args.collective_type = "reduce_scatter"
-        self.args.batch_size = 16
         run_gemm_tests(self.args, self.mesh)
 
 
@@ -258,36 +256,28 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def setUp(self):
         """Set up test environment for pytest execution."""
         # Init the arg parser
-        self.args = gemm_parser(["--batch-size", "4"])
+        self.args = gemm_parser(["--batch-size", "8"])
         # Create mesh once for all tests
         self.args.enable_data_parallel = True
         self.mesh = _create_mesh(self.args)
         jax.sharding.set_mesh(self.mesh)
         self.args.enable_result_check = True
-        os.environ["NVTE_JAX_ALL_REDUCE_IN_FLOAT32"] = "1"
+        os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
 
     def tearDown(self):
         """Clean up after each test."""
         # Clear the mesh to prevent interference between tests
         jax.sharding.set_mesh(None)
-        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FLOAT32", None)
+        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_all_gather_with_dp(self):
         """Test Collective GEMM with AllGather"""
         self.args.collective_type = "all_gather"
-        self.args.batch_size = 16
-        self.args.seq_len = 32
-        self.args.hidden_in = 32
-        self.args.hidden_out = 32
         run_gemm_tests(self.args, self.mesh)
 
     def test_te_bf16_reduce_scatter_with_dp(self):
         """Test Collective GEMM with ReduceScatter"""
         self.args.collective_type = "reduce_scatter"
-        self.args.batch_size = 16
-        self.args.seq_len = 32
-        self.args.hidden_in = 32
-        self.args.hidden_out = 32
         run_gemm_tests(self.args, self.mesh)
 
 

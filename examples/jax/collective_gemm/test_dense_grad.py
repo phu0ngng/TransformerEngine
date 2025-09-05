@@ -242,13 +242,13 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         self.mesh = _create_mesh(self.args)
         jax.sharding.set_mesh(self.mesh)
         self.args.enable_result_check = True
-        os.environ["NVTE_JAX_ALL_REDUCE_IN_FLOAT32"] = "1"
+        os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
 
     def tearDown(self):
         """Clean up after each test."""
         # Clear the mesh to prevent interference between tests
         jax.sharding.set_mesh(None)
-        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FLOAT32", None)
+        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_all_gather(self):
         """Test Collective Dense Gradient with AllGather"""
@@ -273,13 +273,13 @@ class TestCollectiveDenseGradientWithDP(unittest.TestCase):
         self.mesh = _create_mesh(self.args)
         jax.sharding.set_mesh(self.mesh)
         self.args.enable_result_check = True
-        os.environ["NVTE_JAX_ALL_REDUCE_IN_FLOAT32"] = "1"
+        os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
 
     def tearDown(self):
         """Clean up after each test."""
         # Clear the mesh to prevent interference between tests
         jax.sharding.set_mesh(None)
-        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FLOAT32", None)
+        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_all_gather_with_dp(self):
         """Test Collective Dense Gradient with AllGather"""

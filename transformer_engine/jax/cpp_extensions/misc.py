@@ -290,4 +290,4 @@ def is_all_reduce_in_float32():
     """
     Check if all-reduce is in float32
     """
-    return os.getenv("NVTE_JAX_ALL_REDUCE_IN_FLOAT32", "0") == "1"
+    return os.getenv("NVTE_JAX_ALL_REDUCE_IN_FP32", "0") == "1"
