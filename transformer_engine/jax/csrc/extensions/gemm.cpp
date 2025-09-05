@@ -177,12 +177,10 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
     if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
       buffer_shape[0] = lhs_shape[0] * cgemm_config.tp_size;
       buffer_shape[1] = lhs_shape[1];
-      out_shape[0] = out_shape[0] * cgemm_config.tp_size;
       buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
     } else if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
       buffer_shape[0] = out_shape[0];
       buffer_shape[1] = out_shape[1];
-      out_shape[0] = out_shape[0] / cgemm_config.tp_size;
     }
     auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype,
                                                                     cgemm_config);
@@ -213,8 +211,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
                                   .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
                                   .Attr<bool>("use_split_accumulator")
-                                  .Attr<CollectiveGemmConfig>("cgemm_config"),
-                              FFI_CudaGraph_Traits);
+                                  .Attr<CollectiveGemmConfig>("cgemm_config"));
 
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,

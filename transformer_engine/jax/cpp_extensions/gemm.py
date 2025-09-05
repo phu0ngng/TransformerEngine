@@ -6,7 +6,7 @@
 import math
 import operator
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial, reduce
 from typing import Tuple, Sequence, Union
 from enum import Enum
@@ -191,7 +191,7 @@ class CollectiveGemmConfig:
 
     collective_op: CollectiveOp
     num_max_streams: int
-    lowering_cgemm_attrs: dict = field(default_factory=dict)
+    lowering_cgemm_attrs: dict
 
     def __hash__(self):
         return hash(tuple(self.lowering_cgemm_attrs.items()))
@@ -255,8 +255,8 @@ class CollectiveGemmConfigSet:
     A set of CollectiveGemmConfig objects that provide complementary collective GEMM configurations for the Forward and Backward passes through Dense-layers.
     """
 
-    forward: CollectiveGemmConfig = field(default=None)
-    backward: CollectiveGemmConfig = field(default=None)
+    forward: CollectiveGemmConfig
+    backward: CollectiveGemmConfig
 
     @staticmethod
     def create(
