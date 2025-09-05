@@ -199,7 +199,6 @@ class CollectiveGemmConfig:
     @staticmethod
     def create(
         collective_op: CollectiveOp,
-        num_splits: int = None,
         num_max_streams: int = 3,  # Why 3?
         gemm_priority: int = 0,
         comm_priority: int = 0,
@@ -210,16 +209,12 @@ class CollectiveGemmConfig:
         """Create a CollectiveGemmConfig with all values properly set and initialize the Userbuffer"""
 
         tp_size = tpsp_axis_size() if not collective_op.is_none else 1
-
-        # Set conditional defaults for config options not specified
-        num_splits = num_splits or tp_size
         num_comm_sm = num_comm_sm or 2
 
         # Create the communication plan
         lowering_cgemm_attrs = {
             "collective_op": int(collective_op.value),
             "tp_size": int(tp_size),
-            "num_splits": int(num_splits),
             "num_max_streams": int(num_max_streams),
             "gemm_priority": int(gemm_priority),
             "comm_priority": int(comm_priority),
@@ -261,7 +256,6 @@ class CollectiveGemmConfigSet:
     @staticmethod
     def create(
         forward_collective_op: CollectiveOp,
-        num_splits: int = None,
         num_max_streams: int = 3,
         gemm_priority: int = 0,
         comm_priority: int = 0,
@@ -278,7 +272,6 @@ class CollectiveGemmConfigSet:
 
         forward = CollectiveGemmConfig.create(
             forward_collective_op,
-            num_splits,
             num_max_streams,
             gemm_priority,
             comm_priority,
@@ -289,7 +282,6 @@ class CollectiveGemmConfigSet:
 
         backward = CollectiveGemmConfig.create(
             backward_collective_op,
-            num_splits,
             num_max_streams,
             gemm_priority,
             comm_priority,

@@ -116,7 +116,7 @@ class CollectiveGemmPlanRegistry {
     int64_t plan_id = 0;
     hash_combine(plan_id, buffer_shape[0], buffer_shape[1], static_cast<size_t>(dtype),
                  static_cast<int>(cgemm_config.collective_op), cgemm_config.tp_size,
-                 cgemm_config.num_splits, cgemm_config.num_max_streams, cgemm_config.gemm_priority,
+                 cgemm_config.num_max_streams, cgemm_config.gemm_priority,
                  cgemm_config.comm_priority, cgemm_config.num_comm_sm, cgemm_config.use_ce,
                  cgemm_config.aggregate_ag);
 

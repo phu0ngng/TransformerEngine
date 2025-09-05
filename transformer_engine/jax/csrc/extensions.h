@@ -124,7 +124,6 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 struct CollectiveGemmConfig {
   JAXX_Collective_Op collective_op;
   int64_t tp_size;
-  int64_t num_splits;
   int64_t num_max_streams;
   int64_t gemm_priority;
   int64_t comm_priority;
@@ -151,7 +150,7 @@ XLA_FFI_REGISTER_ENUM_ATTR_DECODING(transformer_engine::jax::JAXX_Collective_Op)
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
     transformer_engine::jax::CollectiveGemmConfig,
     ::xla::ffi::StructMember<transformer_engine::jax::JAXX_Collective_Op>("collective_op"),
-    ::xla::ffi::StructMember<int64_t>("tp_size"), ::xla::ffi::StructMember<int64_t>("num_splits"),
+    ::xla::ffi::StructMember<int64_t>("tp_size"),
     ::xla::ffi::StructMember<int64_t>("num_max_streams"),
     ::xla::ffi::StructMember<int64_t>("gemm_priority"),
     ::xla::ffi::StructMember<int64_t>("comm_priority"),
