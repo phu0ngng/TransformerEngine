@@ -44,7 +44,6 @@ def layernorm_mlp(
     dot_2_input_axes: Tuple[str, ...] = None,
     kernel_1_axes: Tuple[str, ...] = None,
     kernel_2_axes: Tuple[str, ...] = None,
-    output_axes: Tuple[str, ...] = None,
     ffn1_ckpt_name: str = "ffn1",
     ffn2_ckpt_name: str = "ffn2",
     activation_type: Sequence[Union[str, Callable]] = ("gelu",),
@@ -77,7 +76,6 @@ def layernorm_mlp(
         dot_2_input_axes: Logical axes for sharding the second matrix multiplication
         kernel_1_axes: Logical axes for sharding the first weight matrix
         kernel_2_axes: Logical axes for sharding the second weight matrix
-        output_axes: Logical axes for sharding the output
         ffn1_ckpt_name: Name for checkpointing the first feed-forward network
         ffn2_ckpt_name: Name for checkpointing the second feed-forward network
         activation_type: Activation function(s) to apply after the first dense layer transformation
@@ -124,7 +122,6 @@ def layernorm_mlp(
         dot_2_input_axes,
         kernel_1_axes,
         kernel_2_axes,
-        output_axes,
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
@@ -134,7 +131,7 @@ def layernorm_mlp(
     return output
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19))
+@partial(jax.custom_vjp, nondiff_argnums=(7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18))
 def _layernorm_mlp(
     x: jnp.ndarray,
     gamma: jnp.ndarray,
@@ -151,7 +148,6 @@ def _layernorm_mlp(
     dot_2_input_axes: Tuple[str, ...],
     kernel_1_axes: Tuple[str, ...],
     kernel_2_axes: Tuple[str, ...],
-    output_axes: Tuple[str, ...],
     ffn1_ckpt_name: str,
     ffn2_ckpt_name: str,
     activation_type: Sequence[Union[str, Callable]],
@@ -180,7 +176,6 @@ def _layernorm_mlp(
         dot_2_input_axes: Logical axes for second matrix multiplication sharding
         kernel_1_axes: Logical axes for first weight matrix sharding
         kernel_2_axes: Logical axes for second weight matrix sharding
-        output_axes: Logical axes for output sharding
         ffn1_ckpt_name: Name for first feed-forward network checkpointing
         ffn2_ckpt_name: Name for second feed-forward network checkpointing
         activation_type: Activation function(s)
@@ -206,7 +201,6 @@ def _layernorm_mlp(
         dot_2_input_axes,
         kernel_1_axes,
         kernel_2_axes,
-        output_axes,
         ffn1_ckpt_name,
         ffn2_ckpt_name,
         activation_type,
@@ -232,7 +226,6 @@ def _layernorm_mlp_fwd_rule(
     dot_2_input_axes,
     kernel_1_axes,
     kernel_2_axes,
-    output_axes,
     ffn1_ckpt_name,
     ffn2_ckpt_name,
     activation_type,
@@ -346,7 +339,8 @@ def _layernorm_mlp_fwd_rule(
         bias_2_new_shape = (1,) * (dot_2_output.ndim - bias_2.ndim) + bias_2_shape
         dot_2_output += jnp.reshape(bias_2, bias_2_new_shape)
 
-    dot_2_output = with_sharding_constraint_by_logical_axes(dot_2_output, output_axes)
+    # sharding of outputs should be the same as dot_1's input
+    dot_2_output = with_sharding_constraint_by_logical_axes(dot_2_output, dot_1_input_axes)
     dot_2_output = checkpoint_name(dot_2_output, ffn2_ckpt_name)
 
     ctx = (
@@ -381,7 +375,6 @@ def _layernorm_mlp_bwd_rule(
     dot_2_input_axes,
     kernel_1_axes,
     kernel_2_axes,
-    output_axes,
     ffn1_ckpt_name,
     ffn2_ckpt_name,
     activation_type,
