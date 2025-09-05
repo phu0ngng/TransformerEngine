@@ -88,9 +88,11 @@ def _create_mesh(args):
     return mesh
 
 
-def _mean_layernorm_mlp(x, weight_1, bias_1, weight_2, bias_2, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, output_axes, cgemm_config_sets):
+def _mean_layernorm_mlp(x, weight_1, bias_1, weight_2, bias_2, gamma, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, output_axes, cgemm_config_sets):
     output = layernorm_mlp(
         x,
+        gamma,
+        beta=None,
         kernels=[weight_1, weight_2],
         biases=[bias_1, bias_2],
         norm_type="rmsnorm",
@@ -105,9 +107,9 @@ def _mean_layernorm_mlp(x, weight_1, bias_1, weight_2, bias_2, input_1_axes, inp
     return jnp.mean(output)
 
 
-def _value_and_grad_layernorm_mlp(x, weight_1, bias_1, weight_2, bias_2, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, output_axes, cgemm_config_sets):
-    return jax.jit(jax.value_and_grad(_mean_layernorm_mlp, (0, 1, 2, 3, 4)), static_argnums=(5, 6, 7, 8, 9, 10))(
-        x, weight_1, bias_1, weight_2, bias_2, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, output_axes, cgemm_config_sets
+def _value_and_grad_layernorm_mlp(x, weight_1, bias_1, weight_2, bias_2, gamma, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, output_axes, cgemm_config_sets):
+    return jax.jit(jax.value_and_grad(_mean_layernorm_mlp, (0, 1, 2, 3, 4, 5)), static_argnums=(6, 7, 8, 9, 10, 11))(
+        x, weight_1, bias_1, weight_2, bias_2, gamma, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, output_axes, cgemm_config_sets
     )
 
 
@@ -120,14 +122,15 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
 
     # Create test data
     rng = jax.random.PRNGKey(0)
-    rng, x_rng, weight_1_rng, bias_1_rng, weight_2_rng, bias_2_rng = jax.random.split(rng, 6)
+    rng, x_rng, weight_1_rng, bias_1_rng, weight_2_rng, bias_2_rng, gamma_rng = jax.random.split(rng, 7)
     x = jax.random.normal(
         x_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16
     )
-    weight_1 = jax.random.normal(weight_1_rng, (args.hidden_in, 1, args.hidden_out), dtype=jnp.bfloat16)
+    weight_1 = jax.random.normal(weight_1_rng, (args.hidden_in, 1, args.hidden_out), dtype=jnp.bfloat16) /jnp.sqrt(args.hidden_in)
     bias_1 = jax.random.normal(bias_1_rng, (1, args.hidden_out), dtype=jnp.bfloat16)
-    weight_2 = jax.random.normal(weight_2_rng, (args.hidden_out, args.hidden_in), dtype=jnp.bfloat16)
+    weight_2 = jax.random.normal(weight_2_rng, (args.hidden_out, args.hidden_in), dtype=jnp.bfloat16) /jnp.sqrt(args.hidden_out)
     bias_2 = jax.random.normal(bias_2_rng, (args.hidden_in,), dtype=jnp.bfloat16)
+    gamma = jax.random.normal(gamma_rng, (args.hidden_in,), dtype=jnp.bfloat16)/ jnp.sqrt(args.hidden_in)
 
     with mesh, fp8_autocast(
         enabled=False,
@@ -154,10 +157,10 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
 
             input_1_axes, weight_1_axes, _, input_2_axes, weight_2_axes, _, output_axes = _get_logical_axes()
             ref_output, ref_grads = _value_and_grad_layernorm_mlp(
-                x_sharded, weight_1_sharded, bias_1_sharded, weight_2_sharded, bias_2_sharded, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, output_axes, noop_cgemm_config_sets,
+                x_sharded, weight_1_sharded, bias_1_sharded, weight_2_sharded, bias_2_sharded, gamma, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, output_axes, noop_cgemm_config_sets,
             )
             output, sharded_grads = _value_and_grad_layernorm_mlp(
-                x_sharded, weight_1_sharded, bias_1_sharded, weight_2_sharded, bias_2_sharded, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, output_axes, cgemm_config_sets
+                x_sharded, weight_1_sharded, bias_1_sharded, weight_2_sharded, bias_2_sharded, gamma, input_1_axes, input_2_axes, weight_1_axes, weight_2_axes, output_axes, cgemm_config_sets
             )
         jax.block_until_ready(ref_output)
         jax.block_until_ready(output)
