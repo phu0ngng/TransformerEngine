@@ -90,8 +90,12 @@ def _initialize_distributed(args):
         jax.local_device_count() == 1
     ), f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found {jax.local_device_count()}"
 
-    num_local_ranks = args.num_processes
-    tex.cgemm_communicator_initialize(num_ranks=args.num_processes, num_local_ranks=num_local_ranks, process_id=args.process_id)
+    # Initialize CGEMM communicator for single device per process scenario
+    # num_ranks = total ranks across all processes (args.num_processes in this case)
+    # num_local_ranks = GPUs per process (1 for single device per process)
+    num_local_ranks = 1  # Single GPU per process
+    total_ranks = args.num_processes  # Total number of processes/ranks
+    tex.initialize_cgemm_communicator(num_ranks=total_ranks, num_local_ranks=num_local_ranks, process_id=args.process_id)
 
 
 def _get_operand_sharding(mesh, collective_op, is_with_dp):
