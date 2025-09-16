@@ -87,7 +87,7 @@ public:
 
   ncclComm_t comms[MAX_DEVICES];
 
-  void init(int num_ranks, int num_local_ranks, int process_id){
+ static void init(int num_ranks, int num_local_ranks, int process_id){
     NVTE_CHECK(num_local_ranks <= MAX_DEVICES, "num_local_ranks exceeds MAX_DEVICES=8, please recompile TE with MAX_DEVICES=", num_local_ranks);
     NVTE_CHECK(num_ranks % num_local_ranks == 0, "Invalid num_ranks=", num_ranks, ", num_local_ranks=", num_local_ranks);
 
@@ -110,7 +110,7 @@ public:
 
     NVTE_CHECK_NCCL(ncclGroupStart());
     for (int lrank = 0; lrank < num_local_ranks; lrank++) {
-      CUDACHECK(cudaSetDevice(local_device_ids[lrank]));
+      NVTE_CHECK_CUDA(cudaSetDevice(handler._local_device_ids[lrank]));
       handler.rank = num_local_ranks * process_id + lrank;
       NVTE_CHECK_NCCL(ncclCommInitRank(&handler.comms[lrank], handler.num_ranks, id, handler.rank));
     }
@@ -159,7 +159,7 @@ class CollectiveGemmPlanRegistry {
       return it->second.get();  // Return existing executor
     }
     auto &comm_handler = CommunicatorHandler::get();
-    NVTE_CHECK(comm_handler.num_local_ranks == tp_size, "Expect num_local_ranks == tp_size, got num_local_ranks=", comm_handler.num_local_ranks, ", tp_size=", tp_size);
+    NVTE_CHECK(comm_handler.num_local_ranks == cgemm_config.tp_size, "Expect num_local_ranks == tp_size, got num_local_ranks=", comm_handler.num_local_ranks, ", tp_size=", cgemm_config.tp_size);
 
     // Create new plan
     std::unique_ptr<CommOverlapCore> executor;

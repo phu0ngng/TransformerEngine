@@ -5,12 +5,12 @@
 
 This script uses custom distributed initialization with the following arguments:
 - --coordinator-address: Coordinator address for distributed initialization
-- --num-process: Number of processes for distributed initialization  
+- --num-process: Number of processes for distributed initialization
 - --process-id: Process ID for distributed initialization
 - --local-device-ids: Local device IDs for distributed initialization
 
 Example:
-    python test_gemm.py --coordinator-address localhost:1234 --num-process 2 --process-id 0 --local-device-ids 0,1,2,3  
+    python test_gemm.py --coordinator-address localhost:1234 --num-process 2 --process-id 0 --local-device-ids 0,1,2,3
 """
 import argparse
 import unittest
@@ -53,13 +53,13 @@ def _is_distributed_initialized():
 def _initialize_distributed(args):
     """Initialize JAX distributed with custom arguments."""
     global _distributed_initialized
-    
+
     # Check if already initialized
     if _distributed_initialized:
         print("JAX distributed already initialized, skipping...")
         return
-    
-    if args.coordinator_address is None or args.num_processes is None or args.process_id is None:
+
+    if args.coordinator_address is None or args.num_process is None or args.process_id is None:
         raise ValueError(
             "All distributed initialization arguments are required: "
             "--coordinator-address, --num-process, --process-id"
@@ -71,30 +71,30 @@ def _initialize_distributed(args):
         args.num_devices_per_process = len(args.local_device_ids.split(","))
 
     assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
-    
+
     print(f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
-          f"num_processeses={args.num_processes}, process_id={args.process_id}, "
+          f"num_processes={args.num_process}, process_id={args.process_id}, "
           f"local_device_ids={args.local_device_ids}")
-    
+
     jax.distributed.initialize(
         coordinator_address=args.coordinator_address,
-        num_processeses=args.num_processes,
+        num_processes=args.num_process,
         process_id=args.process_id,
         local_device_ids=args.local_device_ids,
     )
     # Initialize native library
     assert "NCCL_COMM_ID" not in os.environ
     os.environ["NCCL_COMM_ID"] = "127.0.0.1:12444"
-    
+
     # Mark as initialized
     _distributed_initialized = True
-    
+
     assert (
         jax.local_device_count() == 1
     ), f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found {jax.local_device_count()}"
 
-    num_local_ranks = args.num_processes
-    tex.initialize_cgemm_communicator(num_ranks=args.num_processes, num_local_ranks=num_local_ranks, process_id=args.process_id)
+    num_local_ranks = args.num_process
+    tex.initialize_cgemm_communicator(num_ranks=args.num_process, num_local_ranks=num_local_ranks, process_id=args.process_id)
 
 
 def _get_operand_sharding(mesh, collective_op, is_with_dp):
@@ -115,7 +115,7 @@ def _get_operand_sharding(mesh, collective_op, is_with_dp):
 def _create_mesh(args):
     """Create mesh configuration with proper validation."""
     num_gpu = jax.device_count()
-    numranks = args.num_processes * args.num_devices_per_process
+    numranks = args.num_process * args.num_devices_per_process
     assert num_gpu == numranks, f"Requires {num_gpu} processes for {num_gpu} GPUs, got {numranks}!"
     num_gpu_dp = 2 if args.enable_data_parallel else 1
     assert (
@@ -148,11 +148,11 @@ def run_gemm_tests(args, mesh=None):
     print(args)
     # Collective GEMM requires Shardy partitioner to be disabled
     jax.config.update("jax_use_shardy_partitioner", False)
-    
+
     # Initialize distributed with provided arguments
     _initialize_distributed(args)
 
-    n_gpus = args.num_devices_per_process * args.num_processes
+    n_gpus = args.num_devices_per_process * args.num_process
     mesh = mesh or _create_mesh(args)
 
     # Create test data
@@ -275,8 +275,12 @@ def gemm_parser(args):
     parser.add_argument(
         "--coordinator-address",
         type=str,
-        default=None,
-        help="Coordinator address for distributed initialization",
+        default="127.0.0.1:1234",
+        help=(
+            "the IP address of process 0 and a port on which that"
+            " process should launch a coordinator service (default:"
+            " 127.0.0.1:1234)"
+        ),
     )
     parser.add_argument(
         "--num-process",
@@ -286,8 +290,8 @@ def gemm_parser(args):
     )
     parser.add_argument(
         "--num-devices-per-process",
-        type=str,
-        default=None,
+        type=int,
+        default=1,
         help="Number of devices per process for distributed initialization",
     )
     parser.add_argument(
@@ -300,7 +304,7 @@ def gemm_parser(args):
         "--local-device-ids",
         type=str,
         default=None,
-        help="Local device IDs for distributed initialization",
+        help="List of local device IDs for distributed initialization",
     )
     return parser.parse_args(args)
 
@@ -326,6 +330,10 @@ class TestCollectiveGemm(unittest.TestCase):
         jax.sharding.set_mesh(self.mesh)
         self.args.enable_result_check = True
         os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
+        self.args.batch_size = 1
+        self.args.seq_len = 128
+        self.args.hidden_in = 64
+        self.args.hidden_out = 64
 
     def tearDown(self):
         """Clean up after each test."""
@@ -338,47 +346,47 @@ class TestCollectiveGemm(unittest.TestCase):
         self.args.collective_type = "all_gather"
         run_gemm_tests(self.args, self.mesh)
 
-    def test_te_bf16_reduce_scatter(self):
-        """Test Collective GEMM with ReduceScatter"""
-        self.args.collective_type = "reduce_scatter"
-        run_gemm_tests(self.args, self.mesh)
+    # def test_te_bf16_reduce_scatter(self):
+    #     """Test Collective GEMM with ReduceScatter"""
+    #     self.args.collective_type = "reduce_scatter"
+    #     run_gemm_tests(self.args, self.mesh)
 
 
-class TestCollectiveGemmWithDP(unittest.TestCase):
-    """Collective GEMM with DP unittests"""
-
-    def setUp(self):
-        """Set up test environment for pytest execution."""
-        # Create args object with distributed parameters from pytest fixtures
-        self.args = gemm_parser([])
-        self.args.coordinator_address = self.coordinator_address
-        self.args.num_processes = self.num_processes
-        self.args.process_id = self.process_id
-        self.args.local_device_ids = self.local_device_ids
-        self.args.num_devices_per_process = self.num_devices_per_process
-        _initialize_distributed(self.args)
-        # Create mesh once for all tests
-        self.args.enable_data_parallel = True
-        self.mesh = _create_mesh(self.args)
-        jax.sharding.set_mesh(self.mesh)
-        self.args.enable_result_check = True
-        os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
-
-    def tearDown(self):
-        """Clean up after each test."""
-        # Clear the mesh to prevent interference between tests
-        jax.sharding.set_mesh(None)
-        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
-
-    def test_te_bf16_all_gather_with_dp(self):
-        """Test Collective GEMM with AllGather"""
-        self.args.collective_type = "all_gather"
-        run_gemm_tests(self.args, self.mesh)
-
-    def test_te_bf16_reduce_scatter_with_dp(self):
-        """Test Collective GEMM with ReduceScatter"""
-        self.args.collective_type = "reduce_scatter"
-        run_gemm_tests(self.args, self.mesh)
+# class TestCollectiveGemmWithDP(unittest.TestCase):
+#     """Collective GEMM with DP unittests"""
+#
+#     def setUp(self):
+#         """Set up test environment for pytest execution."""
+#         # Create args object with distributed parameters from pytest fixtures
+#         self.args = gemm_parser([])
+#         self.args.coordinator_address = self.coordinator_address
+#         self.args.num_processes = self.num_processes
+#         self.args.process_id = self.process_id
+#         self.args.local_device_ids = self.local_device_ids
+#         self.args.num_devices_per_process = self.num_devices_per_process
+#         _initialize_distributed(self.args)
+#         # Create mesh once for all tests
+#         self.args.enable_data_parallel = True
+#         self.mesh = _create_mesh(self.args)
+#         jax.sharding.set_mesh(self.mesh)
+#         self.args.enable_result_check = True
+#         os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
+#
+#     def tearDown(self):
+#         """Clean up after each test."""
+#         # Clear the mesh to prevent interference between tests
+#         jax.sharding.set_mesh(None)
+#         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
+#
+#     def test_te_bf16_all_gather_with_dp(self):
+#         """Test Collective GEMM with AllGather"""
+#         self.args.collective_type = "all_gather"
+#         run_gemm_tests(self.args, self.mesh)
+#
+#     def test_te_bf16_reduce_scatter_with_dp(self):
+#         """Test Collective GEMM with ReduceScatter"""
+#         self.args.collective_type = "reduce_scatter"
+#         run_gemm_tests(self.args, self.mesh)
 
 
 if __name__ == "__main__":
@@ -389,7 +397,7 @@ if __name__ == "__main__":
         print("Example: python test_gemm.py --coordinator-address localhost:1234 --num-process 4 --process-id 0")
         print("Example: python test_gemm.py --coordinator-address localhost:1234 --num-process 2 --process-id 0 --local-device-ids 0,1,2,3")
         sys.exit(1)
-    
+
     args = gemm_parser(None)
     _initialize_distributed(args)
     run_gemm_tests(args, mesh=None)

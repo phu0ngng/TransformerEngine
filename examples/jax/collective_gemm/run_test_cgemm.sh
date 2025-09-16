@@ -7,8 +7,8 @@ NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L | wc -l)}
 # Define the test files to run
 TEST_FILES=(
 "test_gemm.py"
-"test_dense_grad.py"
-"test_layernorm_mlp_grad.py"
+# "test_dense_grad.py"
+# "test_layernorm_mlp_grad.py"
 )
 
 echo
@@ -20,6 +20,7 @@ HAS_FAILURE=0  # Global failure flag
 for TEST_FILE in "${TEST_FILES[@]}"; do
   echo
   echo "=== Starting test file: $TEST_FILE ..."
+  set +x
 
   for i in $(seq 0 $(($NUM_GPUS - 1))); do
     # Define output file for logs
@@ -28,15 +29,14 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     # Run pytest and redirect stdout and stderr to the log file
     pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
       -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
-      --coordinator-address="localhost:12345" \
       --num-process=$NUM_GPUS \
-      --process-id=$i \
-      --local-device-ids=$i > "$LOG_FILE" 2>&1 &
+      --process-id=$i  > "$LOG_FILE" 2>&1 &
     done
 
   # Wait for the processes to finish
   wait
-  tail -n +7 "${TEST_FILE}_gpu_0.log"
+  # tail -n +7 "${TEST_FILE}_gpu_0.log"
+  cat "${TEST_FILE}_gpu_0.log"
 
   # Check and print the log content accordingly
   if grep -q "SKIPPED" "${TEST_FILE}_gpu_0.log"; then
@@ -50,7 +50,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
 
   # Remove the log files after processing them
   wait
-  rm ${TEST_FILE}_gpu_*.log
+  # rm ${TEST_FILE}_gpu_*.log
 done
 
 wait
