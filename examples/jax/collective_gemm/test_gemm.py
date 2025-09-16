@@ -313,8 +313,13 @@ class TestCollectiveGemm(unittest.TestCase):
 
     def setUp(self):
         """Set up test environment for pytest execution."""
-        # Init the arg parser with required distributed arguments
-        self.args = gemm_parser(None)
+        # Create args object with distributed parameters from pytest fixtures
+        self.args = gemm_parser([])
+        self.args.coordinator_address = self.coordinator_address
+        self.args.num_processes = self.num_processes
+        self.args.process_id = self.process_id
+        self.args.local_device_ids = self.local_device_ids
+        self.args.num_devices_per_process = self.num_devices_per_process
         _initialize_distributed(self.args)
         # Create mesh once for all tests
         self.mesh = _create_mesh(self.args)
@@ -344,7 +349,13 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
 
     def setUp(self):
         """Set up test environment for pytest execution."""
-        self.args = gemm_parser(None)
+        # Create args object with distributed parameters from pytest fixtures
+        self.args = gemm_parser([])
+        self.args.coordinator_address = self.coordinator_address
+        self.args.num_processes = self.num_processes
+        self.args.process_id = self.process_id
+        self.args.local_device_ids = self.local_device_ids
+        self.args.num_devices_per_process = self.num_devices_per_process
         _initialize_distributed(self.args)
         # Create mesh once for all tests
         self.args.enable_data_parallel = True
