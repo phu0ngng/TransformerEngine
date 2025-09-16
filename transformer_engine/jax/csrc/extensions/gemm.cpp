@@ -91,7 +91,7 @@ public:
     NVTE_CHECK(num_local_ranks <= MAX_DEVICES, "num_local_ranks exceeds MAX_DEVICES=8, please recompile TE with MAX_DEVICES=", num_local_ranks);
     NVTE_CHECK(num_ranks % num_local_ranks == 0, "Invalid num_ranks=", num_ranks, ", num_local_ranks=", num_local_ranks);
 
-    auto handler = get(false);
+    auto &handler = get(false);
     handler.num_ranks = num_ranks;
     handler.num_local_ranks = num_local_ranks;
     handler.local_node_id = process_id;
@@ -134,7 +134,7 @@ public:
 };
 
 void InitializeCgemmCommunicator(int num_ranks, int num_local_ranks, int process_id){
-  CommunicatorHandler.init(num_ranks, num_local_nodes, process_id);
+  CommunicatorHandler::get().init(num_ranks, num_local_ranks, process_id);
 }
 
 class CollectiveGemmPlanRegistry {
@@ -158,7 +158,7 @@ class CollectiveGemmPlanRegistry {
     if (it != plan_map.end()) {
       return it->second.get();  // Return existing executor
     }
-    auto comm_handler = CommunicatorHandler::get();
+    auto &comm_handler = CommunicatorHandler::get();
     NVTE_CHECK(comm_handler.num_local_ranks == tp_size, "Expect num_local_ranks == tp_size, got num_local_ranks=", comm_handler.num_local_ranks, ", tp_size=", tp_size);
 
     // Create new plan
