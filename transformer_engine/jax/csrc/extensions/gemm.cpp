@@ -125,6 +125,23 @@ public:
     NVTE_ERROR("Current CUDA device ", current_device, " not found in local_device_ids");
   }
   
+  // Get local device index for current CUDA device
+  // Thread-safe: reads immutable data after initialization, cudaGetDevice() is thread-safe
+  int get_local_device_idx_for_current_device() const {
+    int current_device;
+    NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
+    
+    // Find the local device index that corresponds to the current CUDA device
+    // This is thread-safe since local_device_ids is immutable after initialization
+    for (int i = 0; i < num_local_ranks; i++) {
+      if (local_device_ids[i] == current_device) {
+        return i;
+      }
+    }
+    
+    NVTE_ERROR("Current CUDA device ", current_device, " not found in local_device_ids");
+  }
+  
   // TP-domain-specific accessors for CommOverlapP2P
   // These methods return ranks/nodes within the TP (tensor parallel) domain, not process domain
   
@@ -265,12 +282,18 @@ class CollectiveGemmPlanRegistry {
 
   CommOverlapCore *get_executor(std::vector<size_t> buffer_shape, DType dtype,
                                 CollectiveGemmConfig cgemm_config) {
+    // Get device index from current CUDA context (JAX sets this via FFI)
+    // This is safe in prepare phase since we cache per-device
+    auto &comm_handler = CommunicatorHandler::get();
+    int device_idx = comm_handler.get_local_device_idx_for_current_device();
+    
+    // Include device_idx in plan cache key to ensure device-specific caching
     int64_t plan_id = 0;
     hash_combine(plan_id, buffer_shape[0], buffer_shape[1], static_cast<size_t>(dtype),
                  static_cast<int>(cgemm_config.collective_op), cgemm_config.tp_size,
                  cgemm_config.num_max_streams, cgemm_config.gemm_priority,
                  cgemm_config.comm_priority, cgemm_config.num_comm_sm, cgemm_config.use_ce,
-                 cgemm_config.aggregate_ag);
+                 cgemm_config.aggregate_ag, device_idx);
 
     // Check if plan already exists
     auto it = plan_map.find(plan_id);
@@ -278,7 +301,6 @@ class CollectiveGemmPlanRegistry {
       return it->second.get();  // Return existing executor
     }
     std::cout << "=== CollectiveGemmPlanRegistry calls hanlder init" << std::endl;
-    auto &comm_handler = CommunicatorHandler::get();
     // Validate TP configuration and determine scenario
     if (comm_handler.num_local_ranks == cgemm_config.tp_size) {
       // Scenario 1: Multi-device per process - TP domain = single process
@@ -297,8 +319,7 @@ class CollectiveGemmPlanRegistry {
                  "(2) num_local_ranks == 1 (single device per process)");
     }
 
-    // Create new plan (using device 0 for now - can be enhanced later to accept device parameter)
-    int device_idx = 0;  // TODO: Make this configurable based on the GEMM operation
+    // Create executor with device-specific parameters (device_idx determined above)
     std::unique_ptr<CommOverlapCore> executor;
     executor = std::make_unique<CommOverlapP2PBase>(
       buffer_shape, dtype,
