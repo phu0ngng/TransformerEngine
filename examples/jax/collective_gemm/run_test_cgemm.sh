@@ -54,7 +54,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
 
     if [ $i -eq 0 ]; then
       # For process 0: show live output AND save to log file using tee
-      echo "=== Starting process 0 with live output ==="
+      echo "=== Live output from process 0 ==="
       pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
         -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
         --num-processes=$NUM_GPUS \
