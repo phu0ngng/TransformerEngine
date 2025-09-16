@@ -71,8 +71,9 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
   return std::make_tuple(std::move(input), input_shape);
 }
 
-
+#ifndef MAX_DEVICES
 #define MAX_DEVICES 8
+#endif
 
 // Support both single process single device AND single process multi device
 // Two scenarios:
