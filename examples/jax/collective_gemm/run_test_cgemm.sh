@@ -15,12 +15,38 @@ echo
 echo "*** Executing tests in examples/jax/collective_gemm/ ***"
 
 HAS_FAILURE=0  # Global failure flag
+PIDS=()  # Array to store all process PIDs
+
+# Cleanup function to kill all processes
+cleanup() {
+  echo "=== Cleaning up processes ==="
+  for pid in "${PIDS[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Killing process $pid"
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  # Wait a bit and force kill if needed
+  sleep 2
+  for pid in "${PIDS[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Force killing process $pid"
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  done
+}
+
+# Set up signal handlers to cleanup on exit
+trap cleanup EXIT INT TERM
 
 # Run each test file across all GPUs
 for TEST_FILE in "${TEST_FILES[@]}"; do
   echo
   echo "=== Starting test file: $TEST_FILE ..."
   set +x
+  
+  # Clear PIDs array for this test file
+  PIDS=()
 
   for i in $(seq 0 $(($NUM_GPUS - 1))); do
     # Define output file for logs
@@ -33,12 +59,16 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
         -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
         --num-processes=$NUM_GPUS \
         --process-id=$i 2>&1 | tee "$LOG_FILE" &
+      PID=$!
+      PIDS+=($PID)
     else
       # For other processes: redirect to log files only
       pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
         -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
         --num-processes=$NUM_GPUS \
         --process-id=$i > "$LOG_FILE" 2>&1 &
+      PID=$!
+      PIDS+=($PID)
     fi
   done
 
@@ -61,4 +91,8 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
 done
 
 wait
+
+# Final cleanup (trap will also call cleanup on exit)
+cleanup
+
 exit $HAS_FAILURE
