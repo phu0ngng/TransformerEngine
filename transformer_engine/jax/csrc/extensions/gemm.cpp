@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <string_view>
 #include <tuple>
+#include "nccl.h"
+#include "cuda_runtime.h"
 
 #include "../extensions.h"
 #include "common.h"
@@ -69,7 +71,72 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
   return std::make_tuple(std::move(input), input_shape);
 }
 
-//TODO: Move these there to TE/Common
+#define MAX_DEVICES 8
+
+// Only support single process single device atm, for single process multi device, one would have to
+// pass the gpu_id when calling the GEMM and intepolate the ranks from gpu_id
+class CommunicatorHandler {
+public:
+  // GPU id
+  int num_ranks = -1;
+  int num_local_ranks = -1;   // Should be equal to TP size
+  int rank = -1;
+  int local_rank = -1;
+  int local_node_id = -1;
+  int num_local_nodes = -1;
+
+  ncclComm_t comms[MAX_DEVICES];
+
+  void init(int num_ranks, int num_local_ranks, int process_id){
+    NVTE_CHECK(num_local_ranks <= MAX_DEVICES, "num_local_ranks exceeds MAX_DEVICES=8, please recompile TE with MAX_DEVICES=", num_local_ranks);
+    NVTE_CHECK(num_ranks % num_local_ranks == 0, "Invalid num_ranks=", num_ranks, ", num_local_ranks=", num_local_ranks);
+
+    auto handler = get(false);
+    handler.num_ranks = num_ranks;
+    handler.num_local_ranks = num_local_ranks;
+    handler.local_node_id = process_id;
+    handler.num_local_nodes = num_ranks / num_local_ranks;
+    NVTE_CHECK(0 <= process_id && process_id < handler.num_local_nodes, "Invalid process_id=", process_id, ", which is out of range 0 - ", handler.num_local_nodes);
+
+    for (int lrank = 0; lrank < num_local_ranks; lrank++) {
+      handler._local_device_ids[lrank] = lrank;
+      NVTE_CHECK_CUDA(cudaSetDevice(lrank));
+    }
+
+    ncclUniqueId id;
+    NVTE_CHECK_NCCL(ncclGetUniqueId(&id));
+    // NOTE: Hack to avoid having to share the nccl uid out of band.
+    *reinterpret_cast<uint64_t*>(&id) = 0xDEADBEEFDEADBEEF;
+
+    NVTE_CHECK_NCCL(ncclGroupStart());
+    for (int lrank = 0; lrank < num_local_ranks; lrank++) {
+      CUDACHECK(cudaSetDevice(local_device_ids[lrank]));
+      handler.rank = num_local_ranks * process_id + lrank;
+      NVTE_CHECK_NCCL(ncclCommInitRank(&handler.comms[lrank], handler.num_ranks, id, handler.rank));
+    }
+    NVTE_CHECK_NCCL(ncclGroupEnd());
+    handler._initialize = true;
+  }
+  static CommunicatorHandler &get(bool is_initialized = true){
+    static CommunicatorHandler instance;
+    NVTE_CHECK(instance._initialize == is_initialized);
+    return instance;
+  }
+
+  CommunicatorHandler(const CommunicatorHandler &) = delete;
+  CommunicatorHandler &operator=(const CommunicatorHandler &) = delete;
+
+ private:
+  CommunicatorHandler() = default;
+  ~CommunicatorHandler() = default;
+  bool _initialize = false;
+  int _local_device_ids[MAX_DEVICES]; // TODO: check if it is needed to store this
+};
+
+void InitializeCgemmCommunicator(int num_ranks, int num_local_ranks, int process_id){
+  CommunicatorHandler.init(num_ranks, num_local_nodes, process_id);
+}
+
 class CollectiveGemmPlanRegistry {
  public:
   static CollectiveGemmPlanRegistry &getInstance() {
@@ -91,15 +158,20 @@ class CollectiveGemmPlanRegistry {
     if (it != plan_map.end()) {
       return it->second.get();  // Return existing executor
     }
+    auto comm_handler = CommunicatorHandler::get();
+    NVTE_CHECK(comm_handler.num_local_ranks == tp_size, "Expect num_local_ranks == tp_size, got num_local_ranks=", comm_handler.num_local_ranks, ", tp_size=", tp_size);
 
     // Create new plan
     std::unique_ptr<CommOverlapCore> executor;
     executor = std::make_unique<CommOverlapP2PBase>(
-        buffer_shape, dtype, cgemm_config.tp_size,
-        get_nvte_collective_op(cgemm_config.collective_op), cgemm_config.num_max_streams,
-        1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
-        cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
-        false /*atomic_gemm*/, cgemm_config.aggregate_ag);
+      buffer_shape, dtype,
+      comm_handler.rank, comm_handler.num_ranks,
+      comm_handler.local_rank, comm_handler.num_local_ranks,
+      comm_handler.local_node_id, comm_handler.num_local_nodes, cgemm_config.tp_size,
+      get_nvte_collective_op(cgemm_config.collective_op), cgemm_config.num_max_streams,
+      1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
+      cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
+      false /*atomic_gemm*/, cgemm_config.aggregate_ag);
 
     CommOverlapCore *executor_ptr = executor.get();
     plan_map[plan_id] = std::move(executor);
@@ -126,30 +198,30 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
   nvte_cublas_handle_init();
 
   // Init UB buffer
-  if (cgemm_config.collective_op != JAXX_Collective_Op::NONE) {
-    std::vector<size_t> lhs_shape = {
-        product(lhs.dimensions(), 0, lhs_axis_boundary),
-        product(lhs.dimensions(), lhs_axis_boundary, lhs.dimensions().size())};
-    std::vector<size_t> rhs_shape = {
-        product(rhs.dimensions(), 0, rhs_axis_boundary),
-        product(rhs.dimensions(), rhs_axis_boundary, rhs.dimensions().size())};
-
-    std::vector<size_t> out_shape = {(lhs_transposed) ? lhs_shape[1] : lhs_shape[0],
-                                     (rhs_transposed) ? rhs_shape[0] : rhs_shape[1]};
-
-    std::vector<size_t> buffer_shape{0, 0};
-    DType buffer_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
-    if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
-      buffer_shape[0] = lhs_shape[0] * cgemm_config.tp_size;
-      buffer_shape[1] = lhs_shape[1];
-      buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
-    } else if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
-      buffer_shape[0] = out_shape[0];
-      buffer_shape[1] = out_shape[1];
-    }
-    auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype,
-                                                                    cgemm_config);
-  }
+  // if (cgemm_config.collective_op != JAXX_Collective_Op::NONE) {
+  //   std::vector<size_t> lhs_shape = {
+  //       product(lhs.dimensions(), 0, lhs_axis_boundary),
+  //       product(lhs.dimensions(), lhs_axis_boundary, lhs.dimensions().size())};
+  //   std::vector<size_t> rhs_shape = {
+  //       product(rhs.dimensions(), 0, rhs_axis_boundary),
+  //       product(rhs.dimensions(), rhs_axis_boundary, rhs.dimensions().size())};
+  //
+  //   std::vector<size_t> out_shape = {(lhs_transposed) ? lhs_shape[1] : lhs_shape[0],
+  //                                    (rhs_transposed) ? rhs_shape[0] : rhs_shape[1]};
+  //
+  //   std::vector<size_t> buffer_shape{0, 0};
+  //   DType buffer_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
+  //   if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
+  //     buffer_shape[0] = lhs_shape[0] * cgemm_config.tp_size;
+  //     buffer_shape[1] = lhs_shape[1];
+  //     buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
+  //   } else if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
+  //     buffer_shape[0] = out_shape[0];
+  //     buffer_shape[1] = out_shape[1];
+  //   }
+  //   auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype,
+  //                                                                   cgemm_config);
+  // }
   return ffi_with_cuda_error_check();
 }
 

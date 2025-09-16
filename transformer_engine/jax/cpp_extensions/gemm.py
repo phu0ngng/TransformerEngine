@@ -55,6 +55,7 @@ __all__ = [
     "CollectiveGemmConfigSet",
     "CollectiveOp",
     "noop_cgemm_config_set",
+    "initialize_cgemm_communicator",
     "gemm",
     "grouped_gemm",
     "gemm_uses_jax_dot",
@@ -163,6 +164,12 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     assert not isinstance(rhs_q, ScaledTensor2x)
 
     return lhs_q, rhs_q
+
+
+def initialize_cgemm_communicator(num_ranks, num_local_ranks, process_id):
+    assert num_ranks % num_local_ranks == 0, f"Invalid num_ranks={num_ranks}, num_local_ranks={num_local_ranks}"
+    assert 0 <= process_id < num_ranks, f"Invalid process_id={process_id}"
+    tex.initialize_cgemm_communicator(num_ranks, num_local_ranks, process_id)
 
 
 class CollectiveOp(Enum):

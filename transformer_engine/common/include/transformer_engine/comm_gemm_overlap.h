@@ -282,6 +282,14 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
                      bool atomic_gemm = false, bool aggregate = false);
 
+  // NCCL-based only constructor
+  CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
+                     int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
+                     CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
+                     int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
+                     int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
+                     bool atomic_gemm = false, bool aggregate = false);
+
   virtual ~CommOverlapP2PBase();
 
   void copy_into_buffer(cudaStream_t stream, const TensorWrapper &source, bool local_chunk,

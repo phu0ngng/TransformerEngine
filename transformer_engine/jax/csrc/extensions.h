@@ -132,6 +132,8 @@ struct CollectiveGemmConfig {
   bool aggregate_ag;
 };
 
+void InitializeCgemmCommunicator(int num_ranks, int num_local_ranks, int process_id);
+
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 
