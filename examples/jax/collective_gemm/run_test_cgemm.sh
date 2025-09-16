@@ -26,19 +26,26 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     # Define output file for logs
     LOG_FILE="${TEST_FILE}_gpu_${i}.log"
 
-    # Run pytest and redirect stdout and stderr to the log file
-    pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
-      -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
-      --num-processes=$NUM_GPUS \
-      --process-id=$i  > "$LOG_FILE" 2>&1 &
-    done
+    if [ $i -eq 0 ]; then
+      # For process 0: show live output AND save to log file using tee
+      echo "=== Starting process 0 with live output ==="
+      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
+        -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
+        --num-processes=$NUM_GPUS \
+        --process-id=$i 2>&1 | tee "$LOG_FILE" &
+    else
+      # For other processes: redirect to log files only
+      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
+        -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
+        --num-processes=$NUM_GPUS \
+        --process-id=$i > "$LOG_FILE" 2>&1 &
+    fi
+  done
 
-  # Wait for the processes to finish
+  # Wait for all processes to finish
   wait
-  # tail -n +7 "${TEST_FILE}_gpu_0.log"
-  cat "${TEST_FILE}_gpu_0.log"
 
-  # Check and print the log content accordingly
+  # Check and print the log content from process 0 (now has log file thanks to tee)
   if grep -q "SKIPPED" "${TEST_FILE}_gpu_0.log"; then
     echo "... $TEST_FILE SKIPPED"
   elif grep -q "PASSED" "${TEST_FILE}_gpu_0.log"; then
