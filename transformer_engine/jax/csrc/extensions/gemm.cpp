@@ -221,12 +221,12 @@ public:
     // Create NCCL communicators for all local devices
     ncclUniqueId id;
     // Use a deterministic approach to generate the same ID across all processes
-    // This ensures all processes use the exact same NCCL unique ID
     memset(&id, 0, sizeof(ncclUniqueId));
-    // Set a deterministic pattern that all processes will generate identically
-    uint64_t* id_ptr = reinterpret_cast<uint64_t*>(&id);
-    id_ptr[0] = 0xDEADBEEFDEADBEEF;
-    id_ptr[1] = 0xCAFEBABECAFEBABE;
+    // Fill with a repeating pattern to ensure all bytes are set deterministically
+    uint8_t* id_bytes = reinterpret_cast<uint8_t*>(&id);
+    for (size_t i = 0; i < sizeof(ncclUniqueId); i++) {
+      id_bytes[i] = static_cast<uint8_t>((0xDEADBEEF >> (8 * (i % 4))) & 0xFF);
+    }
 
     // Initialize communicators using NCCL group API for efficiency
     std::cout << "=== Starting NCCL group initialization for " << num_local_ranks << " devices" << std::endl;

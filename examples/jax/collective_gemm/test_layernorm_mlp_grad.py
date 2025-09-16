@@ -402,7 +402,10 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     def tearDown(self):
         """Clean up after each test."""
         # Clear the mesh to prevent interference between tests
-        jax.sharding.set_mesh(None)
+        # Clear the mesh to prevent interference between tests
+        # Note: JAX doesn't accept None, so we create a minimal 1-device mesh to reset
+        single_device_mesh = jax.sharding.Mesh([jax.devices()[0]], axis_names=())
+        jax.sharding.set_mesh(single_device_mesh)
         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_layernorm_mlp_grad(self):
@@ -433,7 +436,10 @@ class TestCollectiveDenseGradientWithDP(unittest.TestCase):
     def tearDown(self):
         """Clean up after each test."""
         # Clear the mesh to prevent interference between tests
-        jax.sharding.set_mesh(None)
+        # Clear the mesh to prevent interference between tests
+        # Note: JAX doesn't accept None, so we create a minimal 1-device mesh to reset
+        single_device_mesh = jax.sharding.Mesh([jax.devices()[0]], axis_names=())
+        jax.sharding.set_mesh(single_device_mesh)
         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_layernorm_mlp_grad_with_dp(self):
