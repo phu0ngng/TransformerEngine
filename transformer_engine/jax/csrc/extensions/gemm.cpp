@@ -90,7 +90,7 @@ public:
  static void init(int num_ranks, int num_local_ranks, int process_id){
     NVTE_CHECK(num_local_ranks <= MAX_DEVICES, "num_local_ranks exceeds MAX_DEVICES=8, please recompile TE with MAX_DEVICES=", num_local_ranks);
     NVTE_CHECK(num_ranks % num_local_ranks == 0, "Invalid num_ranks=", num_ranks, ", num_local_ranks=", num_local_ranks);
-
+    std::cout << "=== Calling from init" << std::endl;
     auto &handler = get(false);
     handler.num_ranks = num_ranks;
     handler.num_local_ranks = num_local_ranks;
@@ -118,8 +118,9 @@ public:
     handler._initialize = true;
   }
   static CommunicatorHandler &get(bool is_initialized = true){
+    std::cout << "CommunicatorHandler is called with is_initialized=" << is_initialized << std::endl;
     static CommunicatorHandler instance;
-    NVTE_CHECK(instance._initialize == is_initialized);
+    NVTE_CHECK(instance._initialize == is_initialized, "interface._initialize=", instance._initialize, ", is_initialized=", is_initialized);
     return instance;
   }
 
@@ -134,7 +135,8 @@ public:
 };
 
 void InitializeCgemmCommunicator(int num_ranks, int num_local_ranks, int process_id){
-  CommunicatorHandler::get().init(num_ranks, num_local_ranks, process_id);
+  auto &handler = CommunicatorHandler::get(false);
+  handler.init(num_ranks, num_local_ranks, process_id);
 }
 
 class CollectiveGemmPlanRegistry {
@@ -158,6 +160,7 @@ class CollectiveGemmPlanRegistry {
     if (it != plan_map.end()) {
       return it->second.get();  // Return existing executor
     }
+    std::cout << "=== CollectiveGemmPlanRegistry calls hanlder init" << std::endl;
     auto &comm_handler = CommunicatorHandler::get();
     NVTE_CHECK(comm_handler.num_local_ranks == cgemm_config.tp_size, "Expect num_local_ranks == tp_size, got num_local_ranks=", comm_handler.num_local_ranks, ", tp_size=", cgemm_config.tp_size);
 
@@ -196,6 +199,7 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
                                  bool use_split_accumulator, CollectiveGemmConfig cgemm_config) {
   // Init cublas handler
   nvte_cublas_handle_init();
+  std::cout << "=== CollectiveGemmInitFFI is called" << std::endl;
 
   // Init UB buffer
   // if (cgemm_config.collective_op != JAXX_Collective_Op::NONE) {
@@ -255,6 +259,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    int64_t rhs_axis_boundary, bool lhs_transposed, bool rhs_transposed,
                    bool fuse_bias, bool fuse_gelu, bool grad, bool use_split_accumulator,
                    CollectiveGemmConfig cgemm_config) {
+  std::cout << "=== GemmFFI is called" << std::endl;
   // NOTE: TensorWrapper operands are always rowwise for full-precision GEMM, or FP8 GEMM when
   //       device supports non-TN layouts (compute capability >= 10.0, excluding 12.x)
   bool always_rowwise = (scaling_mode == JAXX_Scaling_Mode::NO_SCALING ||

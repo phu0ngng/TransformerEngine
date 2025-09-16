@@ -5,12 +5,12 @@
 
 This script uses custom distributed initialization with the following arguments:
 - --coordinator-address: Coordinator address for distributed initialization
-- --num-process: Number of processes for distributed initialization
+- --num-processes: Number of processes for distributed initialization
 - --process-id: Process ID for distributed initialization
 - --local-device-ids: Local device IDs for distributed initialization
 
 Example:
-    python test_gemm.py --coordinator-address localhost:1234 --num-process 2 --process-id 0 --local-device-ids 0,1,2,3
+    python test_gemm.py --coordinator-address localhost:1234 --num-processes 2 --process-id 0 --local-device-ids 0,1,2,3
 """
 import argparse
 import unittest
@@ -59,10 +59,10 @@ def _initialize_distributed(args):
         print("JAX distributed already initialized, skipping...")
         return
 
-    if args.coordinator_address is None or args.num_process is None or args.process_id is None:
+    if args.coordinator_address is None or args.num_processes is None or args.process_id is None:
         raise ValueError(
             "All distributed initialization arguments are required: "
-            "--coordinator-address, --num-process, --process-id"
+            "--coordinator-address, --num-processes, --process-id"
         )
     if args.local_device_ids is None:
         assert args.num_devices_per_process is not None, "Either local_device_ids or num_devices_per_process must be provided"
@@ -73,12 +73,12 @@ def _initialize_distributed(args):
     assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
 
     print(f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
-          f"num_processes={args.num_process}, process_id={args.process_id}, "
+          f"num_processes={args.num_processes}, process_id={args.process_id}, "
           f"local_device_ids={args.local_device_ids}")
 
     jax.distributed.initialize(
         coordinator_address=args.coordinator_address,
-        num_processes=args.num_process,
+        num_processes=args.num_processes,
         process_id=args.process_id,
         local_device_ids=args.local_device_ids,
     )
@@ -93,8 +93,8 @@ def _initialize_distributed(args):
         jax.local_device_count() == 1
     ), f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found {jax.local_device_count()}"
 
-    num_local_ranks = args.num_process
-    tex.initialize_cgemm_communicator(num_ranks=args.num_process, num_local_ranks=num_local_ranks, process_id=args.process_id)
+    num_local_ranks = args.num_processes
+    tex.initialize_cgemm_communicator(num_ranks=args.num_processes, num_local_ranks=num_local_ranks, process_id=args.process_id)
 
 
 def _get_operand_sharding(mesh, collective_op, is_with_dp):
@@ -115,7 +115,7 @@ def _get_operand_sharding(mesh, collective_op, is_with_dp):
 def _create_mesh(args):
     """Create mesh configuration with proper validation."""
     num_gpu = jax.device_count()
-    numranks = args.num_process * args.num_devices_per_process
+    numranks = args.num_processes * args.num_devices_per_process
     assert num_gpu == numranks, f"Requires {num_gpu} processes for {num_gpu} GPUs, got {numranks}!"
     num_gpu_dp = 2 if args.enable_data_parallel else 1
     assert (
@@ -152,7 +152,7 @@ def run_gemm_tests(args, mesh=None):
     # Initialize distributed with provided arguments
     _initialize_distributed(args)
 
-    n_gpus = args.num_devices_per_process * args.num_process
+    n_gpus = args.num_devices_per_process * args.num_processes
     mesh = mesh or _create_mesh(args)
 
     # Create test data
@@ -283,7 +283,7 @@ def gemm_parser(args):
         ),
     )
     parser.add_argument(
-        "--num-process",
+        "--num-processes",
         type=int,
         default=None,
         help="Number of processes for distributed initialization",
@@ -393,9 +393,9 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) < 7:  # Need at least the 3 required distributed args
         print("Error: This script requires distributed initialization arguments.")
-        print("Usage: python test_gemm.py --coordinator-address <address> --num-process <num> --process-id <id> [--local-device-ids <ids>] [other args]")
-        print("Example: python test_gemm.py --coordinator-address localhost:1234 --num-process 4 --process-id 0")
-        print("Example: python test_gemm.py --coordinator-address localhost:1234 --num-process 2 --process-id 0 --local-device-ids 0,1,2,3")
+        print("Usage: python test_gemm.py --coordinator-address <address> --num-processes <num> --process-id <id> [--local-device-ids <ids>] [other args]")
+        print("Example: python test_gemm.py --coordinator-address localhost:1234 --num-processes 4 --process-id 0")
+        print("Example: python test_gemm.py --coordinator-address localhost:1234 --num-processes 2 --process-id 0 --local-device-ids 0,1,2,3")
         sys.exit(1)
 
     args = gemm_parser(None)

@@ -29,7 +29,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     # Run pytest and redirect stdout and stderr to the log file
     pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
       -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
-      --num-process=$NUM_GPUS \
+      --num-processes=$NUM_GPUS \
       --process-id=$i  > "$LOG_FILE" 2>&1 &
     done
 

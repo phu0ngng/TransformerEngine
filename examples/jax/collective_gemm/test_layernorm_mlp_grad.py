@@ -46,16 +46,16 @@ def _is_distributed_initialized():
 def _initialize_distributed(args):
     """Initialize JAX distributed with custom arguments."""
     global _distributed_initialized
-    
+
     # Check if already initialized
     if _distributed_initialized:
         print("JAX distributed already initialized, skipping...")
         return
-    
+
     if args.coordinator_address is None or args.num_processes is None or args.process_id is None:
         raise ValueError(
             "All distributed initialization arguments are required: "
-            "--coordinator-address, --num-process, --process-id"
+            "--coordinator-address, --num-processes, --process-id"
         )
     if args.local_device_ids is None:
         assert args.num_devices_per_process is not None, "Either local_device_ids or num_devices_per_process must be provided"
@@ -64,11 +64,11 @@ def _initialize_distributed(args):
         args.num_devices_per_process = len(args.local_device_ids.split(","))
 
     assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
-    
+
     print(f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
           f"num_processeses={args.num_processes}, process_id={args.process_id}, "
           f"local_device_ids={args.local_device_ids}")
-    
+
     jax.distributed.initialize(
         coordinator_address=args.coordinator_address,
         num_processeses=args.num_processes,
@@ -78,10 +78,10 @@ def _initialize_distributed(args):
     # Initialize native library
     assert "NCCL_COMM_ID" not in os.environ
     os.environ["NCCL_COMM_ID"] = "127.0.0.1:12444"
-    
+
     # Mark as initialized
     _distributed_initialized = True
-    
+
     assert (
         jax.local_device_count() == 1
     ), f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found {jax.local_device_count()}"
@@ -198,10 +198,10 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
     print(args)
     # Collective GEMM requires Shardy partitioner to be disabled
     jax.config.update("jax_use_shardy_partitioner", False)
-    
+
     # Initialize distributed with provided arguments
     _initialize_distributed(args)
-    
+
     mesh = mesh or _create_mesh(args)
 
     # Create test data
@@ -350,7 +350,7 @@ def layernorm_mlp_grad_parser(args):
         help="Coordinator address for distributed initialization",
     )
     parser.add_argument(
-        "--num-process",
+        "--num-processes",
         type=int,
         default=None,
         help="Number of processes for distributed initialization",
@@ -444,11 +444,11 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) < 7:  # Need at least the 3 required distributed args
         print("Error: This script requires distributed initialization arguments.")
-        print("Usage: python test_layernorm_mlp_grad.py --coordinator-address <address> --num-process <num> --process-id <id> [--local-device-ids <ids>] [other args]")
-        print("Example: python test_layernorm_mlp_grad.py --coordinator-address localhost:1234 --num-process 4 --process-id 0")
-        print("Example: python test_layernorm_mlp_grad.py --coordinator-address localhost:1234 --num-process 2 --process-id 0 --local-device-ids 0,1,2,3")
+        print("Usage: python test_layernorm_mlp_grad.py --coordinator-address <address> --num-processes <num> --process-id <id> [--local-device-ids <ids>] [other args]")
+        print("Example: python test_layernorm_mlp_grad.py --coordinator-address localhost:1234 --num-processes 4 --process-id 0")
+        print("Example: python test_layernorm_mlp_grad.py --coordinator-address localhost:1234 --num-processes 2 --process-id 0 --local-device-ids 0,1,2,3")
         sys.exit(1)
-    
+
     args = layernorm_mlp_grad_parser(None)
     _initialize_distributed(args)
     run_layernorm_mlp_grad_tests(args, mesh=None)

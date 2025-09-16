@@ -22,6 +22,7 @@ from transformer_engine_jax import (
     get_num_compute_streams,
     JAXX_Collective_Op,
     get_device_compute_capability,
+    initialize_cgemm_communicator as tex_initialize_cgemm_communicator,
 )
 
 from .base import BasePrimitive, register_primitive
@@ -169,7 +170,7 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
 def initialize_cgemm_communicator(num_ranks, num_local_ranks, process_id):
     assert num_ranks % num_local_ranks == 0, f"Invalid num_ranks={num_ranks}, num_local_ranks={num_local_ranks}"
     assert 0 <= process_id < num_ranks, f"Invalid process_id={process_id}"
-    tex.initialize_cgemm_communicator(num_ranks, num_local_ranks, process_id)
+    tex_initialize_cgemm_communicator(num_ranks, num_local_ranks, process_id)
 
 
 class CollectiveOp(Enum):
