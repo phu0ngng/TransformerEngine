@@ -211,11 +211,17 @@ public:
 
     // Initialize local devices and their global ranks
     for (int local_idx = 0; local_idx < num_local_ranks; local_idx++) {
-      handler.local_device_ids[local_idx] = local_idx;
+      // Use the device that JAX has already assigned to this process
+      int current_device;
+      NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
+      handler.local_device_ids[local_idx] = current_device;
       handler.global_ranks[local_idx] = process_id * num_local_ranks + local_idx;
       
-      // Set CUDA device for initialization
-      NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids[local_idx]));
+      std::cout << "=== Process " << process_id << ", local_idx=" << local_idx 
+                << " -> Using JAX-assigned CUDA device=" << current_device 
+                << ", global_rank=" << handler.global_ranks[local_idx] << std::endl;
+      
+      // Device is already set by JAX, no need to change it
     }
 
     // Create NCCL communicators for all local devices

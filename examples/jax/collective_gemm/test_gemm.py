@@ -66,21 +66,47 @@ def _initialize_distributed(args):
         )
     if args.local_device_ids is None:
         assert args.num_devices_per_process is not None, "Either local_device_ids or num_devices_per_process must be provided"
-        args.local_device_ids = ",".join(map(str, range(args.num_devices_per_process)))
+        # Calculate device range for this process
+        # Single process single device: each process gets one unique device
+        # Single process multiple devices: each process gets a unique range of devices
+        start_device = args.process_id * args.num_devices_per_process
+        device_range = range(start_device, start_device + args.num_devices_per_process)
+        global_device_ids_for_this_process = ",".join(map(str, device_range))
     else:
+        # Use explicitly provided global device IDs
+        global_device_ids_for_this_process = args.local_device_ids
         args.num_devices_per_process = len(args.local_device_ids.split(","))
 
     assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
 
     print(f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
-          f"num_processes={args.num_processes}, process_id={args.process_id}, "
-          f"local_device_ids={args.local_device_ids}")
+          f"num_processes={args.num_processes}, process_id={args.process_id}")
+    print(f"This process will manage global CUDA devices: {global_device_ids_for_this_process}")
+    
+    # Validate device assignment
+    device_list = global_device_ids_for_this_process.split(",")
+    print(f"Process {args.process_id} assigned devices: {device_list}")
+    
+    if args.num_devices_per_process == 1:
+        # Single device per process: validate device = process_id
+        assert len(device_list) == 1, f"Expected 1 device per process, got {len(device_list)} devices: {device_list}"
+        expected_device = str(args.process_id)
+        actual_device = device_list[0]
+        print(f"Single device per process: process {args.process_id} → device {actual_device}")
+        assert actual_device == expected_device, f"Device assignment mismatch: process {args.process_id} should use device {expected_device}, but got {actual_device}"
+    else:
+        # Multiple devices per process: validate device range
+        expected_start = args.process_id * args.num_devices_per_process
+        expected_devices = [str(i) for i in range(expected_start, expected_start + args.num_devices_per_process)]
+        print(f"Multiple devices per process: process {args.process_id} → devices {device_list}")
+        assert device_list == expected_devices, f"Device range mismatch: process {args.process_id} should use devices {expected_devices}, but got {device_list}"
 
+    # Note: "local_device_ids" is a JAX term meaning "global CUDA devices managed by this process"
     jax.distributed.initialize(
         coordinator_address=args.coordinator_address,
         num_processes=args.num_processes,
         process_id=args.process_id,
-        local_device_ids=args.local_device_ids,
+        local_device_ids=global_device_ids_for_this_process,
     )
 
     # Mark as initialized
@@ -95,6 +121,11 @@ def _initialize_distributed(args):
     # num_local_ranks = GPUs per process (1 for single device per process)
     num_local_ranks = 1  # Single GPU per process
     total_ranks = args.num_processes  # Total number of processes/ranks
+    
+    print(f"Initializing CGEMM communicator with num_ranks={total_ranks}, num_local_ranks={num_local_ranks}, process_id={args.process_id}")
+    print(f"JAX local devices: {jax.local_devices()}")
+    print(f"JAX device count: {jax.local_device_count()}")
+    
     tex.initialize_cgemm_communicator(num_ranks=total_ranks, num_local_ranks=num_local_ranks, process_id=args.process_id)
 
 
