@@ -6,8 +6,6 @@ import argparse
 import unittest
 import os
 
-from mpi4py import MPI
-
 import jax
 import jax.numpy as jnp
 from jax.experimental import mesh_utils
@@ -24,6 +22,7 @@ from transformer_engine.jax.cpp_extensions.gemm import (
     CollectiveGemmConfigSet,
     CollectiveOp,
     noop_cgemm_config_set,
+    initialize_cgemm_communicator,
 )
 from transformer_engine.jax.sharding import MeshResource
 import transformer_engine.jax.flax as te_flax
@@ -37,14 +36,58 @@ jax.config.update(
     "jax_use_shardy_partitioner", False
 )  # CollectiveGEMM does not work with Shardy yet
 
-# FOR NOW: This script needs to be launched via `mpirun` with 1 process per GPU
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-myrank = MPI.COMM_WORLD.Get_rank()
-numranks = MPI.COMM_WORLD.Get_size()
-jax.distributed.initialize(cluster_detection_method="mpi4py")
-assert (
-    jax.local_device_count() == 1
-), f"[{myrank}|{numranks}] Expected 1 GPU per process, found {jax.local_device_count()}"
+# Global flag to track if distributed has been initialized
+_distributed_initialized = False
+
+def _is_distributed_initialized():
+    """Check if JAX distributed has been initialized."""
+    return _distributed_initialized
+
+def _initialize_distributed(args):
+    """Initialize JAX distributed with custom arguments."""
+    global _distributed_initialized
+    
+    # Check if already initialized
+    if _distributed_initialized:
+        print("JAX distributed already initialized, skipping...")
+        return
+    
+    if args.coordinator_address is None or args.num_processes is None or args.process_id is None:
+        raise ValueError(
+            "All distributed initialization arguments are required: "
+            "--coordinator-address, --num-process, --process-id"
+        )
+    if args.local_device_ids is None:
+        assert args.num_devices_per_process is not None, "Either local_device_ids or num_devices_per_process must be provided"
+        args.local_device_ids = ",".join(map(str, range(args.num_devices_per_process)))
+    else:
+        args.num_devices_per_process = len(args.local_device_ids.split(","))
+
+    assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
+    
+    print(f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
+          f"num_processeses={args.num_processes}, process_id={args.process_id}, "
+          f"local_device_ids={args.local_device_ids}")
+    
+    jax.distributed.initialize(
+        coordinator_address=args.coordinator_address,
+        num_processeses=args.num_processes,
+        process_id=args.process_id,
+        local_device_ids=args.local_device_ids,
+    )
+    # Initialize native library
+    assert "NCCL_COMM_ID" not in os.environ
+    os.environ["NCCL_COMM_ID"] = "127.0.0.1:12444"
+    
+    # Mark as initialized
+    _distributed_initialized = True
+    
+    assert (
+        jax.local_device_count() == 1
+    ), f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found {jax.local_device_count()}"
+
+    num_local_ranks = args.num_processes
+    initialize_cgemm_communicator(num_ranks=args.num_processes, num_local_ranks=num_local_ranks, process_id=args.process_id)
 
 
 def _get_logical_axes():
@@ -72,6 +115,7 @@ def _get_operand_sharding(mesh):
 def _create_mesh(args):
     """Create mesh configuration with proper validation."""
     num_gpu = jax.device_count()
+    numranks = args.num_processes * args.num_devices_per_process
     assert num_gpu == numranks, f"Requires {num_gpu} processes for {num_gpu} GPUs, got {numranks}!"
     num_gpu_dp = 2 if args.enable_data_parallel else 1
     assert (
@@ -154,6 +198,10 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
     print(args)
     # Collective GEMM requires Shardy partitioner to be disabled
     jax.config.update("jax_use_shardy_partitioner", False)
+    
+    # Initialize distributed with provided arguments
+    _initialize_distributed(args)
+    
     mesh = mesh or _create_mesh(args)
 
     # Create test data
@@ -246,7 +294,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
         jax.block_until_ready(gathered_grads)
         jax.block_until_ready(gathered_ref_grads)
 
-    if args.enable_result_check and myrank == 0:
+    if args.enable_result_check and args.process_id == 0:
         assert_allclose(ref_output, output, dtype=jnp.bfloat16)
         for ref_grad, gathered_grad in zip(gathered_ref_grads, gathered_grads):
             assert_allclose(ref_grad, gathered_grad, dtype=jnp.bfloat16)
@@ -295,6 +343,36 @@ def layernorm_mlp_grad_parser(args):
         default=False,
         help="Enable result check (default: False)",
     )
+    parser.add_argument(
+        "--coordinator-address",
+        type=str,
+        default=None,
+        help="Coordinator address for distributed initialization",
+    )
+    parser.add_argument(
+        "--num-process",
+        type=int,
+        default=None,
+        help="Number of processes for distributed initialization",
+    )
+    parser.add_argument(
+        "--num-devices-per-process",
+        type=str,
+        default=None,
+        help="Number of devices per process for distributed initialization",
+    )
+    parser.add_argument(
+        "--process-id",
+        type=int,
+        default=None,
+        help="Process ID for distributed initialization",
+    )
+    parser.add_argument(
+        "--local-device-ids",
+        type=str,
+        default=None,
+        help="Local device IDs for distributed initialization",
+    )
     return parser.parse_args(args)
 
 
@@ -306,8 +384,9 @@ class TestCollectiveDenseGradient(unittest.TestCase):
 
     def setUp(self):
         """Set up test environment for pytest execution."""
-        # Init the arg parser
-        self.args = layernorm_mlp_grad_parser(["--batch-size", "4"])
+        # Init the arg parser with required distributed arguments
+        self.args = layernorm_mlp_grad_parser(None)
+        _initialize_distributed(self.args)
         # Create mesh once for all tests
         self.mesh = _create_mesh(self.args)
         jax.sharding.set_mesh(self.mesh)
@@ -330,8 +409,8 @@ class TestCollectiveDenseGradientWithDP(unittest.TestCase):
 
     def setUp(self):
         """Set up test environment for pytest execution."""
-        # Init the arg parser
-        self.args = layernorm_mlp_grad_parser(["--batch-size", "4"])
+        self.args = layernorm_mlp_grad_parser(None)
+        _initialize_distributed(self.args)
         # Create mesh once for all tests
         self.args.enable_data_parallel = True
         self.mesh = _create_mesh(self.args)
@@ -351,4 +430,14 @@ class TestCollectiveDenseGradientWithDP(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    run_layernorm_mlp_grad_tests(layernorm_mlp_grad_parser(None), mesh=None)
+    import sys
+    if len(sys.argv) < 7:  # Need at least the 3 required distributed args
+        print("Error: This script requires distributed initialization arguments.")
+        print("Usage: python test_layernorm_mlp_grad.py --coordinator-address <address> --num-process <num> --process-id <id> [--local-device-ids <ids>] [other args]")
+        print("Example: python test_layernorm_mlp_grad.py --coordinator-address localhost:1234 --num-process 4 --process-id 0")
+        print("Example: python test_layernorm_mlp_grad.py --coordinator-address localhost:1234 --num-process 2 --process-id 0 --local-device-ids 0,1,2,3")
+        sys.exit(1)
+    
+    args = layernorm_mlp_grad_parser(None)
+    _initialize_distributed(args)
+    run_layernorm_mlp_grad_tests(args, mesh=None)
