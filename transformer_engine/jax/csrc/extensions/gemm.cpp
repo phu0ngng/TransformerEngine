@@ -220,16 +220,25 @@ public:
 
     // Create NCCL communicators for all local devices
     ncclUniqueId id;
-    NVTE_CHECK_NCCL(ncclGetUniqueId(&id));
-    // NOTE: Hack to avoid having to share the nccl uid out of band.
-    *reinterpret_cast<uint64_t*>(&id) = 0xDEADBEEFDEADBEEF;
+    // Use a deterministic approach to generate the same ID across all processes
+    // This ensures all processes use the exact same NCCL unique ID
+    memset(&id, 0, sizeof(ncclUniqueId));
+    // Set a deterministic pattern that all processes will generate identically
+    uint64_t* id_ptr = reinterpret_cast<uint64_t*>(&id);
+    id_ptr[0] = 0xDEADBEEFDEADBEEF;
+    id_ptr[1] = 0xCAFEBABECAFEBABE;
 
     // Initialize communicators using NCCL group API for efficiency
+    std::cout << "=== Starting NCCL group initialization for " << num_local_ranks << " devices" << std::endl;
     NVTE_CHECK_NCCL(ncclGroupStart());
     for (int local_idx = 0; local_idx < num_local_ranks; local_idx++) {
       NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids[local_idx]));
+      std::cout << "=== Initializing NCCL comm for local_idx=" << local_idx 
+                << ", global_rank=" << handler.global_ranks[local_idx] 
+                << ", device=" << handler.local_device_ids[local_idx] << std::endl;
       NVTE_CHECK_NCCL(ncclCommInitRank(&handler.comms[local_idx], handler.num_ranks, id, handler.global_ranks[local_idx]));
     }
+    std::cout << "=== Ending NCCL group initialization" << std::endl;
     NVTE_CHECK_NCCL(ncclGroupEnd());
     
     std::cout << "=== Successfully initialized " << num_local_ranks << " NCCL communicators" << std::endl;
