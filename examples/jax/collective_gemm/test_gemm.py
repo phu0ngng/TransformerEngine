@@ -91,7 +91,7 @@ def _initialize_distributed(args):
     ), f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found {jax.local_device_count()}"
 
     num_local_ranks = args.num_processes
-    tex.initialize_cgemm_communicator(num_ranks=args.num_processes, num_local_ranks=num_local_ranks, process_id=args.process_id)
+    tex.cgemm_communicator_initialize(num_ranks=args.num_processes, num_local_ranks=num_local_ranks, process_id=args.process_id)
 
 
 def _get_operand_sharding(mesh, collective_op, is_with_dp):

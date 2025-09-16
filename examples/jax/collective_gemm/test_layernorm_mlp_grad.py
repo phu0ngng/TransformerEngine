@@ -22,7 +22,7 @@ from transformer_engine.jax.cpp_extensions.gemm import (
     CollectiveGemmConfigSet,
     CollectiveOp,
     noop_cgemm_config_set,
-    initialize_cgemm_communicator,
+    cgemm_communicator_initialize,
 )
 from transformer_engine.jax.sharding import MeshResource
 import transformer_engine.jax.flax as te_flax
@@ -84,7 +84,7 @@ def _initialize_distributed(args):
     ), f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found {jax.local_device_count()}"
 
     num_local_ranks = args.num_processes
-    initialize_cgemm_communicator(num_ranks=args.num_processes, num_local_ranks=num_local_ranks, process_id=args.process_id)
+    cgemm_communicator_initialize(num_ranks=args.num_processes, num_local_ranks=num_local_ranks, process_id=args.process_id)
 
 
 def _get_logical_axes():
