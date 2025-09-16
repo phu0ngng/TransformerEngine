@@ -66,18 +66,15 @@ def _initialize_distributed(args):
     assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
 
     print(f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
-          f"num_processeses={args.num_processes}, process_id={args.process_id}, "
+          f"num_processes={args.num_processes}, process_id={args.process_id}, "
           f"local_device_ids={args.local_device_ids}")
 
     jax.distributed.initialize(
         coordinator_address=args.coordinator_address,
-        num_processeses=args.num_processes,
+        num_processes=args.num_processes,
         process_id=args.process_id,
         local_device_ids=args.local_device_ids,
     )
-    # Initialize native library
-    assert "NCCL_COMM_ID" not in os.environ
-    os.environ["NCCL_COMM_ID"] = "127.0.0.1:12444"
 
     # Mark as initialized
     _distributed_initialized = True

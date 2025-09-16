@@ -82,9 +82,6 @@ def _initialize_distributed(args):
         process_id=args.process_id,
         local_device_ids=args.local_device_ids,
     )
-    # Initialize native library
-    assert "NCCL_COMM_ID" not in os.environ
-    os.environ["NCCL_COMM_ID"] = "127.0.0.1:12444"
 
     # Mark as initialized
     _distributed_initialized = True
