@@ -71,8 +71,8 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
                                  int num_comm_sm, bool set_sm_margin, bool use_ce,
                                  bool atomic_gemm) {
   // Dummy allgather_handle and barrier_handle
-  ExtAllgatherOp allgather_handle = [](void*, size_t, void*, size_t, ExtComm){};
-  ExtBarrierOp barrier_handle = [](ExtComm){};
+  ExtAllgatherOp allgather_handle = [](void *, size_t, void *, size_t, ExtComm) {};
+  ExtBarrierOp barrier_handle = [](ExtComm) {};
 
   // Initialize userbuf communicator
   if (!_comm_created) {
@@ -754,10 +754,9 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
                                        int comm_cga_size, int gemm_priority, int comm_priority,
                                        int num_comm_sm, bool set_sm_margin, bool use_ce,
                                        bool atomic_gemm, bool aggregate)
-    : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
-                      tp_size, num_max_streams, comm_cga_size,
-                      gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
-                      atomic_gemm) {
+    : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size, tp_size,
+                      num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
+                      set_sm_margin, use_ce, atomic_gemm) {
   initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
 }
 

@@ -10,14 +10,14 @@
 #include <stdexcept>
 #include <string_view>
 #include <tuple>
-#include "nccl.h"
-#include "cuda_runtime.h"
 
 #include "../extensions.h"
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/string.h"
 #include "common/util/system.h"
+#include "cuda_runtime.h"
+#include "nccl.h"
 #include "transformer_engine/swizzle.h"
 #include "xla/ffi/api/c_api.h"
 
@@ -80,58 +80,61 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
 // 1. Single process multiple devices: TP domain = process (num_local_ranks == tp_size)
 // 2. Single process single device: TP domain spans processes (num_local_ranks == 1)
 class CommunicatorHandler {
-public:
+ public:
   // Process-level information
-  int num_ranks = -1;           // Total number of ranks across all processes
-  int num_local_ranks = -1;     // Number of GPUs per process (1 for single GPU, tp_size for multi GPU)
-  int process_id = -1;          // Process ID (0-based)
-  int num_processes = -1;       // Total number of processes
-  
+  int num_ranks = -1;        // Total number of ranks across all processes
+  int num_local_ranks = -1;  // Number of GPUs per process (1 for single GPU, tp_size for multi GPU)
+  int process_id = -1;       // Process ID (0-based)
+  int num_processes = -1;    // Total number of processes
+
   // Device-level information (arrays for multi-device support)
   int local_device_ids[MAX_DEVICES];  // CUDA device IDs within this process
   int global_ranks[MAX_DEVICES];      // Global NCCL rank for each local device
   ncclComm_t comms[MAX_DEVICES];      // NCCL communicator for each local device
-  
+
   // Process-level convenience accessors (NOT TP-domain specific)
-  int get_global_rank(int local_device_idx = 0) const { 
-    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_local_ranks, 
-               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_local_ranks, ")");
-    return global_ranks[local_device_idx]; 
+  int get_global_rank(int local_device_idx = 0) const {
+    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_local_ranks,
+               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_local_ranks,
+               ")");
+    return global_ranks[local_device_idx];
   }
-  
-  int get_process_local_device_idx(int local_device_idx = 0) const { 
-    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_local_ranks, 
-               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_local_ranks, ")");
+
+  int get_process_local_device_idx(int local_device_idx = 0) const {
+    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_local_ranks,
+               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_local_ranks,
+               ")");
     return local_device_idx;  // Just returns the index within this process
   }
-  
-  ncclComm_t get_nccl_comm(int local_device_idx = 0) const { 
-    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_local_ranks, 
-               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_local_ranks, ")");
-    return comms[local_device_idx]; 
+
+  ncclComm_t get_nccl_comm(int local_device_idx = 0) const {
+    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_local_ranks,
+               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_local_ranks,
+               ")");
+    return comms[local_device_idx];
   }
-  
+
   // Get communicator for current CUDA device
   ncclComm_t get_comm_for_current_device() const {
     int current_device;
     NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-    
+
     // Find the local device index that corresponds to the current CUDA device
     for (int i = 0; i < num_local_ranks; i++) {
       if (local_device_ids[i] == current_device) {
         return comms[i];
       }
     }
-    
+
     NVTE_ERROR("Current CUDA device ", current_device, " not found in local_device_ids");
   }
-  
+
   // Get local device index for current CUDA device
   // Thread-safe: reads immutable data after initialization, cudaGetDevice() is thread-safe
   int get_local_device_idx_for_current_device() const {
     int current_device;
     NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-    
+
     // Find the local device index that corresponds to the current CUDA device
     // This is thread-safe since local_device_ids is immutable after initialization
     for (int i = 0; i < num_local_ranks; i++) {
@@ -139,34 +142,36 @@ public:
         return i;
       }
     }
-    
+
     NVTE_ERROR("Current CUDA device ", current_device, " not found in local_device_ids");
   }
-  
+
   // TP-domain-specific accessors for CommOverlapP2P
   // These methods return ranks/nodes within the TP (tensor parallel) domain, not process domain
-  
+
   int get_tp_local_rank(int local_device_idx, int tp_size) const {
-    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_local_ranks, 
-               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_local_ranks, ")");
+    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_local_ranks,
+               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_local_ranks,
+               ")");
     NVTE_CHECK(tp_size > 0, "tp_size must be > 0, got ", tp_size);
-    
+
     if (num_local_ranks == tp_size) {
       // Scenario 1: Multi-device per process - TP domain = single process
       // TP local rank = device index within the process (0, 1, 2, ...)
       return local_device_idx;
     } else {
-      // Scenario 2: Single device per process - TP domain spans multiple processes  
+      // Scenario 2: Single device per process - TP domain spans multiple processes
       // TP local rank = position within TP group (global_rank % tp_size)
       return global_ranks[local_device_idx] % tp_size;
     }
   }
-  
+
   int get_tp_node_id(int local_device_idx, int tp_size) const {
-    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_local_ranks, 
-               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_local_ranks, ")");
+    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_local_ranks,
+               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_local_ranks,
+               ")");
     NVTE_CHECK(tp_size > 0, "tp_size must be > 0, got ", tp_size);
-    
+
     if (num_local_ranks == tp_size) {
       // Scenario 1: Multi-device per process - TP domain = single process
       // TP node ID = process ID (each process is a TP node)
@@ -177,10 +182,10 @@ public:
       return global_ranks[local_device_idx] / tp_size;
     }
   }
-  
+
   int get_tp_num_nodes(int tp_size) const {
     NVTE_CHECK(tp_size > 0, "tp_size must be > 0, got ", tp_size);
-    
+
     if (num_local_ranks == tp_size) {
       // Scenario 1: Multi-device per process - TP domain = single process
       // Number of TP nodes = total number of processes (each process is a TP node)
@@ -192,22 +197,30 @@ public:
     }
   }
 
- static void init(int num_ranks, int num_local_ranks, int process_id){
+  static void init(int num_ranks, int num_local_ranks, int process_id) {
     // Validate inputs
-    NVTE_CHECK(num_local_ranks <= MAX_DEVICES, "num_local_ranks exceeds MAX_DEVICES=", MAX_DEVICES, ", got num_local_ranks=", num_local_ranks);
-    NVTE_CHECK(num_local_ranks >= 1, "num_local_ranks must be >= 1, got num_local_ranks=", num_local_ranks);
+    NVTE_CHECK(num_local_ranks <= MAX_DEVICES, "num_local_ranks exceeds MAX_DEVICES=", MAX_DEVICES,
+               ", got num_local_ranks=", num_local_ranks);
+    NVTE_CHECK(num_local_ranks >= 1,
+               "num_local_ranks must be >= 1, got num_local_ranks=", num_local_ranks);
     NVTE_CHECK(num_ranks >= 1, "num_ranks must be >= 1, got num_ranks=", num_ranks);
-    NVTE_CHECK(num_ranks % num_local_ranks == 0, "num_ranks must be divisible by num_local_ranks, got num_ranks=", num_ranks, ", num_local_ranks=", num_local_ranks);
-    
-    std::cout << "=== Calling from init with num_ranks=" << num_ranks << ", num_local_ranks=" << num_local_ranks << ", process_id=" << process_id << std::endl;
-    
+    NVTE_CHECK(num_ranks % num_local_ranks == 0,
+               "num_ranks must be divisible by num_local_ranks, got num_ranks=", num_ranks,
+               ", num_local_ranks=", num_local_ranks);
+
+    std::cout << "=== Calling from init with num_ranks=" << num_ranks
+              << ", num_local_ranks=" << num_local_ranks << ", process_id=" << process_id
+              << std::endl;
+
     auto &handler = get(false);
     handler.num_ranks = num_ranks;
     handler.num_local_ranks = num_local_ranks;
     handler.process_id = process_id;
     handler.num_processes = num_ranks / num_local_ranks;
-    
-    NVTE_CHECK(0 <= process_id && process_id < handler.num_processes, "Invalid process_id=", process_id, ", which is out of range [0, ", handler.num_processes, ")");
+
+    NVTE_CHECK(0 <= process_id && process_id < handler.num_processes,
+               "Invalid process_id=", process_id, ", which is out of range [0, ",
+               handler.num_processes, ")");
 
     // Initialize local devices and their global ranks
     for (int local_idx = 0; local_idx < num_local_ranks; local_idx++) {
@@ -216,11 +229,11 @@ public:
       NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
       handler.local_device_ids[local_idx] = current_device;
       handler.global_ranks[local_idx] = process_id * num_local_ranks + local_idx;
-      
-      std::cout << "=== Process " << process_id << ", local_idx=" << local_idx 
-                << " -> Using JAX-assigned CUDA device=" << current_device 
+
+      std::cout << "=== Process " << process_id << ", local_idx=" << local_idx
+                << " -> Using JAX-assigned CUDA device=" << current_device
                 << ", global_rank=" << handler.global_ranks[local_idx] << std::endl;
-      
+
       // Device is already set by JAX, no need to change it
     }
 
@@ -229,31 +242,36 @@ public:
     // Use a deterministic approach to generate the same ID across all processes
     memset(&id, 0, sizeof(ncclUniqueId));
     // Fill with a repeating pattern to ensure all bytes are set deterministically
-    uint8_t* id_bytes = reinterpret_cast<uint8_t*>(&id);
+    uint8_t *id_bytes = reinterpret_cast<uint8_t *>(&id);
     for (size_t i = 0; i < sizeof(ncclUniqueId); i++) {
       id_bytes[i] = static_cast<uint8_t>((0xDEADBEEF >> (8 * (i % 4))) & 0xFF);
     }
 
     // Initialize communicators using NCCL group API for efficiency
-    std::cout << "=== Starting NCCL group initialization for " << num_local_ranks << " devices" << std::endl;
+    std::cout << "=== Starting NCCL group initialization for " << num_local_ranks << " devices"
+              << std::endl;
     NVTE_CHECK_NCCL(ncclGroupStart());
     for (int local_idx = 0; local_idx < num_local_ranks; local_idx++) {
       NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids[local_idx]));
-      std::cout << "=== Initializing NCCL comm for local_idx=" << local_idx 
-                << ", global_rank=" << handler.global_ranks[local_idx] 
+      std::cout << "=== Initializing NCCL comm for local_idx=" << local_idx
+                << ", global_rank=" << handler.global_ranks[local_idx]
                 << ", device=" << handler.local_device_ids[local_idx] << std::endl;
-      NVTE_CHECK_NCCL(ncclCommInitRank(&handler.comms[local_idx], handler.num_ranks, id, handler.global_ranks[local_idx]));
+      NVTE_CHECK_NCCL(ncclCommInitRank(&handler.comms[local_idx], handler.num_ranks, id,
+                                       handler.global_ranks[local_idx]));
     }
     std::cout << "=== Ending NCCL group initialization" << std::endl;
     NVTE_CHECK_NCCL(ncclGroupEnd());
-    
-    std::cout << "=== Successfully initialized " << num_local_ranks << " NCCL communicators" << std::endl;
+
+    std::cout << "=== Successfully initialized " << num_local_ranks << " NCCL communicators"
+              << std::endl;
     handler._initialize = true;
   }
-  static CommunicatorHandler &get(bool is_initialized = true){
-    std::cout << "CommunicatorHandler is called with is_initialized=" << is_initialized << std::endl;
+  static CommunicatorHandler &get(bool is_initialized = true) {
+    std::cout << "CommunicatorHandler is called with is_initialized=" << is_initialized
+              << std::endl;
     static CommunicatorHandler instance;
-    NVTE_CHECK(instance._initialize == is_initialized, "interface._initialize=", instance._initialize, ", is_initialized=", is_initialized);
+    NVTE_CHECK(instance._initialize == is_initialized,
+               "interface._initialize=", instance._initialize, ", is_initialized=", is_initialized);
     return instance;
   }
 
@@ -269,7 +287,7 @@ public:
       comms[i] = nullptr;
     }
   }
-  
+
   ~CommunicatorHandler() {
     // Clean up NCCL communicators
     if (_initialize) {
@@ -280,11 +298,11 @@ public:
       }
     }
   }
-  
+
   bool _initialize = false;
 };
 
-void InitializeCgemmCommunicator(int num_ranks, int num_local_ranks, int process_id){
+void InitializeCgemmCommunicator(int num_ranks, int num_local_ranks, int process_id) {
   auto &handler = CommunicatorHandler::get(false);
   handler.init(num_ranks, num_local_ranks, process_id);
 }
@@ -302,7 +320,7 @@ class CollectiveGemmPlanRegistry {
     // This is safe in prepare phase since we cache per-device
     auto &comm_handler = CommunicatorHandler::get();
     int device_idx = comm_handler.get_local_device_idx_for_current_device();
-    
+
     // Include device_idx in plan cache key to ensure device-specific caching
     int64_t plan_id = 0;
     hash_combine(plan_id, buffer_shape[0], buffer_shape[1], static_cast<size_t>(dtype),
@@ -320,16 +338,19 @@ class CollectiveGemmPlanRegistry {
     // Validate TP configuration and determine scenario
     if (comm_handler.num_local_ranks == cgemm_config.tp_size) {
       // Scenario 1: Multi-device per process - TP domain = single process
-      std::cout << "=== TP Scenario 1: Multi-device per process (TP domain = single process)" << std::endl;
+      std::cout << "=== TP Scenario 1: Multi-device per process (TP domain = single process)"
+                << std::endl;
     } else if (comm_handler.num_local_ranks == 1) {
       // Scenario 2: Single device per process - TP domain spans multiple processes
-      NVTE_CHECK(comm_handler.num_ranks % cgemm_config.tp_size == 0, 
-                 "For single device per process, num_ranks must be divisible by tp_size, got num_ranks=", 
-                 comm_handler.num_ranks, ", tp_size=", cgemm_config.tp_size);
-      std::cout << "=== TP Scenario 2: Single device per process (TP domain spans processes)" << std::endl;
+      NVTE_CHECK(
+          comm_handler.num_ranks % cgemm_config.tp_size == 0,
+          "For single device per process, num_ranks must be divisible by tp_size, got num_ranks=",
+          comm_handler.num_ranks, ", tp_size=", cgemm_config.tp_size);
+      std::cout << "=== TP Scenario 2: Single device per process (TP domain spans processes)"
+                << std::endl;
     } else {
-      NVTE_ERROR("Unsupported TP configuration: num_local_ranks=", comm_handler.num_local_ranks, 
-                 ", tp_size=", cgemm_config.tp_size, 
+      NVTE_ERROR("Unsupported TP configuration: num_local_ranks=", comm_handler.num_local_ranks,
+                 ", tp_size=", cgemm_config.tp_size,
                  ". Supported scenarios: "
                  "(1) num_local_ranks == tp_size (multi-device per process), "
                  "(2) num_local_ranks == 1 (single device per process)");
@@ -338,15 +359,14 @@ class CollectiveGemmPlanRegistry {
     // Create executor with device-specific parameters (device_idx determined above)
     std::unique_ptr<CommOverlapCore> executor;
     executor = std::make_unique<CommOverlapP2PBase>(
-      buffer_shape, dtype,
-      comm_handler.get_global_rank(device_idx), comm_handler.num_ranks,
-      comm_handler.get_tp_local_rank(device_idx, cgemm_config.tp_size), cgemm_config.tp_size,
-      comm_handler.get_tp_node_id(device_idx, cgemm_config.tp_size), comm_handler.get_tp_num_nodes(cgemm_config.tp_size),
-      cgemm_config.tp_size,
-      get_nvte_collective_op(cgemm_config.collective_op), cgemm_config.num_max_streams,
-      1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
-      cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
-      false /*atomic_gemm*/, cgemm_config.aggregate_ag);
+        buffer_shape, dtype, comm_handler.get_global_rank(device_idx), comm_handler.num_ranks,
+        comm_handler.get_tp_local_rank(device_idx, cgemm_config.tp_size), cgemm_config.tp_size,
+        comm_handler.get_tp_node_id(device_idx, cgemm_config.tp_size),
+        comm_handler.get_tp_num_nodes(cgemm_config.tp_size), cgemm_config.tp_size,
+        get_nvte_collective_op(cgemm_config.collective_op), cgemm_config.num_max_streams,
+        1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
+        cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
+        false /*atomic_gemm*/, cgemm_config.aggregate_ag);
 
     CommOverlapCore *executor_ptr = executor.get();
     plan_map[plan_id] = std::move(executor);

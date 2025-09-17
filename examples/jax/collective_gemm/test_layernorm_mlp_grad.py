@@ -39,9 +39,11 @@ jax.config.update(
 # Global flag to track if distributed has been initialized
 _distributed_initialized = False
 
+
 def _is_distributed_initialized():
     """Check if JAX distributed has been initialized."""
     return _distributed_initialized
+
 
 def _initialize_distributed(args):
     """Initialize JAX distributed with custom arguments."""
@@ -58,16 +60,20 @@ def _initialize_distributed(args):
             "--coordinator-address, --num-processes, --process-id"
         )
     if args.local_device_ids is None:
-        assert args.num_devices_per_process is not None, "Either local_device_ids or num_devices_per_process must be provided"
+        assert (
+            args.num_devices_per_process is not None
+        ), "Either local_device_ids or num_devices_per_process must be provided"
         args.local_device_ids = ",".join(map(str, range(args.num_devices_per_process)))
     else:
         args.num_devices_per_process = len(args.local_device_ids.split(","))
 
     assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
 
-    print(f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
-          f"num_processes={args.num_processes}, process_id={args.process_id}, "
-          f"local_device_ids={args.local_device_ids}")
+    print(
+        f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
+        f"num_processes={args.num_processes}, process_id={args.process_id}, "
+        f"local_device_ids={args.local_device_ids}"
+    )
 
     jax.distributed.initialize(
         coordinator_address=args.coordinator_address,
@@ -79,16 +85,19 @@ def _initialize_distributed(args):
     # Mark as initialized
     _distributed_initialized = True
 
-    assert (
-        jax.local_device_count() == 1
-    ), f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found {jax.local_device_count()}"
+    assert jax.local_device_count() == 1, (
+        f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found"
+        f" {jax.local_device_count()}"
+    )
 
     # Initialize CGEMM communicator for single device per process scenario
     # num_ranks = total ranks across all processes (args.num_processes in this case)
     # num_local_ranks = GPUs per process (1 for single device per process)
     num_local_ranks = 1  # Single GPU per process
     total_ranks = args.num_processes  # Total number of processes/ranks
-    initialize_cgemm_communicator(num_ranks=total_ranks, num_local_ranks=num_local_ranks, process_id=args.process_id)
+    initialize_cgemm_communicator(
+        num_ranks=total_ranks, num_local_ranks=num_local_ranks, process_id=args.process_id
+    )
 
 
 def _get_logical_axes():
@@ -449,11 +458,21 @@ class TestCollectiveDenseGradientWithDP(unittest.TestCase):
 
 if __name__ == "__main__":
     import sys
+
     if len(sys.argv) < 7:  # Need at least the 3 required distributed args
         print("Error: This script requires distributed initialization arguments.")
-        print("Usage: python test_layernorm_mlp_grad.py --coordinator-address <address> --num-processes <num> --process-id <id> [--local-device-ids <ids>] [other args]")
-        print("Example: python test_layernorm_mlp_grad.py --coordinator-address localhost:1234 --num-processes 4 --process-id 0")
-        print("Example: python test_layernorm_mlp_grad.py --coordinator-address localhost:1234 --num-processes 2 --process-id 0 --local-device-ids 0,1,2,3")
+        print(
+            "Usage: python test_layernorm_mlp_grad.py --coordinator-address <address>"
+            " --num-processes <num> --process-id <id> [--local-device-ids <ids>] [other args]"
+        )
+        print(
+            "Example: python test_layernorm_mlp_grad.py --coordinator-address localhost:1234"
+            " --num-processes 4 --process-id 0"
+        )
+        print(
+            "Example: python test_layernorm_mlp_grad.py --coordinator-address localhost:1234"
+            " --num-processes 2 --process-id 0 --local-device-ids 0,1,2,3"
+        )
         sys.exit(1)
 
     args = layernorm_mlp_grad_parser(None)

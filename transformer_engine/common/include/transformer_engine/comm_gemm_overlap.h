@@ -89,10 +89,9 @@ class CommOverlapCore {
 
   // NCCL-based constructor
   CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
-                  int tp_size,
-                  int num_splits, int num_max_streams, int comm_cga_size, int gemm_priority,
-                  int comm_priority, int num_comm_sm, bool set_sm_margin, bool use_ce,
-                  bool atomic_gemm);
+                  int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
+                  int gemm_priority, int comm_priority, int num_comm_sm, bool set_sm_margin,
+                  bool use_ce, bool atomic_gemm);
 
   virtual ~CommOverlapCore();
 

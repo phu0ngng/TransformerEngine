@@ -44,7 +44,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
   echo
   echo "=== Starting test file: $TEST_FILE ..."
   set +x
-  
+
   # Clear PIDs array for this test file
   PIDS=()
 

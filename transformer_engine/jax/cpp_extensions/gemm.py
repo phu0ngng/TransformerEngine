@@ -169,20 +169,20 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
 
 def cgemm_communicator_initialize(num_ranks, num_local_ranks, process_id):
     """Initialize NCCL communicators for Collective GEMM operations.
-    
+
     This function sets up the distributed communication infrastructure needed for
     tensor parallel collective GEMM operations. It supports two main scenarios:
-    
+
     1. **Multi-device per process**: TP domain = single process
        - Each process manages multiple GPUs (num_local_ranks > 1)
        - TP group consists of GPUs within the same process
        - Example: 2 processes × 4 GPUs each = 8 total ranks, tp_size=4
-    
-    2. **Single device per process**: TP domain spans multiple processes  
+
+    2. **Single device per process**: TP domain spans multiple processes
        - Each process manages one GPU (num_local_ranks = 1)
        - TP group spans across multiple processes
        - Example: 8 processes × 1 GPU each = 8 total ranks, tp_size=4
-    
+
     Args:
         num_ranks (int): Total number of ranks across all processes.
             Must be divisible by num_local_ranks.
@@ -191,26 +191,28 @@ def cgemm_communicator_initialize(num_ranks, num_local_ranks, process_id):
             - For single-device: equals 1 (1 GPU per process)
         process_id (int): Process identifier (0-based).
             Must be in range [0, num_ranks // num_local_ranks).
-    
+
     Raises:
         AssertionError: If num_ranks is not divisible by num_local_ranks,
             or if process_id is out of valid range.
         RuntimeError: If NCCL initialization fails or if configuration
             is invalid (e.g., insufficient GPUs).
-    
+
     Example:
         # Scenario 1: 2 processes, 4 GPUs per process, tp_size=4
         cgemm_communicator_initialize(num_ranks=8, num_local_ranks=4, process_id=0)
-        
-        # Scenario 2: 4 processes, 1 GPU per process, tp_size=4  
+
+        # Scenario 2: 4 processes, 1 GPU per process, tp_size=4
         cgemm_communicator_initialize(num_ranks=4, num_local_ranks=1, process_id=2)
-    
+
     Note:
         This function must be called after JAX distributed initialization
         and before any collective GEMM operations. Each process should call
         this function with its own unique process_id.
     """
-    assert num_ranks % num_local_ranks == 0, f"Invalid num_ranks={num_ranks}, num_local_ranks={num_local_ranks}"
+    assert (
+        num_ranks % num_local_ranks == 0
+    ), f"Invalid num_ranks={num_ranks}, num_local_ranks={num_local_ranks}"
     assert 0 <= process_id < num_ranks, f"Invalid process_id={process_id}"
     initialize_cgemm_communicator(num_ranks, num_local_ranks, process_id)
 

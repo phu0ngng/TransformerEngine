@@ -46,9 +46,11 @@ jax.config.update(
 # Global flag to track if distributed has been initialized
 _distributed_initialized = False
 
+
 def _is_distributed_initialized():
     """Check if JAX distributed has been initialized."""
     return _distributed_initialized
+
 
 def _initialize_distributed(args):
     """Initialize JAX distributed with custom arguments."""
@@ -65,7 +67,9 @@ def _initialize_distributed(args):
             "--coordinator-address, --num-processes, --process-id"
         )
     if args.local_device_ids is None:
-        assert args.num_devices_per_process is not None, "Either local_device_ids or num_devices_per_process must be provided"
+        assert (
+            args.num_devices_per_process is not None
+        ), "Either local_device_ids or num_devices_per_process must be provided"
         # Calculate device range for this process
         # Single process single device: each process gets one unique device
         # Single process multiple devices: each process gets a unique range of devices
@@ -79,27 +83,39 @@ def _initialize_distributed(args):
 
     assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
 
-    print(f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
-          f"num_processes={args.num_processes}, process_id={args.process_id}")
+    print(
+        f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
+        f"num_processes={args.num_processes}, process_id={args.process_id}"
+    )
     print(f"This process will manage global CUDA devices: {global_device_ids_for_this_process}")
-    
+
     # Validate device assignment
     device_list = global_device_ids_for_this_process.split(",")
     print(f"Process {args.process_id} assigned devices: {device_list}")
-    
+
     if args.num_devices_per_process == 1:
         # Single device per process: validate device = process_id
-        assert len(device_list) == 1, f"Expected 1 device per process, got {len(device_list)} devices: {device_list}"
+        assert (
+            len(device_list) == 1
+        ), f"Expected 1 device per process, got {len(device_list)} devices: {device_list}"
         expected_device = str(args.process_id)
         actual_device = device_list[0]
         print(f"Single device per process: process {args.process_id} → device {actual_device}")
-        assert actual_device == expected_device, f"Device assignment mismatch: process {args.process_id} should use device {expected_device}, but got {actual_device}"
+        assert actual_device == expected_device, (
+            f"Device assignment mismatch: process {args.process_id} should use device"
+            f" {expected_device}, but got {actual_device}"
+        )
     else:
         # Multiple devices per process: validate device range
         expected_start = args.process_id * args.num_devices_per_process
-        expected_devices = [str(i) for i in range(expected_start, expected_start + args.num_devices_per_process)]
+        expected_devices = [
+            str(i) for i in range(expected_start, expected_start + args.num_devices_per_process)
+        ]
         print(f"Multiple devices per process: process {args.process_id} → devices {device_list}")
-        assert device_list == expected_devices, f"Device range mismatch: process {args.process_id} should use devices {expected_devices}, but got {device_list}"
+        assert device_list == expected_devices, (
+            f"Device range mismatch: process {args.process_id} should use devices"
+            f" {expected_devices}, but got {device_list}"
+        )
 
     # Note: "local_device_ids" is a JAX term meaning "global CUDA devices managed by this process"
     jax.distributed.initialize(
@@ -112,21 +128,27 @@ def _initialize_distributed(args):
     # Mark as initialized
     _distributed_initialized = True
 
-    assert (
-        jax.local_device_count() == 1
-    ), f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found {jax.local_device_count()}"
+    assert jax.local_device_count() == 1, (
+        f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found"
+        f" {jax.local_device_count()}"
+    )
 
     # Initialize CGEMM communicator for single device per process scenario
     # num_ranks = total ranks across all processes (args.num_processes in this case)
     # num_local_ranks = GPUs per process (1 for single device per process)
     num_local_ranks = 1  # Single GPU per process
     total_ranks = args.num_processes  # Total number of processes/ranks
-    
-    print(f"Initializing CGEMM communicator with num_ranks={total_ranks}, num_local_ranks={num_local_ranks}, process_id={args.process_id}")
+
+    print(
+        f"Initializing CGEMM communicator with num_ranks={total_ranks},"
+        f" num_local_ranks={num_local_ranks}, process_id={args.process_id}"
+    )
     print(f"JAX local devices: {jax.local_devices()}")
     print(f"JAX device count: {jax.local_device_count()}")
-    
-    tex.initialize_cgemm_communicator(num_ranks=total_ranks, num_local_ranks=num_local_ranks, process_id=args.process_id)
+
+    tex.cgemm_communicator_initialize(
+        num_ranks=total_ranks, num_local_ranks=num_local_ranks, process_id=args.process_id
+    )
 
 
 def _get_operand_sharding(mesh, collective_op, is_with_dp):
@@ -425,11 +447,21 @@ class TestCollectiveGemm(unittest.TestCase):
 
 if __name__ == "__main__":
     import sys
+
     if len(sys.argv) < 7:  # Need at least the 3 required distributed args
         print("Error: This script requires distributed initialization arguments.")
-        print("Usage: python test_gemm.py --coordinator-address <address> --num-processes <num> --process-id <id> [--local-device-ids <ids>] [other args]")
-        print("Example: python test_gemm.py --coordinator-address localhost:1234 --num-processes 4 --process-id 0")
-        print("Example: python test_gemm.py --coordinator-address localhost:1234 --num-processes 2 --process-id 0 --local-device-ids 0,1,2,3")
+        print(
+            "Usage: python test_gemm.py --coordinator-address <address> --num-processes <num>"
+            " --process-id <id> [--local-device-ids <ids>] [other args]"
+        )
+        print(
+            "Example: python test_gemm.py --coordinator-address localhost:1234 --num-processes 4"
+            " --process-id 0"
+        )
+        print(
+            "Example: python test_gemm.py --coordinator-address localhost:1234 --num-processes 2"
+            " --process-id 0 --local-device-ids 0,1,2,3"
+        )
         sys.exit(1)
 
     args = gemm_parser(None)
