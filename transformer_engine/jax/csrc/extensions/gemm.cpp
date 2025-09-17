@@ -6,10 +6,14 @@
 #include "transformer_engine/gemm.h"
 #include "transformer_engine/comm_gemm_overlap.h"
 
+#include <chrono>
+#include <cstdio>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <tuple>
 
 #include "../extensions.h"
@@ -278,12 +282,41 @@ class CommunicatorHandler {
 
     // Create NCCL communicators for all local devices
     ncclUniqueId id;
-    // Use a deterministic approach to generate the same ID across all processes
-    memset(&id, 0, sizeof(ncclUniqueId));
-    // Fill with a repeating pattern to ensure all bytes are set deterministically
-    uint8_t *id_bytes = reinterpret_cast<uint8_t *>(&id);
-    for (size_t i = 0; i < sizeof(ncclUniqueId); i++) {
-      id_bytes[i] = static_cast<uint8_t>((0xDEADBEEF >> (8 * (i % 4))) & 0xFF);
+    
+    // Process 0 generates the unique ID, then broadcast via file system
+    std::string id_file = "/tmp/nccl_unique_id_" + std::to_string(num_total_devices) + "_" + std::to_string(tp_size) + ".bin";
+    
+    if (process_id == 0) {
+      NVTE_CHECK_NCCL(ncclGetUniqueId(&id));
+      std::cout << "=== Process 0 generated NCCL unique ID" << std::endl;
+      
+      // Write the ID to a temporary file
+      std::ofstream file(id_file, std::ios::binary);
+      NVTE_CHECK(file.is_open(), "Failed to create NCCL unique ID file: ", id_file);
+      file.write(reinterpret_cast<const char*>(&id), sizeof(ncclUniqueId));
+      file.close();
+      std::cout << "=== Process 0 wrote NCCL unique ID to file: " << id_file << std::endl;
+    } else {
+      // Wait for the file to be created and read it
+      std::cout << "=== Process " << process_id << " waiting for NCCL unique ID file: " << id_file << std::endl;
+      int attempts = 0;
+      const int max_attempts = 100; // 10 seconds with 100ms sleep
+      while (attempts < max_attempts) {
+        std::ifstream file(id_file, std::ios::binary);
+        if (file.is_open()) {
+          file.read(reinterpret_cast<char*>(&id), sizeof(ncclUniqueId));
+          if (file.gcount() == sizeof(ncclUniqueId)) {
+            file.close();
+            std::cout << "=== Process " << process_id << " successfully read NCCL unique ID" << std::endl;
+            break;
+          }
+          file.close();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        attempts++;
+      }
+      NVTE_CHECK(attempts < max_attempts, 
+                 "Timeout waiting for NCCL unique ID file from process 0: ", id_file);
     }
 
     // Initialize communicators using NCCL group API for efficiency
@@ -304,6 +337,12 @@ class CommunicatorHandler {
 
     std::cout << "=== Successfully initialized " << num_devices_per_process << " NCCL communicators"
               << std::endl;
+    
+    // Clean up the temporary file (only process 0 needs to do this)
+    if (process_id == 0) {
+      std::remove(id_file.c_str());
+      std::cout << "=== Process 0 cleaned up NCCL unique ID file: " << id_file << std::endl;
+    }
 
     // Allocate device memory for barrier operations
     NVTE_CHECK_CUDA(cudaMalloc(&handler._barrier, sizeof(int)));
