@@ -116,17 +116,16 @@ class CommunicatorHandler {
   }
 
   // NCCL-based coordination methods for userbuffers
-  void nccl_barrier_impl(void* /*ExtComm - unused*/) {
+  void nccl_barrier_impl(ExtComm /* not used*/) {
     NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using barrier");
     
     int device_idx = get_local_device_idx_for_current_device();
     ncclComm_t nccl_comm = comms[device_idx];
     
-    // Use NULL stream to let NCCL handle stream management
-    NVTE_CHECK_NCCL(ncclAllReduce(d_barrier_dummy_, d_barrier_result_, 1, ncclInt, ncclSum, nccl_comm, nullptr));
+    NVTE_CHECK_NCCL(ncclAllReduce(d_barrier_buffer_, d_barrier_buffer_, 1, ncclInt, ncclSum, nccl_comm, nullptr));
   }
 
-  void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf, size_t input_bytes, void* /*ExtComm - unused*/) {
+  void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf, size_t input_bytes, ExtComm /*ExtComm - unused*/) {
     NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
     
     int device_idx = get_local_device_idx_for_current_device();
@@ -293,12 +292,11 @@ class CommunicatorHandler {
     std::cout << "=== Successfully initialized " << num_local_ranks << " NCCL communicators"
               << std::endl;
     
-    // Allocate device memory for barrier operations
-    NVTE_CHECK_CUDA(cudaMalloc(&d_barrier_dummy_, sizeof(int)));
-    NVTE_CHECK_CUDA(cudaMalloc(&d_barrier_result_, sizeof(int)));
+    // Allocate device memory for barrier operations (single buffer for in-place AllReduce)
+    NVTE_CHECK_CUDA(cudaMalloc(&d_barrier_buffer_, sizeof(int)));
     std::cout << "=== Allocated device memory for NCCL barrier operations" << std::endl;
     
-    _initialize = true;
+    handler._initialize = true;
   }
   
   static CommunicatorHandler &get(bool is_initialized = true) {
@@ -314,7 +312,7 @@ class CommunicatorHandler {
   CommunicatorHandler &operator=(const CommunicatorHandler &) = delete;
 
  private:
-  CommunicatorHandler() : d_barrier_dummy_(nullptr), d_barrier_result_(nullptr) {
+  CommunicatorHandler() : d_barrier_buffer_(nullptr) {
     // Initialize arrays to safe defaults
     for (int i = 0; i < MAX_DEVICES; i++) {
       local_device_ids[i] = -1;
@@ -333,14 +331,12 @@ class CommunicatorHandler {
       }
     }
     // Clean up device memory
-    if (d_barrier_dummy_) cudaFree(d_barrier_dummy_);
-    if (d_barrier_result_) cudaFree(d_barrier_result_);
+    if (d_barrier_buffer_) cudaFree(d_barrier_buffer_);
   }
 
   bool _initialize = false;
-  // Device memory for barrier operations
-  int *d_barrier_dummy_ = nullptr;
-  int *d_barrier_result_ = nullptr;
+  // Device memory for barrier operations (single buffer for in-place AllReduce)
+  int *d_barrier_buffer_ = nullptr;
 };
 
 void InitializeCgemmCommunicator(int num_ranks, int num_local_ranks, int process_id) {
@@ -404,10 +400,10 @@ class CollectiveGemmPlanRegistry {
 
     // Create function objects for the callbacks
     auto &comm_handler_ref = CommunicatorHandler::get();
-    ExtAllgatherOp allgather_func = [&comm_handler_ref](void* output_buf, size_t output_bytes, void* input_buf, size_t input_bytes, void* comm) {
+    ExtAllgatherOp allgather_func = [&comm_handler_ref](void* output_buf, size_t output_bytes, void* input_buf, size_t input_bytes, ExtComm comm) {
         comm_handler_ref.nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
     };
-    ExtBarrierOp barrier_func = [&comm_handler_ref](void* comm) {
+    ExtBarrierOp barrier_func = [&comm_handler_ref](ExtComm comm) {
         comm_handler_ref.nccl_barrier_impl(comm);
     };
 
