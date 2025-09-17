@@ -20,6 +20,7 @@
 #include "nccl.h"
 #include "transformer_engine/swizzle.h"
 #include "xla/ffi/api/c_api.h"
+#include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
 #define MXFP8_BLOCK_SIZE 32
 
@@ -401,6 +402,15 @@ class CollectiveGemmPlanRegistry {
         comm_handler.get_tp_node_id(device_idx, cgemm_config.tp_size),
         comm_handler.get_tp_num_nodes(cgemm_config.tp_size));
 
+    // Create function objects for the callbacks
+    auto &comm_handler_ref = CommunicatorHandler::get();
+    ExtAllgatherOp allgather_func = [&comm_handler_ref](void* output_buf, size_t output_bytes, void* input_buf, size_t input_bytes, void* comm) {
+        comm_handler_ref.nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
+    };
+    ExtBarrierOp barrier_func = [&comm_handler_ref](void* comm) {
+        comm_handler_ref.nccl_barrier_impl(comm);
+    };
+
     // Create executor with device-specific parameters (device_idx determined above)
     std::unique_ptr<CommOverlapCore> executor;
     executor = std::make_unique<CommOverlapP2PBase>(
@@ -409,12 +419,7 @@ class CollectiveGemmPlanRegistry {
         comm_handler.get_tp_local_rank(device_idx, cgemm_config.tp_size), cgemm_config.tp_size,
         comm_handler.get_tp_node_id(device_idx, cgemm_config.tp_size),
         comm_handler.get_tp_num_nodes(cgemm_config.tp_size), cgemm_config.tp_size,
-        [&handler](void* output_buf, size_t output_bytes, void* input_buf, size_t input_bytes, void* comm) {
-            handler.nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
-        },
-        [&handler](void* comm) {
-            handler.nccl_barrier_impl(comm);
-        },
+        allgather_func, barrier_func,
         get_nvte_collective_op(cgemm_config.collective_op), cgemm_config.num_max_streams,
         1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
         cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
