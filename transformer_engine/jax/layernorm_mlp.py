@@ -48,7 +48,10 @@ def layernorm_mlp(
     ffn1_ckpt_name: str = "ffn1",
     ffn2_ckpt_name: str = "ffn2",
     activation_type: Sequence[Union[str, Callable]] = ("gelu",),
-    collective_op_sets: Tuple[tex.CollectiveOpSet] = (tex.noop_collective_op_set, tex.noop_collective_op_set),
+    collective_op_sets: Tuple[tex.CollectiveOpSet] = (
+        tex.noop_collective_op_set,
+        tex.noop_collective_op_set,
+    ),
     quantizer_sets: Tuple[QuantizerSet] = (noop_quantizer_set, noop_quantizer_set),
 ) -> jnp.ndarray:
     """Apply layer normalization followed by MLP block.

@@ -146,7 +146,9 @@ def _initialize_distributed(args):
     print(f"JAX device count: {jax.local_device_count()}")
 
     collective_gemm_bootstrap(
-        num_total_devices=total_ranks, devices_per_process=num_local_ranks, process_id=args.process_id,
+        num_total_devices=total_ranks,
+        devices_per_process=num_local_ranks,
+        process_id=args.process_id,
         tensor_parallel_size=args.num_devices_per_process,
     )
 
@@ -171,7 +173,9 @@ def _create_mesh(args):
     num_gpu = jax.device_count()
     numranks = args.num_processes * args.num_devices_per_process
     if args.tensor_parallel_size is None:
-        assert num_gpu == numranks, f"Requires {num_gpu} processes for {num_gpu} GPUs, got {numranks}!"
+        assert (
+            num_gpu == numranks
+        ), f"Requires {num_gpu} processes for {num_gpu} GPUs, got {numranks}!"
         num_gpu_dp = 2 if args.enable_data_parallel else 1
         num_gpu_tp = num_gpu // num_gpu_dp
     else:

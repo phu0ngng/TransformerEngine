@@ -13,6 +13,7 @@
 
 #include "../extensions.h"
 #include "common.h"
+#include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/string.h"
 #include "common/util/system.h"
@@ -20,7 +21,6 @@
 #include "nccl.h"
 #include "transformer_engine/swizzle.h"
 #include "xla/ffi/api/c_api.h"
-#include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
 #define MXFP8_BLOCK_SIZE 32
 
@@ -83,21 +83,22 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
 class CommunicatorHandler {
  public:
   // Process-level information
-  int num_total_devices = -1;        // Total number of devices across all processes
-  int devices_per_process = -1;  // Number of GPUs per process (1 for single GPU, tp_size for multi GPU)
-  int process_id = -1;           // Process ID (0-based)
-  int num_processes = -1;        // Total number of processes
+  int num_total_devices = -1;  // Total number of devices across all processes
+  int devices_per_process =
+      -1;                  // Number of GPUs per process (1 for single GPU, tp_size for multi GPU)
+  int process_id = -1;     // Process ID (0-based)
+  int num_processes = -1;  // Total number of processes
 
   // Tensor Parallel (TP) information - calculated once during init
-  int tp_size = -1;              // Tensor parallel group size
-  int tp_num_nodes = -1;         // Number of TP nodes
-  int local_device_ids_within_tp_node[MAX_DEVICES] = {-1}; // TP local device ID for each device
-  int tp_node_ids[MAX_DEVICES] = {-1};         // TP node ID for each device
+  int tp_size = -1;                                         // Tensor parallel group size
+  int tp_num_nodes = -1;                                    // Number of TP nodes
+  int local_device_ids_within_tp_node[MAX_DEVICES] = {-1};  // TP local device ID for each device
+  int tp_node_ids[MAX_DEVICES] = {-1};                      // TP node ID for each device
 
   // Device-level information (arrays for multi-device support)
   int local_device_ids_within_process[MAX_DEVICES];  // CUDA device IDs within this process
-  int global_device_ids[MAX_DEVICES]; // Global device ID for each local device
-  ncclComm_t comms[MAX_DEVICES];      // NCCL communicator for each local device
+  int global_device_ids[MAX_DEVICES];                // Global device ID for each local device
+  ncclComm_t comms[MAX_DEVICES];                     // NCCL communicator for each local device
 
   // Process-level convenience accessors (NOT TP-domain specific)
   int get_global_rank(int local_device_idx = 0) const {
@@ -128,10 +129,12 @@ class CommunicatorHandler {
     int device_idx = get_local_device_idx_for_current_device();
     ncclComm_t nccl_comm = comms[device_idx];
 
-    NVTE_CHECK_NCCL(ncclAllReduce(d_barrier_buffer_, d_barrier_buffer_, 1, ncclInt, ncclSum, nccl_comm, nullptr));
+    NVTE_CHECK_NCCL(ncclAllReduce(d_barrier_buffer_, d_barrier_buffer_, 1, ncclInt, ncclSum,
+                                  nccl_comm, nullptr));
   }
 
-  void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf, size_t input_bytes, ExtComm /*ExtComm - unused*/) {
+  void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf,
+                           size_t input_bytes, ExtComm /*ExtComm - unused*/) {
     NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
 
     int device_idx = get_local_device_idx_for_current_device();
@@ -139,12 +142,12 @@ class CommunicatorHandler {
 
     // Ensure input and output sizes are consistent with the number of ranks
     size_t expected_output_bytes = input_bytes * num_ranks;
-    NVTE_CHECK(output_bytes == expected_output_bytes,
-               "Output buffer size mismatch: expected ", expected_output_bytes,
-               ", got ", output_bytes);
+    NVTE_CHECK(output_bytes == expected_output_bytes, "Output buffer size mismatch: expected ",
+               expected_output_bytes, ", got ", output_bytes);
 
     // Use NULL stream to let NCCL handle stream management
-    NVTE_CHECK_NCCL(ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, nccl_comm, nullptr));
+    NVTE_CHECK_NCCL(
+        ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, nccl_comm, nullptr));
   }
 
   // Get communicator for current CUDA device
@@ -195,9 +198,11 @@ class CommunicatorHandler {
 
   // Explicit device index methods (for advanced usage)
 
-  static void init(int num_total_devices, int devices_per_process, int process_id, int tensor_parallel_size) {
+  static void init(int num_total_devices, int devices_per_process, int process_id,
+                   int tensor_parallel_size) {
     // Validate inputs
-    NVTE_CHECK(devices_per_process <= MAX_DEVICES, "devices_per_process exceeds MAX_DEVICES=", MAX_DEVICES,
+    NVTE_CHECK(devices_per_process <= MAX_DEVICES,
+               "devices_per_process exceeds MAX_DEVICES=", MAX_DEVICES,
                ", got devices_per_process=", devices_per_process);
     NVTE_CHECK(devices_per_process >= 1,
                "num_local_ranks must be >= 1, got num_local_ranks=", num_local_ranks);
@@ -208,8 +213,9 @@ class CommunicatorHandler {
 
     // Validate TP size
     NVTE_CHECK(tp_size > 0, "tp_size must be > 0, got tp_size=", tp_size);
-    NVTE_CHECK(num_ranks % tp_size == 0, "num_ranks must be divisible by tp_size, got num_ranks=",
-               num_ranks, ", tp_size=", tp_size);
+    NVTE_CHECK(num_ranks % tp_size == 0,
+               "num_ranks must be divisible by tp_size, got num_ranks=", num_ranks,
+               ", tp_size=", tp_size);
 
     std::cout << "=== Calling from init with num_ranks=" << num_ranks
               << ", num_local_ranks=" << num_local_ranks << ", process_id=" << process_id
@@ -274,7 +280,8 @@ class CommunicatorHandler {
       NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids_within_process[local_idx]));
       std::cout << "=== Initializing NCCL comm for local_idx=" << local_idx
                 << ", global_rank=" << handler.global_device_ids[local_idx]
-                << ", device_id=" << handler.local_device_ids_within_process[local_idx] << std::endl;
+                << ", device_id=" << handler.local_device_ids_within_process[local_idx]
+                << std::endl;
       NVTE_CHECK_NCCL(ncclCommInitRank(&handler.comms[local_idx], handler.num_total_devices, id,
                                        handler.global_device_ids[local_idx]));
     }
@@ -292,12 +299,11 @@ class CommunicatorHandler {
     // Boostrap UB via creating a dummy CommOverlapP2PBase object
     std::vector<size_t> buffer_shape{0, 0};
     DType dtype = DType::kByte;
-    auto & cgemm_config = CgemmConfig::get();
+    auto &cgemm_config = CgemmConfig::get();
     auto _ = std::make_unique<CommOverlapP2PBase>(
         buffer_shape, dtype, handler.get_global_rank(), handler.num_total_devices,
-        handler.get_local_device_id_within_tp_node(), handler.tp_size,
-        handler.get_tp_node_id(), handler.tp_num_nodes,
-        handler.get_tp_num_nodes(), handler.devices_per_process,
+        handler.get_local_device_id_within_tp_node(), handler.tp_size, handler.get_tp_node_id(),
+        handler.tp_num_nodes, handler.get_tp_num_nodes(), handler.devices_per_process,
         handler.allgather_func, handler.barrier_func,
         get_nvte_collective_op(JAXX_Collective_Op::ALL_GATHER), cgemm_config.num_max_streams,
         1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
@@ -360,7 +366,8 @@ class CgemmConfig {
   bool use_ce;
   bool aggregate_ag;
 
-  static void init(int _tp_size, int _num_max_streams, int _gemm_priority, int _comm_priority, int _num_comm_sm, bool _use_ce, bool _aggregate_ag) {
+  static void init(int _tp_size, int _num_max_streams, int _gemm_priority, int _comm_priority,
+                   int _num_comm_sm, bool _use_ce, bool _aggregate_ag) {
     auto &config = get();
     config.tp_size = _tp_size;
     config.num_max_streams = _num_max_streams;
@@ -384,11 +391,15 @@ class CgemmConfig {
   ~CgemmConfig() = default;
 };
 
-void InitializeCgemmCommunicator(int num_total_devices, int devices_per_process, int process_id, int tensor_parallel_size, int num_max_streams, int gemm_priority, int comm_priority, int num_comm_sm, bool use_ce, bool aggregate_ag) {
+void InitializeCgemmCommunicator(int num_total_devices, int devices_per_process, int process_id,
+                                 int tensor_parallel_size, int num_max_streams, int gemm_priority,
+                                 int comm_priority, int num_comm_sm, bool use_ce,
+                                 bool aggregate_ag) {
   auto &handler = CommunicatorHandler::get(false);
   handler.init(num_total_devices, devices_per_process, process_id, tensor_parallel_size);
   auto &config = CgemmConfig::get();
-  config.init(tensor_parallel_size, num_max_streams, gemm_priority, comm_priority, num_comm_sm, use_ce, aggregate_ag);
+  config.init(tensor_parallel_size, num_max_streams, gemm_priority, comm_priority, num_comm_sm,
+              use_ce, aggregate_ag);
 }
 
 // Accessor function to get cached num_max_streams for Python
@@ -404,7 +415,8 @@ class CollectiveGemmPlanRegistry {
     return instance;
   }
 
-  CommOverlapCore *get_executor(std::vector<size_t> buffer_shape, DType dtype, JAXX_Collective_Op collective_op) {
+  CommOverlapCore *get_executor(std::vector<size_t> buffer_shape, DType dtype,
+                                JAXX_Collective_Op collective_op) {
     auto &comm_handler = CommunicatorHandler::get();
     auto &cgemm_config = CgemmConfig::get();
 
@@ -439,39 +451,42 @@ class CollectiveGemmPlanRegistry {
       std::cout << "=== TP Scenario 2: Single device per process (TP domain spans processes)"
                 << std::endl;
     } else {
-      NVTE_ERROR("Unsupported TP configuration: devices_per_process=", comm_handler.devices_per_process,
-                 ", tp_size=", cgemm_config.tp_size,
+      NVTE_ERROR("Unsupported TP configuration: devices_per_process=",
+                 comm_handler.devices_per_process, ", tp_size=", cgemm_config.tp_size,
                  ". Supported scenarios: "
                  "(1) num_local_ranks == tp_size (multi-device per process), "
                  "(2) num_local_ranks == 1 (single device per process)");
     }
-    printf("Global rank %d, num_ranks %d, tp_local_rank %d, tp_size %d, tp_node_id %d, tp_num_nodes %d",
+    printf(
+        "Global rank %d, num_ranks %d, tp_local_rank %d, tp_size %d, tp_node_id %d, tp_num_nodes "
+        "%d",
         comm_handler.get_global_rank(device_idx), comm_handler.num_total_devices,
         comm_handler.get_tp_local_rank(device_idx), cgemm_config.tp_size,
-        comm_handler.get_tp_node_id(device_idx),
-        comm_handler.tp_num_nodes);
+        comm_handler.get_tp_node_id(device_idx), comm_handler.tp_num_nodes);
 
     // Create function objects for the callbacks
     auto &comm_handler_ref = CommunicatorHandler::get();
-    ExtAllgatherOp allgather_func = [&comm_handler_ref](void* output_buf, size_t output_bytes, void* input_buf, size_t input_bytes, ExtComm comm) {
-        comm_handler_ref.nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
+    ExtAllgatherOp allgather_func = [&comm_handler_ref](void *output_buf, size_t output_bytes,
+                                                        void *input_buf, size_t input_bytes,
+                                                        ExtComm comm) {
+      comm_handler_ref.nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
     };
     ExtBarrierOp barrier_func = [&comm_handler_ref](ExtComm comm) {
-        comm_handler_ref.nccl_barrier_impl(comm);
+      comm_handler_ref.nccl_barrier_impl(comm);
     };
 
     // Create executor with device-specific parameters (device_idx determined above)
     std::unique_ptr<CommOverlapCore> executor;
     executor = std::make_unique<CommOverlapP2PBase>(
-        buffer_shape, dtype, comm_handler.get_global_rank(device_idx), comm_handler.num_total_devices,
+        buffer_shape, dtype, comm_handler.get_global_rank(device_idx),
+        comm_handler.num_total_devices,
         comm_handler.get_tp_local_rank(device_idx, cgemm_config.tp_size), cgemm_config.tp_size,
         comm_handler.get_tp_node_id(device_idx, cgemm_config.tp_size),
-        comm_handler.get_tp_num_nodes(cgemm_config.tp_size), cgemm_config.tp_size,
-        allgather_func, barrier_func,
-        get_nvte_collective_op(cgemm_config.collective_op), cgemm_config.num_max_streams,
-        1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
-        cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
-        false /*atomic_gemm*/, cgemm_config.aggregate_ag);
+        comm_handler.get_tp_num_nodes(cgemm_config.tp_size), cgemm_config.tp_size, allgather_func,
+        barrier_func, get_nvte_collective_op(cgemm_config.collective_op),
+        cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
+        cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
+        cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
 
     CommOverlapCore *executor_ptr = executor.get();
     plan_map[plan_id] = std::move(executor);
@@ -493,8 +508,7 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
                                  JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
                                  int64_t rhs_axis_boundary, bool lhs_transposed,
                                  bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
-                                 bool use_split_accumulator, JAXX_Collective_Op collective_op){
-
+                                 bool use_split_accumulator, JAXX_Collective_Op collective_op) {
   nvte_cublas_handle_init();
 
   auto &cgemm_config = CgemmConfig::get();
@@ -522,7 +536,8 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
       buffer_shape[0] = out_shape[0];
       buffer_shape[1] = out_shape[1];
     }
-    auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype, collective_op);
+    auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype,
+                                                                    collective_op);
   }
   return ffi_with_cuda_error_check();
 }

@@ -97,7 +97,9 @@ def _initialize_distributed(args):
     num_local_ranks = 1  # Single GPU per process
     total_ranks = args.num_processes  # Total number of processes/ranks
     collective_gemm_bootstrap(
-        num_total_devices=total_ranks, devices_per_process=num_local_ranks, process_id=args.process_id,
+        num_total_devices=total_ranks,
+        devices_per_process=num_local_ranks,
+        process_id=args.process_id,
         tensor_parallel_size=args.tensor_parallel_size,
     )
 

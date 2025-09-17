@@ -168,8 +168,18 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
     return lhs_q, rhs_q
 
 
-def collective_gemm_bootstrap(num_total_devices, devices_per_process, process_id, tensor_parallel_size,
- num_max_streams=3, gemm_priority=0, comm_priority=0, num_comm_sm=2, use_ce=True, aggregate_ag=False):
+def collective_gemm_bootstrap(
+    num_total_devices,
+    devices_per_process,
+    process_id,
+    tensor_parallel_size,
+    num_max_streams=3,
+    gemm_priority=0,
+    comm_priority=0,
+    num_comm_sm=2,
+    use_ce=True,
+    aggregate_ag=False,
+):
     """Initialize NCCL communicators for Collective GEMM operations.
 
     This function sets up the distributed communication infrastructure needed for
@@ -216,7 +226,18 @@ def collective_gemm_bootstrap(num_total_devices, devices_per_process, process_id
         num_total_devices % devices_per_process == 0
     ), f"Invalid num_total_devices={num_total_devices}, devices_per_process={devices_per_process}"
     assert 0 <= process_id < num_total_devices, f"Invalid process_id={process_id}"
-    initialize_cgemm_communicator(num_total_devices, devices_per_process, process_id, tensor_parallel_size, num_max_streams, gemm_priority, comm_priority, num_comm_sm, use_ce, aggregate_ag)
+    initialize_cgemm_communicator(
+        num_total_devices,
+        devices_per_process,
+        process_id,
+        tensor_parallel_size,
+        num_max_streams,
+        gemm_priority,
+        comm_priority,
+        num_comm_sm,
+        use_ce,
+        aggregate_ag,
+    )
 
 
 class CollectiveOp(Enum):
@@ -542,11 +563,7 @@ class GemmPrimitive(BasePrimitive):
             rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
 
         # Alter lhs blocks so that CGEMM RS outputs correctly
-        if (
-            collective_op.is_reduce_scatter
-            and not transpose_batch_sequence
-            and not is_outer
-        ):
+        if collective_op.is_reduce_scatter and not transpose_batch_sequence and not is_outer:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = lhs.shape
             reshaped = lhs.reshape(
@@ -579,11 +596,7 @@ class GemmPrimitive(BasePrimitive):
             is_outer=is_outer,
         )
         # Alter output blocks for CGEMM AG
-        if (
-            collective_op.is_all_gather
-            and not transpose_batch_sequence
-            and not is_outer
-        ):
+        if collective_op.is_all_gather and not transpose_batch_sequence and not is_outer:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = output.shape
             reshaped = output.reshape(
@@ -1597,7 +1610,7 @@ def grouped_gemm(
         preferred_element_type: Preferred data type for the output tensor
         group_offset: 1D array containing offsets for each group (not yet implemented)
         quantizer_set: Set of quantizers for FP8 quantization of the input and output
-    
+
     Returns:
         A jnp.ndarray containing the result of the grouped GEMM operation
 
