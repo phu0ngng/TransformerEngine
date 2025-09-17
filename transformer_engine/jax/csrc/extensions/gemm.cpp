@@ -21,6 +21,7 @@
 #include "transformer_engine/swizzle.h"
 #include "xla/ffi/api/c_api.h"
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
+#include "transformer_engine/comm_gemm_overlap.h"
 
 #define MXFP8_BLOCK_SIZE 32
 
