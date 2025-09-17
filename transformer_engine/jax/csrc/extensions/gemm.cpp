@@ -114,6 +114,33 @@ class CommunicatorHandler {
     return comms[local_device_idx];
   }
 
+  // NCCL-based coordination methods for userbuffers
+  void nccl_barrier_impl(void* /*ExtComm - unused*/) {
+    NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using barrier");
+    
+    int device_idx = get_local_device_idx_for_current_device();
+    ncclComm_t nccl_comm = comms[device_idx];
+    
+    // Use NULL stream to let NCCL handle stream management
+    NVTE_CHECK_NCCL(ncclAllReduce(d_barrier_dummy_, d_barrier_result_, 1, ncclInt, ncclSum, nccl_comm, nullptr));
+  }
+
+  void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf, size_t input_bytes, void* /*ExtComm - unused*/) {
+    NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
+    
+    int device_idx = get_local_device_idx_for_current_device();
+    ncclComm_t nccl_comm = comms[device_idx];
+    
+    // Ensure input and output sizes are consistent with the number of ranks
+    size_t expected_output_bytes = input_bytes * num_ranks;
+    NVTE_CHECK(output_bytes == expected_output_bytes, 
+               "Output buffer size mismatch: expected ", expected_output_bytes, 
+               ", got ", output_bytes);
+    
+    // Use NULL stream to let NCCL handle stream management
+    NVTE_CHECK_NCCL(ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, nccl_comm, nullptr));
+  }
+
   // Get communicator for current CUDA device
   ncclComm_t get_comm_for_current_device() const {
     int current_device;
@@ -264,8 +291,15 @@ class CommunicatorHandler {
 
     std::cout << "=== Successfully initialized " << num_local_ranks << " NCCL communicators"
               << std::endl;
-    handler._initialize = true;
+    
+    // Allocate device memory for barrier operations
+    NVTE_CHECK_CUDA(cudaMalloc(&d_barrier_dummy_, sizeof(int)));
+    NVTE_CHECK_CUDA(cudaMalloc(&d_barrier_result_, sizeof(int)));
+    std::cout << "=== Allocated device memory for NCCL barrier operations" << std::endl;
+    
+    _initialize = true;
   }
+  
   static CommunicatorHandler &get(bool is_initialized = true) {
     std::cout << "CommunicatorHandler is called with is_initialized=" << is_initialized
               << std::endl;
@@ -279,7 +313,7 @@ class CommunicatorHandler {
   CommunicatorHandler &operator=(const CommunicatorHandler &) = delete;
 
  private:
-  CommunicatorHandler() {
+  CommunicatorHandler() : d_barrier_dummy_(nullptr), d_barrier_result_(nullptr) {
     // Initialize arrays to safe defaults
     for (int i = 0; i < MAX_DEVICES; i++) {
       local_device_ids[i] = -1;
@@ -297,9 +331,15 @@ class CommunicatorHandler {
         }
       }
     }
+    // Clean up device memory
+    if (d_barrier_dummy_) cudaFree(d_barrier_dummy_);
+    if (d_barrier_result_) cudaFree(d_barrier_result_);
   }
 
   bool _initialize = false;
+  // Device memory for barrier operations
+  int *d_barrier_dummy_ = nullptr;
+  int *d_barrier_result_ = nullptr;
 };
 
 void InitializeCgemmCommunicator(int num_ranks, int num_local_ranks, int process_id) {
@@ -369,6 +409,12 @@ class CollectiveGemmPlanRegistry {
         comm_handler.get_tp_local_rank(device_idx, cgemm_config.tp_size), cgemm_config.tp_size,
         comm_handler.get_tp_node_id(device_idx, cgemm_config.tp_size),
         comm_handler.get_tp_num_nodes(cgemm_config.tp_size), cgemm_config.tp_size,
+        [&handler](void* output_buf, size_t output_bytes, void* input_buf, size_t input_bytes, void* comm) {
+            handler.nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
+        },
+        [&handler](void* comm) {
+            handler.nccl_barrier_impl(comm);
+        },
         get_nvte_collective_op(cgemm_config.collective_op), cgemm_config.num_max_streams,
         1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
         cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
