@@ -118,25 +118,25 @@ class CommunicatorHandler {
   // NCCL-based coordination methods for userbuffers
   void nccl_barrier_impl(ExtComm /* not used*/) {
     NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using barrier");
-    
+
     int device_idx = get_local_device_idx_for_current_device();
     ncclComm_t nccl_comm = comms[device_idx];
-    
+
     NVTE_CHECK_NCCL(ncclAllReduce(d_barrier_buffer_, d_barrier_buffer_, 1, ncclInt, ncclSum, nccl_comm, nullptr));
   }
 
   void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf, size_t input_bytes, ExtComm /*ExtComm - unused*/) {
     NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
-    
+
     int device_idx = get_local_device_idx_for_current_device();
     ncclComm_t nccl_comm = comms[device_idx];
-    
+
     // Ensure input and output sizes are consistent with the number of ranks
     size_t expected_output_bytes = input_bytes * num_ranks;
-    NVTE_CHECK(output_bytes == expected_output_bytes, 
-               "Output buffer size mismatch: expected ", expected_output_bytes, 
+    NVTE_CHECK(output_bytes == expected_output_bytes,
+               "Output buffer size mismatch: expected ", expected_output_bytes,
                ", got ", output_bytes);
-    
+
     // Use NULL stream to let NCCL handle stream management
     NVTE_CHECK_NCCL(ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, nccl_comm, nullptr));
   }
@@ -265,40 +265,40 @@ class CommunicatorHandler {
     }
 
     // Create NCCL communicators for all local devices
-    // ncclUniqueId id;
-    // // Use a deterministic approach to generate the same ID across all processes
-    // memset(&id, 0, sizeof(ncclUniqueId));
-    // // Fill with a repeating pattern to ensure all bytes are set deterministically
-    // uint8_t *id_bytes = reinterpret_cast<uint8_t *>(&id);
-    // for (size_t i = 0; i < sizeof(ncclUniqueId); i++) {
-    //   id_bytes[i] = static_cast<uint8_t>((0xDEADBEEF >> (8 * (i % 4))) & 0xFF);
-    // }
-    //
-    // // Initialize communicators using NCCL group API for efficiency
-    // std::cout << "=== Starting NCCL group initialization for " << num_local_ranks << " devices"
-    //           << std::endl;
-    // NVTE_CHECK_NCCL(ncclGroupStart());
-    // for (int local_idx = 0; local_idx < num_local_ranks; local_idx++) {
-    //   NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids[local_idx]));
-    //   std::cout << "=== Initializing NCCL comm for local_idx=" << local_idx
-    //             << ", global_rank=" << handler.global_ranks[local_idx]
-    //             << ", device_id=" << handler.local_device_ids[local_idx] << std::endl;
-    //   // NVTE_CHECK_NCCL(ncclCommInitRank(&handler.comms[local_idx], handler.num_ranks, id,
-    //   //                                  handler.global_ranks[local_idx]));
-    // }
-    // std::cout << "=== Ending NCCL group initialization" << std::endl;
-    // NVTE_CHECK_NCCL(ncclGroupEnd());
+    ncclUniqueId id;
+    // Use a deterministic approach to generate the same ID across all processes
+    memset(&id, 0, sizeof(ncclUniqueId));
+    // Fill with a repeating pattern to ensure all bytes are set deterministically
+    uint8_t *id_bytes = reinterpret_cast<uint8_t *>(&id);
+    for (size_t i = 0; i < sizeof(ncclUniqueId); i++) {
+      id_bytes[i] = static_cast<uint8_t>((0xDEADBEEF >> (8 * (i % 4))) & 0xFF);
+    }
+
+    // Initialize communicators using NCCL group API for efficiency
+    std::cout << "=== Starting NCCL group initialization for " << num_local_ranks << " devices"
+              << std::endl;
+    NVTE_CHECK_NCCL(ncclGroupStart());
+    for (int local_idx = 0; local_idx < num_local_ranks; local_idx++) {
+      NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids[local_idx]));
+      std::cout << "=== Initializing NCCL comm for local_idx=" << local_idx
+                << ", global_rank=" << handler.global_ranks[local_idx]
+                << ", device_id=" << handler.local_device_ids[local_idx] << std::endl;
+      NVTE_CHECK_NCCL(ncclCommInitRank(&handler.comms[local_idx], handler.num_ranks, id,
+                                       handler.global_ranks[local_idx]));
+    }
+    std::cout << "=== Ending NCCL group initialization" << std::endl;
+    NVTE_CHECK_NCCL(ncclGroupEnd());
 
     std::cout << "=== Successfully initialized " << num_local_ranks << " NCCL communicators"
               << std::endl;
-    
+
     // Allocate device memory for barrier operations (single buffer for in-place AllReduce)
-    NVTE_CHECK_CUDA(cudaMalloc(&d_barrier_buffer_, sizeof(int)));
+    NVTE_CHECK_CUDA(cudaMalloc(&handler.d_barrier_buffer_, sizeof(int)));
     std::cout << "=== Allocated device memory for NCCL barrier operations" << std::endl;
-    
+
     handler._initialize = true;
   }
-  
+
   static CommunicatorHandler &get(bool is_initialized = true) {
     std::cout << "CommunicatorHandler is called with is_initialized=" << is_initialized
               << std::endl;
