@@ -133,6 +133,7 @@ struct CollectiveGemmConfig {
 };
 
 void InitializeCgemmCommunicator(int num_ranks, int num_local_ranks, int process_id);
+int GetCgemmNumMaxStreams();
 
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
