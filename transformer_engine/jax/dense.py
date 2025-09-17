@@ -214,7 +214,7 @@ def _dense_fwd_rule(
         transpose_batch_sequence=batch_sequence_transpose,
         bias=bias if not tex.gemm_uses_jax_dot() else None,
         fuse_bias=use_bias if not tex.gemm_uses_jax_dot() else False,
-        cgemm_config=cgemm_config_set.forward,
+        collective_op=collective_op_set.forward,
     )
     output = with_sharding_constraint_by_logical_axes(output, output_axes)
 
@@ -240,7 +240,7 @@ def _dense_bwd_rule(
     input_axes,
     kernel_axes,
     output_axes,
-    cgemm_config_set,
+    collective_op_set,
     ctx,
     grad,
 ):
@@ -286,7 +286,7 @@ def _dense_bwd_rule(
         casted_kernel_rhs,
         contracting_dims=(g_contracting_dim, k_contracting_dim),
         transpose_batch_sequence=batch_sequence_transpose,
-        cgemm_config=cgemm_config_set.backward,
+        collective_op_set=collective_op_set.backward,
     )
 
     # GEMM TN

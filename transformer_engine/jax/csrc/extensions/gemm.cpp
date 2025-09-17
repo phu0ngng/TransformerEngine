@@ -84,7 +84,7 @@ class CgemmConfig {
 
   static void init(int _num_max_streams, int _gemm_priority, int _comm_priority, int _num_comm_sm,
                    bool _use_ce, bool _aggregate_ag) {
-    auto &config = get();
+    auto &config = get(false);
     config._initialized = true;
     config.num_max_streams = _num_max_streams;
     config.gemm_priority = _gemm_priority;
@@ -310,17 +310,19 @@ class CommunicatorHandler {
     std::cout << "=== Allocated device memory for NCCL barrier operations" << std::endl;
 
     // Bootstrap UB via creating a dummy CommOverlapP2PBase object
-    std::vector<size_t> buffer_shape{0, 0};
-    DType dtype = DType::kByte;
-    auto &cgemm_config = CgemmConfig::get();
-    auto _ = std::make_unique<CommOverlapP2PBase>(
-        buffer_shape, dtype, handler.get_global_device_id(), handler.num_total_devices,
-        handler.get_local_device_id_within_tp_node(), handler.tp_size, handler.get_tp_node_id(),
-        handler.tp_num_nodes, handler.tp_num_nodes, handler.num_devices_per_process,
-        handler.allgather_func, handler.barrier_func, get_nvte_collective_op(JAXX_Collective_Op::ALL_GATHER),
-        cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
-        cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
-        cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
+    {
+      std::vector<size_t> buffer_shape{0, 0};
+      DType dtype = DType::kByte;
+      auto &cgemm_config = CgemmConfig::get();
+      CommOverlapP2PBase bootstrap_obj(
+          buffer_shape, dtype, handler.global_device_ids[0], handler.num_total_devices,
+          handler.get_local_device_id_within_tp_node(), handler.tp_size, handler.get_tp_node_id(),
+          handler.tp_num_nodes, handler.tp_size,
+          handler.allgather_func, handler.barrier_func, get_nvte_collective_op(JAXX_Collective_Op::ALL_GATHER),
+          cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
+          cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
+          cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
+    }
 
     handler._initialize = true;
   }
