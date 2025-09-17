@@ -15,6 +15,7 @@
 #include <string_view>
 #include <thread>
 #include <tuple>
+#include <unistd.h>
 
 #include "../extensions.h"
 #include "common.h"
@@ -284,7 +285,10 @@ class CommunicatorHandler {
     ncclUniqueId id;
     
     // Process 0 generates the unique ID, then broadcast via file system
-    std::string id_file = "/tmp/nccl_unique_id_" + std::to_string(num_total_devices) + "_" + std::to_string(tp_size) + ".bin";
+    // Use process group ID to ensure different job runs don't interfere
+    pid_t pgid = getpgid(0);
+    std::string id_file = "/tmp/nccl_unique_id_pgid_" + std::to_string(pgid) + "_" + 
+                          std::to_string(num_total_devices) + "_" + std::to_string(tp_size) + ".bin";
     
     if (process_id == 0) {
       NVTE_CHECK_NCCL(ncclGetUniqueId(&id));
@@ -348,6 +352,8 @@ class CommunicatorHandler {
     NVTE_CHECK_CUDA(cudaMalloc(&handler._barrier, sizeof(int)));
     std::cout << "=== Allocated device memory for NCCL barrier operations" << std::endl;
 
+    // This must be set before UB bootstrap
+    handler._initialize = true;
     // Bootstrap UB via creating a dummy CommOverlapP2PBase object
     {
       std::vector<size_t> buffer_shape{0, 0};
@@ -362,8 +368,6 @@ class CommunicatorHandler {
           cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
           cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
     }
-
-    handler._initialize = true;
   }
 
   static CommunicatorHandler &get(bool is_initialized = true) {
