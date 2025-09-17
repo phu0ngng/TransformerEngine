@@ -66,7 +66,7 @@ def dense(
     input_axes: Tuple[str, ...] = None,
     kernel_axes: Tuple[str, ...] = None,
     output_axes: Tuple[str, ...] = None,
-    cgemm_config_set: tex.CollectiveGemmConfigSet = tex.noop_cgemm_config_set,
+    collective_op_set: tex.CollectiveOpSet = tex.noop_collective_op_set,
     quantizer_set: QuantizerSet = noop_quantizer_set,
 ):
     """Perform dense layer transformation with optional quantization.
@@ -84,7 +84,7 @@ def dense(
         input_axes: Logical axes for sharding the activation input
         kernel_axes: Logical axes for sharding the weight matrix
         output_axes: Logical axes for sharding the output
-        cgemm_config_set: A set of CollectiveGemmConfig objects for forward and backward passes.
+        collective_op_set: A set of CollectiveOp objects for forward and backward passes.
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
 
     Returns:
@@ -106,7 +106,7 @@ def dense(
         input_axes,
         kernel_axes,
         output_axes,
-        cgemm_config_set,
+        collective_op_set,
         quantizer_set,
     )
     return output
@@ -122,7 +122,7 @@ def _dense(
     input_axes,
     kernel_axes,
     output_axes,
-    cgemm_config_set,
+    collective_op_set,
     quantizer_set,  # need to be a diff_arg for DelayedScaling state management
 ):
     """Internal implementation of dense layer transformation with custom VJP.
@@ -139,7 +139,7 @@ def _dense(
         input_axes: Logical axes for sharding the activation input
         output_axes: Logical axes for sharding the output_axes
         kernel_axes: Logical axes for sharding the weight matrix
-        cgemm_config_set: A set of CollectiveGemmConfig objects for forward and backward passes.
+        collective_op_set: A set of CollectiveOp objects for forward and backward passes.
         quantizer_set: QuantizerSet which contains quantizers for different tensor types
 
     Returns:
@@ -154,7 +154,7 @@ def _dense(
         input_axes,
         kernel_axes,
         output_axes,
-        cgemm_config_set,
+        collective_op_set,
         quantizer_set,
     )
     return output
@@ -169,7 +169,7 @@ def _dense_fwd_rule(
     input_axes,
     kernel_axes,
     output_axes,
-    cgemm_config_set,
+    collective_op_set,
     quantizer_set,
 ):
     """Forward pass rule for dense layer transformation.

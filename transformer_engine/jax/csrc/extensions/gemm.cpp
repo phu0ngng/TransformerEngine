@@ -21,7 +21,6 @@
 #include "transformer_engine/swizzle.h"
 #include "xla/ffi/api/c_api.h"
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
-#include "transformer_engine/comm_gemm_overlap.h"
 
 #define MXFP8_BLOCK_SIZE 32
 
@@ -84,14 +83,20 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
 class CommunicatorHandler {
  public:
   // Process-level information
-  int num_ranks = -1;        // Total number of ranks across all processes
-  int num_local_ranks = -1;  // Number of GPUs per process (1 for single GPU, tp_size for multi GPU)
-  int process_id = -1;       // Process ID (0-based)
-  int num_processes = -1;    // Total number of processes
+  int num_total_devices = -1;        // Total number of devices across all processes
+  int devices_per_process = -1;  // Number of GPUs per process (1 for single GPU, tp_size for multi GPU)
+  int process_id = -1;           // Process ID (0-based)
+  int num_processes = -1;        // Total number of processes
+
+  // Tensor Parallel (TP) information - calculated once during init
+  int tp_size = -1;              // Tensor parallel group size
+  int tp_num_nodes = -1;         // Number of TP nodes
+  int local_device_ids_within_tp_node[MAX_DEVICES] = {-1}; // TP local device ID for each device
+  int tp_node_ids[MAX_DEVICES] = {-1};         // TP node ID for each device
 
   // Device-level information (arrays for multi-device support)
-  int local_device_ids[MAX_DEVICES];  // CUDA device IDs within this process
-  int global_ranks[MAX_DEVICES];      // Global NCCL rank for each local device
+  int local_device_ids_within_process[MAX_DEVICES];  // CUDA device IDs within this process
+  int global_device_ids[MAX_DEVICES]; // Global device ID for each local device
   ncclComm_t comms[MAX_DEVICES];      // NCCL communicator for each local device
 
   // Process-level convenience accessors (NOT TP-domain specific)
@@ -149,7 +154,7 @@ class CommunicatorHandler {
 
     // Find the local device index that corresponds to the current CUDA device
     for (int i = 0; i < num_local_ranks; i++) {
-      if (local_device_ids[i] == current_device) {
+      if (local_device_ids_within_process[i] == current_device) {
         return comms[i];
       }
     }
@@ -166,7 +171,7 @@ class CommunicatorHandler {
     // Find the local device index that corresponds to the current CUDA device
     // This is thread-safe since local_device_ids is immutable after initialization
     for (int i = 0; i < num_local_ranks; i++) {
-      if (local_device_ids[i] == current_device) {
+      if (local_device_ids_within_process[i] == current_device) {
         return i;
       }
     }
@@ -177,74 +182,46 @@ class CommunicatorHandler {
   // TP-domain-specific accessors for CommOverlapP2P
   // These methods return ranks/nodes within the TP (tensor parallel) domain, not process domain
 
-  int get_tp_local_rank(int local_device_idx, int tp_size) const {
-    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_local_ranks,
-               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_local_ranks,
-               ")");
-    NVTE_CHECK(tp_size > 0, "tp_size must be > 0, got ", tp_size);
-
-    if (num_local_ranks == tp_size) {
-      // Scenario 1: Multi-device per process - TP domain = single process
-      // TP local rank = device index within the process (0, 1, 2, ...)
-      return local_device_idx;
-    } else {
-      // Scenario 2: Single device per process - TP domain spans multiple processes
-      // TP local rank = position within TP group (global_rank % tp_size)
-      return global_ranks[local_device_idx] % tp_size;
-    }
+  // Convenience methods for current device (most common usage)
+  int get_local_device_id_within_tp_node() const {
+    int device_idx = get_local_device_idx_for_current_device();
+    return local_device_ids_within_tp_node[device_idx];
   }
 
-  int get_tp_node_id(int local_device_idx, int tp_size) const {
-    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_local_ranks,
-               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_local_ranks,
-               ")");
-    NVTE_CHECK(tp_size > 0, "tp_size must be > 0, got ", tp_size);
-
-    if (num_local_ranks == tp_size) {
-      // Scenario 1: Multi-device per process - TP domain = single process
-      // TP node ID = process ID (each process is a TP node)
-      return process_id;
-    } else {
-      // Scenario 2: Single device per process - TP domain spans multiple processes
-      // TP node ID = which TP group this rank belongs to (global_rank / tp_size)
-      return global_ranks[local_device_idx] / tp_size;
-    }
+  int get_tp_node_id() const {
+    int device_idx = get_local_device_idx_for_current_device();
+    return tp_node_ids[device_idx];
   }
 
-  int get_tp_num_nodes(int tp_size) const {
-    NVTE_CHECK(tp_size > 0, "tp_size must be > 0, got ", tp_size);
+  // Explicit device index methods (for advanced usage)
 
-    if (num_local_ranks == tp_size) {
-      // Scenario 1: Multi-device per process - TP domain = single process
-      // Number of TP nodes = total number of processes (each process is a TP node)
-      return num_processes;
-    } else {
-      // Scenario 2: Single device per process - TP domain spans multiple processes
-      // Number of TP nodes = number of TP groups (num_ranks / tp_size)
-      return num_ranks / tp_size;
-    }
-  }
-
-  static void init(int num_ranks, int num_local_ranks, int process_id) {
+  static void init(int num_total_devices, int devices_per_process, int process_id, int tensor_parallel_size) {
     // Validate inputs
-    NVTE_CHECK(num_local_ranks <= MAX_DEVICES, "num_local_ranks exceeds MAX_DEVICES=", MAX_DEVICES,
-               ", got num_local_ranks=", num_local_ranks);
-    NVTE_CHECK(num_local_ranks >= 1,
+    NVTE_CHECK(devices_per_process <= MAX_DEVICES, "devices_per_process exceeds MAX_DEVICES=", MAX_DEVICES,
+               ", got devices_per_process=", devices_per_process);
+    NVTE_CHECK(devices_per_process >= 1,
                "num_local_ranks must be >= 1, got num_local_ranks=", num_local_ranks);
     NVTE_CHECK(num_ranks >= 1, "num_ranks must be >= 1, got num_ranks=", num_ranks);
     NVTE_CHECK(num_ranks % num_local_ranks == 0,
                "num_ranks must be divisible by num_local_ranks, got num_ranks=", num_ranks,
                ", num_local_ranks=", num_local_ranks);
 
+    // Validate TP size
+    NVTE_CHECK(tp_size > 0, "tp_size must be > 0, got tp_size=", tp_size);
+    NVTE_CHECK(num_ranks % tp_size == 0, "num_ranks must be divisible by tp_size, got num_ranks=",
+               num_ranks, ", tp_size=", tp_size);
+
     std::cout << "=== Calling from init with num_ranks=" << num_ranks
               << ", num_local_ranks=" << num_local_ranks << ", process_id=" << process_id
-              << std::endl;
+              << ", tp_size=" << tp_size << std::endl;
 
     auto &handler = get(false);
-    handler.num_ranks = num_ranks;
-    handler.num_local_ranks = num_local_ranks;
+    handler.num_total_devices = num_ranks;
+    handler.devices_per_process = num_local_ranks;
     handler.process_id = process_id;
-    handler.num_processes = num_ranks / num_local_ranks;
+    handler.num_processes = num_ranks / devices_per_process;
+    handler.tp_size = tp_size;
+    handler.tp_num_nodes = num_ranks / tp_size;
 
     NVTE_CHECK(0 <= process_id && process_id < handler.num_processes,
                "Invalid process_id=", process_id, ", which is out of range [0, ",
@@ -255,12 +232,26 @@ class CommunicatorHandler {
       // Use the device that JAX has already assigned to this process
       int current_device;
       NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-      handler.local_device_ids[local_idx] = current_device;
-      handler.global_ranks[local_idx] = process_id * num_local_ranks + local_idx;
+      handler.local_device_ids_within_process[local_idx] = current_device;
+      handler.global_device_ids[local_idx] = process_id * num_local_ranks + local_idx;
+
+      // Calculate TP-related values for this device
+      int global_device_id = handler.global_device_ids[local_idx];
+      if (devices_per_process == tp_size) {
+        // Scenario 1: Multi-device per process - TP domain = single process
+        handler.local_device_ids_within_tp_node[local_idx] = local_idx;
+        handler.tp_node_ids[local_idx] = process_id;
+      } else {
+        // Scenario 2: Single device per process - TP domain spans multiple processes
+        handler.local_device_ids_within_tp_node[local_idx] = global_device_id % tp_size;
+        handler.tp_node_ids[local_idx] = global_device_id / tp_size;
+      }
 
       std::cout << "=== Process " << process_id << ", local_idx=" << local_idx
                 << " -> Using JAX-assigned CUDA device=" << current_device
-                << ", global_rank=" << handler.global_ranks[local_idx] << std::endl;
+                << ", global_device_id=" << global_device_id
+                << ", tp_local_device_id=" << handler.local_device_ids_within_tp_node[local_idx]
+                << ", tp_node_id=" << handler.tp_node_ids[local_idx] << std::endl;
 
       // Device is already set by JAX, no need to change it
     }
@@ -280,12 +271,12 @@ class CommunicatorHandler {
               << std::endl;
     NVTE_CHECK_NCCL(ncclGroupStart());
     for (int local_idx = 0; local_idx < num_local_ranks; local_idx++) {
-      NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids[local_idx]));
+      NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids_within_process[local_idx]));
       std::cout << "=== Initializing NCCL comm for local_idx=" << local_idx
-                << ", global_rank=" << handler.global_ranks[local_idx]
-                << ", device_id=" << handler.local_device_ids[local_idx] << std::endl;
-      NVTE_CHECK_NCCL(ncclCommInitRank(&handler.comms[local_idx], handler.num_ranks, id,
-                                       handler.global_ranks[local_idx]));
+                << ", global_rank=" << handler.global_device_ids[local_idx]
+                << ", device_id=" << handler.local_device_ids_within_process[local_idx] << std::endl;
+      NVTE_CHECK_NCCL(ncclCommInitRank(&handler.comms[local_idx], handler.num_total_devices, id,
+                                       handler.global_device_ids[local_idx]));
     }
     std::cout << "=== Ending NCCL group initialization" << std::endl;
     NVTE_CHECK_NCCL(ncclGroupEnd());
@@ -293,9 +284,25 @@ class CommunicatorHandler {
     std::cout << "=== Successfully initialized " << num_local_ranks << " NCCL communicators"
               << std::endl;
 
-    // Allocate device memory for barrier operations (single buffer for in-place AllReduce)
-    NVTE_CHECK_CUDA(cudaMalloc(&handler.d_barrier_buffer_, sizeof(int)));
+    // Allocate device memory for barrier operations
+    NVTE_CHECK_CUDA(cudaMalloc(&handler.d_barrier_dummy_, sizeof(int)));
+    NVTE_CHECK_CUDA(cudaMalloc(&handler.d_barrier_result_, sizeof(int)));
     std::cout << "=== Allocated device memory for NCCL barrier operations" << std::endl;
+
+    // Boostrap UB via creating a dummy CommOverlapP2PBase object
+    std::vector<size_t> buffer_shape{0, 0};
+    DType dtype = DType::kByte;
+    auto & cgemm_config = CgemmConfig::get();
+    auto _ = std::make_unique<CommOverlapP2PBase>(
+        buffer_shape, dtype, handler.get_global_rank(), handler.num_total_devices,
+        handler.get_local_device_id_within_tp_node(), handler.tp_size,
+        handler.get_tp_node_id(), handler.tp_num_nodes,
+        handler.get_tp_num_nodes(), handler.devices_per_process,
+        handler.allgather_func, handler.barrier_func,
+        get_nvte_collective_op(JAXX_Collective_Op::ALL_GATHER), cgemm_config.num_max_streams,
+        1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
+        cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
+        false /*atomic_gemm*/, cgemm_config.aggregate_ag);
 
     handler._initialize = true;
   }
@@ -313,11 +320,13 @@ class CommunicatorHandler {
   CommunicatorHandler &operator=(const CommunicatorHandler &) = delete;
 
  private:
-  CommunicatorHandler() : d_barrier_buffer_(nullptr) {
+  CommunicatorHandler() : d_barrier_dummy_(nullptr), d_barrier_result_(nullptr) {
     // Initialize arrays to safe defaults
     for (int i = 0; i < MAX_DEVICES; i++) {
-      local_device_ids[i] = -1;
-      global_ranks[i] = -1;
+      local_device_ids_within_process[i] = -1;
+      local_device_ids_within_tp_node[i] = -1;
+      tp_node_ids[i] = -1;
+      global_device_ids[i] = -1;
       comms[i] = nullptr;
     }
   }
@@ -325,14 +334,15 @@ class CommunicatorHandler {
   ~CommunicatorHandler() {
     // Clean up NCCL communicators
     if (_initialize) {
-      for (int i = 0; i < num_local_ranks; i++) {
+      for (int i = 0; i < devices_per_process; i++) {
         if (comms[i] != nullptr) {
           ncclCommDestroy(comms[i]);
         }
       }
     }
     // Clean up device memory
-    if (d_barrier_buffer_) cudaFree(d_barrier_buffer_);
+    if (d_barrier_dummy_) cudaFree(d_barrier_dummy_);
+    if (d_barrier_result_) cudaFree(d_barrier_result_);
   }
 
   bool _initialize = false;
@@ -340,9 +350,51 @@ class CommunicatorHandler {
   int *d_barrier_buffer_ = nullptr;
 };
 
-void InitializeCgemmCommunicator(int num_ranks, int num_local_ranks, int process_id) {
+class CgemmConfig {
+ public:
+  int tp_size;
+  int num_max_streams;
+  int gemm_priority;
+  int comm_priority;
+  int num_comm_sm;
+  bool use_ce;
+  bool aggregate_ag;
+
+  static void init(int _tp_size, int _num_max_streams, int _gemm_priority, int _comm_priority, int _num_comm_sm, bool _use_ce, bool _aggregate_ag) {
+    auto &config = get();
+    config.tp_size = _tp_size;
+    config.num_max_streams = _num_max_streams;
+    config.gemm_priority = _gemm_priority;
+    config.comm_priority = _comm_priority;
+    config.num_comm_sm = _num_comm_sm;
+    config.use_ce = _use_ce;
+    aggregate_ag = _aggregate_ag;
+  }
+
+  static CgemmConfig &get() {
+    static CgemmConfig instance;
+    return instance;
+  }
+
+  CgemmConfig(const CgemmConfig &) = delete;
+  CgemmConfig &operator=(const CgemmConfig &) = delete;
+
+ private:
+  CgemmConfig() = default;
+  ~CgemmConfig() = default;
+};
+
+void InitializeCgemmCommunicator(int num_total_devices, int devices_per_process, int process_id, int tensor_parallel_size, int num_max_streams, int gemm_priority, int comm_priority, int num_comm_sm, bool use_ce, bool aggregate_ag) {
   auto &handler = CommunicatorHandler::get(false);
-  handler.init(num_ranks, num_local_ranks, process_id);
+  handler.init(num_total_devices, devices_per_process, process_id, tensor_parallel_size);
+  auto &config = CgemmConfig::get();
+  config.init(tensor_parallel_size, num_max_streams, gemm_priority, comm_priority, num_comm_sm, use_ce, aggregate_ag);
+}
+
+// Accessor function to get cached num_max_streams for Python
+int GetCgemmNumMaxStreams() {
+  auto &config = CgemmConfig::get();
+  return config.num_max_streams;
 }
 
 class CollectiveGemmPlanRegistry {
@@ -352,17 +404,17 @@ class CollectiveGemmPlanRegistry {
     return instance;
   }
 
-  CommOverlapCore *get_executor(std::vector<size_t> buffer_shape, DType dtype,
-                                CollectiveGemmConfig cgemm_config) {
-    // Get device index from current CUDA context (JAX sets this via FFI)
-    // This is safe in prepare phase since we cache per-device
+  CommOverlapCore *get_executor(std::vector<size_t> buffer_shape, DType dtype, JAXX_Collective_Op collective_op) {
     auto &comm_handler = CommunicatorHandler::get();
+    auto &cgemm_config = CgemmConfig::get();
+
+    // Get device index from current CUDA context (JAX sets this via FFI)
     int device_idx = comm_handler.get_local_device_idx_for_current_device();
 
     // Include device_idx in plan cache key to ensure device-specific caching
     int64_t plan_id = 0;
     hash_combine(plan_id, buffer_shape[0], buffer_shape[1], static_cast<size_t>(dtype),
-                 static_cast<int>(cgemm_config.collective_op), cgemm_config.tp_size,
+                 static_cast<int>(collective_op), cgemm_config.tp_size,
                  cgemm_config.num_max_streams, cgemm_config.gemm_priority,
                  cgemm_config.comm_priority, cgemm_config.num_comm_sm, cgemm_config.use_ce,
                  cgemm_config.aggregate_ag, device_idx);
@@ -374,30 +426,30 @@ class CollectiveGemmPlanRegistry {
     }
     std::cout << "=== CollectiveGemmPlanRegistry calls hanlder init" << std::endl;
     // Validate TP configuration and determine scenario
-    if (comm_handler.num_local_ranks == cgemm_config.tp_size) {
+    if (comm_handler.devices_per_process == cgemm_config.tp_size) {
       // Scenario 1: Multi-device per process - TP domain = single process
       std::cout << "=== TP Scenario 1: Multi-device per process (TP domain = single process)"
                 << std::endl;
-    } else if (comm_handler.num_local_ranks == 1) {
+    } else if (comm_handler.devices_per_process == 1) {
       // Scenario 2: Single device per process - TP domain spans multiple processes
       NVTE_CHECK(
-          comm_handler.num_ranks % cgemm_config.tp_size == 0,
+          comm_handler.num_total_devices % cgemm_config.tp_size == 0,
           "For single device per process, num_ranks must be divisible by tp_size, got num_ranks=",
-          comm_handler.num_ranks, ", tp_size=", cgemm_config.tp_size);
+          comm_handler.num_total_devices, ", tp_size=", cgemm_config.tp_size);
       std::cout << "=== TP Scenario 2: Single device per process (TP domain spans processes)"
                 << std::endl;
     } else {
-      NVTE_ERROR("Unsupported TP configuration: num_local_ranks=", comm_handler.num_local_ranks,
+      NVTE_ERROR("Unsupported TP configuration: devices_per_process=", comm_handler.devices_per_process,
                  ", tp_size=", cgemm_config.tp_size,
                  ". Supported scenarios: "
                  "(1) num_local_ranks == tp_size (multi-device per process), "
                  "(2) num_local_ranks == 1 (single device per process)");
     }
     printf("Global rank %d, num_ranks %d, tp_local_rank %d, tp_size %d, tp_node_id %d, tp_num_nodes %d",
-        comm_handler.get_global_rank(device_idx), comm_handler.num_ranks,
-        comm_handler.get_tp_local_rank(device_idx, cgemm_config.tp_size), cgemm_config.tp_size,
-        comm_handler.get_tp_node_id(device_idx, cgemm_config.tp_size),
-        comm_handler.get_tp_num_nodes(cgemm_config.tp_size));
+        comm_handler.get_global_rank(device_idx), comm_handler.num_total_devices,
+        comm_handler.get_tp_local_rank(device_idx), cgemm_config.tp_size,
+        comm_handler.get_tp_node_id(device_idx),
+        comm_handler.tp_num_nodes);
 
     // Create function objects for the callbacks
     auto &comm_handler_ref = CommunicatorHandler::get();
@@ -411,8 +463,7 @@ class CollectiveGemmPlanRegistry {
     // Create executor with device-specific parameters (device_idx determined above)
     std::unique_ptr<CommOverlapCore> executor;
     executor = std::make_unique<CommOverlapP2PBase>(
-        buffer_shape, dtype,
-        comm_handler.get_global_rank(device_idx), comm_handler.num_ranks,
+        buffer_shape, dtype, comm_handler.get_global_rank(device_idx), comm_handler.num_total_devices,
         comm_handler.get_tp_local_rank(device_idx, cgemm_config.tp_size), cgemm_config.tp_size,
         comm_handler.get_tp_node_id(device_idx, cgemm_config.tp_size),
         comm_handler.get_tp_num_nodes(cgemm_config.tp_size), cgemm_config.tp_size,
@@ -442,13 +493,15 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
                                  JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
                                  int64_t rhs_axis_boundary, bool lhs_transposed,
                                  bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
-                                 bool use_split_accumulator, CollectiveGemmConfig cgemm_config) {
-  // Init cublas handler
+                                 bool use_split_accumulator, JAXX_Collective_Op collective_op){
+
   nvte_cublas_handle_init();
-  std::cout << "=== CollectiveGemmInitFFI is called" << std::endl;
+
+  auto &cgemm_config = CgemmConfig::get();
+  auto &comm_handler = CommunicatorHandler::get();
 
   // Init UB buffer
-  if (cgemm_config.collective_op != JAXX_Collective_Op::NONE) {
+  if (collective_op != JAXX_Collective_Op::NONE) {
     std::vector<size_t> lhs_shape = {
         product(lhs.dimensions(), 0, lhs_axis_boundary),
         product(lhs.dimensions(), lhs_axis_boundary, lhs.dimensions().size())};
@@ -461,16 +514,15 @@ Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buf
 
     std::vector<size_t> buffer_shape{0, 0};
     DType buffer_dtype = convert_ffi_datatype_to_te_dtype(output->element_type());
-    if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
-      buffer_shape[0] = lhs_shape[0] * cgemm_config.tp_size;
+    if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
+      buffer_shape[0] = lhs_shape[0] * comm_handler.tp_size;
       buffer_shape[1] = lhs_shape[1];
       buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
-    } else if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
+    } else if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
       buffer_shape[0] = out_shape[0];
       buffer_shape[1] = out_shape[1];
     }
-    auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype,
-                                                                    cgemm_config);
+    auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, buffer_dtype, collective_op);
   }
   return ffi_with_cuda_error_check();
 }
@@ -496,7 +548,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(CollectiveGemmInitHandler, CollectiveGemmInitFFI,
                                   .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
                                   .Attr<bool>("use_split_accumulator")
-                                  .Attr<CollectiveGemmConfig>("cgemm_config"));
+                                  .Attr<JAXX_Collective_Op>("collective_op"));
 
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
@@ -504,8 +556,9 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    Result_Type workspace, JAXX_Scaling_Mode scaling_mode, int64_t lhs_axis_boundary,
                    int64_t rhs_axis_boundary, bool lhs_transposed, bool rhs_transposed,
                    bool fuse_bias, bool fuse_gelu, bool grad, bool use_split_accumulator,
-                   CollectiveGemmConfig cgemm_config) {
+                   JAXX_Collective_Op collective_op) {
   std::cout << "=== GemmFFI is called" << std::endl;
+  auto &comm_handler = CommunicatorHandler::get();
   // NOTE: TensorWrapper operands are always rowwise for full-precision GEMM, or FP8 GEMM when
   //       device supports non-TN layouts (compute capability >= 10.0, excluding 12.x)
   bool always_rowwise = (scaling_mode == JAXX_Scaling_Mode::NO_SCALING ||
@@ -560,7 +613,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 
   // Launch TE/common kernel with swapped LHS/RHS for cuBLAS column-major order
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
-  if (cgemm_config.collective_op == JAXX_Collective_Op::NONE) {
+  if (collective_op == JAXX_Collective_Op::NONE) {
     auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
     NVTE_CHECK(out_.numel() == output->element_count(),
                "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(), " elements ",
@@ -573,19 +626,20 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   } else {
     std::vector<size_t> buffer_shape{0, 0};
     DType buffer_dtype = out_dtype;
-    if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
-      buffer_shape[0] = lhs_shape[0] * cgemm_config.tp_size;
+    auto &comm_handler = CommunicatorHandler::get();
+    if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
+      buffer_shape[0] = lhs_shape[0] * comm_handler.tp_size;
       buffer_shape[1] = lhs_shape[1];
-      out_shape[0] = out_shape[0] * cgemm_config.tp_size;
+      out_shape[0] = out_shape[0] * comm_handler.tp_size;
       buffer_dtype = convert_ffi_datatype_to_te_dtype(lhs.element_type());
-    } else if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
+    } else if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
       buffer_shape[0] = out_shape[0];
       buffer_shape[1] = out_shape[1];
-      out_shape[0] = out_shape[0] / cgemm_config.tp_size;
+      out_shape[0] = out_shape[0] / comm_handler.tp_size;
     }
     auto executor = CollectiveGemmPlanRegistry::getInstance().get_executor(
-        buffer_shape, buffer_dtype, cgemm_config);
-    if (cgemm_config.collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
+        buffer_shape, buffer_dtype, collective_op);
+    if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
       auto ubuf_out_ = TensorWrapper(executor->get_ubuf_dptr(), buffer_shape, out_dtype);
       // Prepare the auxiliary buffer for the reduce-scattered GEMM output
       auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
@@ -600,7 +654,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                                  stream);
 
       // TODO: Don't we need to copy the output back to the original buffer?
-    } else if (cgemm_config.collective_op == JAXX_Collective_Op::ALL_GATHER) {
+    } else if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
       auto aux_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);  // Empty
 
       auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
@@ -642,7 +696,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmHandler, GemmFFI,
                                   .Attr<bool>("fuse_gelu")
                                   .Attr<bool>("grad")
                                   .Attr<bool>("use_split_accumulator")
-                                  .Attr<CollectiveGemmConfig>("cgemm_config"),
+                                  .Attr<JAXX_Collective_Op>("collective_op"),
                               FFI_CudaGraph_Traits);
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,

@@ -19,13 +19,14 @@ from transformer_engine.jax.layernorm_mlp import layernorm_mlp
 # from transformer_engine.jax.quantize import is_fp8_available, ScalingMode, Quantizer, QuantizeConfig, fp8_autocast
 from transformer_engine.jax.quantize import fp8_autocast
 from transformer_engine.jax.cpp_extensions.gemm import (
-    CollectiveGemmConfigSet,
+    CollectiveOpSet,
     CollectiveOp,
-    noop_cgemm_config_set,
-    initialize_cgemm_communicator,
+    noop_collective_op_set,
+    collective_gemm_bootstrap,
 )
 from transformer_engine.jax.sharding import MeshResource
 import transformer_engine.jax.flax as te_flax
+from test_gemm import _get_tp_and_dp_sizes
 
 NAME_DP_AXIS = "data"
 NAME_TPSP_AXIS = "tensor_sequence"
@@ -95,8 +96,9 @@ def _initialize_distributed(args):
     # num_local_ranks = GPUs per process (1 for single device per process)
     num_local_ranks = 1  # Single GPU per process
     total_ranks = args.num_processes  # Total number of processes/ranks
-    initialize_cgemm_communicator(
-        num_ranks=total_ranks, num_local_ranks=num_local_ranks, process_id=args.process_id
+    collective_gemm_bootstrap(
+        num_total_devices=total_ranks, devices_per_process=num_local_ranks, process_id=args.process_id,
+        tensor_parallel_size=args.tensor_parallel_size,
     )
 
 
@@ -124,16 +126,7 @@ def _get_operand_sharding(mesh):
 
 def _create_mesh(args):
     """Create mesh configuration with proper validation."""
-    num_gpu = jax.device_count()
-    numranks = args.num_processes * args.num_devices_per_process
-    assert num_gpu == numranks, f"Requires {num_gpu} processes for {num_gpu} GPUs, got {numranks}!"
-    num_gpu_dp = 2 if args.enable_data_parallel else 1
-    assert (
-        num_gpu > 1 and num_gpu % num_gpu_dp == 0
-    ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
-
-    num_gpu_tp = num_gpu // num_gpu_dp
-    assert num_gpu_tp > 1, f"Number of GPUs for tensor parallelism ({num_gpu_tp}) must be > 1"
+    num_gpu_dp, num_gpu_tp = _get_tp_and_dp_sizes(args)
     print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
@@ -154,7 +147,7 @@ def _mean_layernorm_mlp(
     input_2_axes,
     weight_1_axes,
     weight_2_axes,
-    cgemm_config_sets,
+    collective_op_sets,
 ):
     output = layernorm_mlp(
         x,
@@ -168,7 +161,7 @@ def _mean_layernorm_mlp(
         kernel_1_axes=weight_1_axes,
         kernel_2_axes=weight_2_axes,
         activation_type=("gelu",),
-        cgemm_config_sets=cgemm_config_sets,
+        collective_op_sets=collective_op_sets,
     )
     return jnp.mean(output)
 
@@ -184,7 +177,7 @@ def _value_and_grad_layernorm_mlp(
     input_2_axes,
     weight_1_axes,
     weight_2_axes,
-    cgemm_config_sets,
+    collective_op_sets,
 ):
     return jax.jit(
         jax.value_and_grad(_mean_layernorm_mlp, (0, 1, 2, 3, 4, 5)), static_argnums=(6, 7, 8, 9, 10)
@@ -199,7 +192,7 @@ def _value_and_grad_layernorm_mlp(
         input_2_axes,
         weight_1_axes,
         weight_2_axes,
-        cgemm_config_sets,
+        collective_op_sets,
     )
 
 
@@ -245,14 +238,14 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
         te_extended_axis_rules = te_flax.extend_logical_axis_rules(axis_rules)
         with flax.linen.logical_axis_rules(te_extended_axis_rules):
             # Collective GEMM configs need to be created under the mesh_resource context
-            cgemm_config_set_1 = CollectiveGemmConfigSet.create(
+            collective_op_set_1 = CollectiveOpSet.create(
                 forward_collective_op=CollectiveOp.ALL_GATHER
             )
-            cgemm_config_set_2 = CollectiveGemmConfigSet.create(
+            collective_op_set_2 = CollectiveOpSet.create(
                 forward_collective_op=CollectiveOp.REDUCE_SCATTER
             )
-            cgemm_config_sets = (cgemm_config_set_1, cgemm_config_set_2)
-            noop_cgemm_config_sets = (noop_cgemm_config_set, noop_cgemm_config_set)
+            collective_op_sets = (collective_op_set_1, collective_op_set_2)
+            noop_collective_op_sets = (noop_collective_op_set, noop_collective_op_set)
 
             x_sharding, weight_1_sharding, bias_1_sharding, weight_2_sharding, bias_2_sharding = (
                 _get_operand_sharding(mesh)
@@ -275,7 +268,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
                 input_2_axes,
                 weight_1_axes,
                 weight_2_axes,
-                noop_cgemm_config_sets,
+                noop_collective_op_sets,
             )
             output, sharded_grads = _value_and_grad_layernorm_mlp(
                 x_sharded,
@@ -288,7 +281,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
                 input_2_axes,
                 weight_1_axes,
                 weight_2_axes,
-                cgemm_config_sets,
+                collective_op_sets,
             )
         jax.block_until_ready(ref_output)
         jax.block_until_ready(output)
@@ -401,6 +394,7 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         self.args.process_id = self.process_id
         self.args.local_device_ids = self.local_device_ids
         self.args.num_devices_per_process = self.num_devices_per_process
+        self.args.tensor_parallel_size = _get_tp_and_dp_sizes(self.args)[1]
         _initialize_distributed(self.args)
         # Create mesh once for all tests
         self.mesh = _create_mesh(self.args)
@@ -434,6 +428,7 @@ class TestCollectiveDenseGradientWithDP(unittest.TestCase):
         self.args.process_id = self.process_id
         self.args.local_device_ids = self.local_device_ids
         self.args.num_devices_per_process = self.num_devices_per_process
+        self.args.tensor_parallel_size = _get_tp_and_dp_sizes(self.args)[1]
         _initialize_distributed(self.args)
         # Create mesh once for all tests
         self.args.enable_data_parallel = True
