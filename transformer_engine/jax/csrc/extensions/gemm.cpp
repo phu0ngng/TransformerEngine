@@ -4,6 +4,7 @@
  * See LICENSE for license information.
  ************************************************************************/
 #include "transformer_engine/gemm.h"
+#include "transformer_engine/comm_gemm_overlap.h"
 
 #include <memory>
 #include <mutex>
@@ -137,7 +138,7 @@ class CommunicatorHandler {
   ncclComm_t comms[MAX_DEVICES];                     // NCCL communicator for each local device
 
   // Process-level convenience accessors (NOT TP-domain specific)
-  int get_global_rank() const {
+  int get_global_device_id() const {
     int device_idx = get_local_device_idx_for_current_device();
     return global_device_ids[device_idx];
   }
@@ -313,7 +314,7 @@ class CommunicatorHandler {
     DType dtype = DType::kByte;
     auto &cgemm_config = CgemmConfig::get();
     auto _ = std::make_unique<CommOverlapP2PBase>(
-        buffer_shape, dtype, handler.get_global_rank(), handler.num_total_devices,
+        buffer_shape, dtype, handler.get_global_device_id(), handler.num_total_devices,
         handler.get_local_device_id_within_tp_node(), handler.tp_size, handler.get_tp_node_id(),
         handler.tp_num_nodes, handler.tp_num_nodes, handler.num_devices_per_process,
         handler.allgather_func, handler.barrier_func, get_nvte_collective_op(JAXX_Collective_Op::ALL_GATHER),
@@ -336,6 +337,10 @@ class CommunicatorHandler {
   CommunicatorHandler(const CommunicatorHandler &) = delete;
   CommunicatorHandler &operator=(const CommunicatorHandler &) = delete;
 
+  // Cached function objects for userbuffers coordination
+  ExtAllgatherOp allgather_func;
+  ExtBarrierOp barrier_func;
+
  private:
   CommunicatorHandler() : _barrier(nullptr) {
     // Initialize arrays to safe defaults
@@ -346,7 +351,7 @@ class CommunicatorHandler {
       global_device_ids[i] = -1;
       comms[i] = nullptr;
     }
-    
+
     // Initialize function objects - these will be set during init()
     allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf, size_t input_bytes, ExtComm comm) {
       this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
@@ -372,10 +377,6 @@ class CommunicatorHandler {
   bool _initialize = false;
   // Device memory for barrier operations (single buffer for in-place AllReduce)
   int *_barrier = nullptr;
-  
-  // Cached function objects for userbuffers coordination
-  ExtAllgatherOp allgather_func;
-  ExtBarrierOp barrier_func;
 };
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
@@ -447,7 +448,7 @@ class CollectiveGemmPlanRegistry {
         "Global rank %d, num_total_devices %d, tp_local_rank %d, tp_size %d, tp_node_id %d, "
         "tp_num_nodes "
         "%d",
-        comm_handler.get_global_rank(), comm_handler.num_total_devices,
+        comm_handler.get_global_device_id(), comm_handler.num_total_devices,
         comm_handler.get_local_device_id_within_tp_node(), comm_handler.tp_size,
         comm_handler.get_tp_node_id(), comm_handler.tp_num_nodes);
 
@@ -455,10 +456,13 @@ class CollectiveGemmPlanRegistry {
     // Create executor with device-specific parameters (device_idx determined above)
     std::unique_ptr<CommOverlapCore> executor;
     executor = std::make_unique<CommOverlapP2PBase>(
-        buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
+        buffer_shape, dtype,
+        comm_handler.get_global_device_id(), comm_handler.num_total_devices,
         comm_handler.get_local_device_id_within_tp_node(), comm_handler.tp_size,
-        comm_handler.get_tp_node_id(), comm_handler.tp_num_nodes, comm_handler.tp_size,
-        comm_handler.allgather_func, comm_handler.barrier_func, get_nvte_collective_op(collective_op),
+        comm_handler.get_tp_node_id(), comm_handler.tp_num_nodes,
+        comm_handler.tp_size,
+        comm_handler.allgather_func, comm_handler.barrier_func,
+        get_nvte_collective_op(collective_op),
         cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
         cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
         cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
