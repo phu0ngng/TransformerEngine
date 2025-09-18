@@ -138,21 +138,28 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
             << std::endl;
 
   // Create TP-domain communicators for userbuffers coordination
-  // Generate separate unique ID for TP communicators
+  // Generate separate unique ID for each TP group
   ncclUniqueId tp_id;
+  
+  // Each TP group needs its own unique ID file
+  // Use the TP node ID to distinguish between TP groups
+  int tp_node_id = handler.tp_node_ids[0]; // All devices in this process have same TP node ID
   std::string tp_id_file = "/tmp/nccl_tp_unique_id_pgid_" + std::to_string(pgid) + "_" +
-                           std::to_string(num_total_devices) + "_" + std::to_string(tp_size) + ".bin";
+                           std::to_string(num_total_devices) + "_" + std::to_string(tp_size) + 
+                           "_node_" + std::to_string(tp_node_id) + ".bin";
 
-  if (process_id == 0) {
+  // Only TP rank 0 in each TP group generates the ID
+  if (handler.get_local_device_id_within_tp_node() == 0) {
     NVTE_CHECK_NCCL(ncclGetUniqueId(&tp_id));
-    std::cout << "=== Process 0 generated TP NCCL unique ID" << std::endl;
+    std::cout << "=== Process " << process_id << " (first in TP group " << tp_node_id 
+              << ") generated TP NCCL unique ID" << std::endl;
     
     // Write the TP ID to a separate temporary file
     std::ofstream tp_file(tp_id_file, std::ios::binary);
     NVTE_CHECK(tp_file.is_open(), "Failed to create TP NCCL unique ID file: ", tp_id_file);
     tp_file.write(reinterpret_cast<const char*>(&tp_id), sizeof(ncclUniqueId));
     tp_file.close();
-    std::cout << "=== Process 0 wrote TP NCCL unique ID to file: " << tp_id_file << std::endl;
+    std::cout << "=== Process " << process_id << " wrote TP NCCL unique ID to file: " << tp_id_file << std::endl;
   } else {
     // Wait for the TP ID file to be created and read it
     std::cout << "=== Process " << process_id << " waiting for TP NCCL unique ID file: " << tp_id_file << std::endl;
@@ -190,10 +197,10 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   std::cout << "=== Ending TP-domain NCCL group initialization" << std::endl;
   NVTE_CHECK_NCCL(ncclGroupEnd());
 
-  // Clean up the TP unique ID file (only process 0 needs to do this)
-  if (process_id == 0) {
+  // Clean up the TP unique ID file (only TP rank 0 that created it)
+  if (handler.get_local_device_id_within_tp_node() == 0) {
     std::remove(tp_id_file.c_str());
-    std::cout << "=== Process 0 cleaned up TP NCCL unique ID file: " << tp_id_file << std::endl;
+    std::cout << "=== Process " << process_id << " (TP rank 0) cleaned up TP NCCL unique ID file: " << tp_id_file << std::endl;
   }
 
   std::cout << "=== Successfully initialized " << num_devices_per_process << " TP-domain NCCL communicators"
