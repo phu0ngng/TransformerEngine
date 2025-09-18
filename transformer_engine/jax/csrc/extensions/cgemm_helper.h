@@ -95,7 +95,8 @@ class CommunicatorHandler {
   // Device-level information (arrays for multi-device support)
   int local_device_ids_within_process[MAX_DEVICES];  // CUDA device IDs within this process
   int global_device_ids[MAX_DEVICES];                // Global device ID for each local device
-  ncclComm_t comms[MAX_DEVICES];                     // NCCL communicator for each local device
+  ncclComm_t comms[MAX_DEVICES];                     // Global NCCL communicator for each local device
+  ncclComm_t tp_comms[MAX_DEVICES];                  // TP-domain NCCL communicator for each local device
 
   // Process-level convenience accessors (NOT TP-domain specific)
   int get_global_rank() const {
@@ -105,38 +106,38 @@ class CommunicatorHandler {
 
   // NCCL-based coordination methods for userbuffers
   void nccl_barrier_impl(ExtComm /* not used*/) {
-    std::cout << "=== NCCL barrier called! Process " << process_id << std::endl;
+    std::cout << "=== NCCL global barrier called! Process " << process_id << std::endl;
     NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using barrier");
 
     int device_idx = get_local_device_idx_for_current_device();
-    ncclComm_t nccl_comm = comms[device_idx];
+    ncclComm_t global_comm = comms[device_idx];  // Use global communicator for barriers
 
-    std::cout << "=== NCCL barrier executing AllReduce" << std::endl;
-    NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, nccl_comm, 0));
+    std::cout << "=== NCCL global barrier executing AllReduce across all processes" << std::endl;
+    NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, global_comm, 0));
     cudaStreamSynchronize(0);
-    std::cout << "=== NCCL barrier completed" << std::endl;
+    std::cout << "=== NCCL global barrier completed" << std::endl;
   }
 
   void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf,
                            size_t input_bytes, ExtComm /*ExtComm - unused*/) {
-    std::cout << "=== NCCL allgather called! Process " << process_id << ", input_bytes=" << input_bytes
+    std::cout << "=== NCCL TP allgather called! Process " << process_id << ", input_bytes=" << input_bytes
               << ", output_bytes=" << output_bytes << std::endl;
     NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
 
     int device_idx = get_local_device_idx_for_current_device();
-    ncclComm_t nccl_comm = comms[device_idx];
+    ncclComm_t tp_comm = tp_comms[device_idx];  // Use TP-domain communicator
 
-    // Ensure input and output sizes are consistent with the number of ranks
-    // size_t expected_output_bytes = input_bytes * num_total_devices;
-    // NVTE_CHECK(output_bytes == expected_output_bytes, "Output buffer size mismatch: expected ",
-    //            expected_output_bytes, ", got ", output_bytes);
+    // Ensure input and output sizes are consistent with TP size (not total devices)
+    size_t expected_output_bytes = input_bytes * tp_size;
+    NVTE_CHECK(output_bytes == expected_output_bytes, "TP allgather buffer size mismatch: expected ",
+               expected_output_bytes, ", got ", output_bytes);
 
-    std::cout << "=== NCCL allgather executing" << std::endl;
-    // Use NULL stream to let NCCL handle stream management
+    std::cout << "=== NCCL TP allgather executing within TP domain" << std::endl;
+    // Use NULL stream to let NCCL handle stream management (CUDA graph friendly)
     NVTE_CHECK_NCCL(
-        ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, nccl_comm, 0));
+        ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, tp_comm, 0));
     cudaStreamSynchronize(0);
-    std::cout << "=== NCCL allgather completed" << std::endl;
+    std::cout << "=== NCCL TP allgather completed" << std::endl;
   }
 
   // Get communicator for current CUDA device
@@ -222,6 +223,7 @@ class CommunicatorHandler {
       tp_node_ids[i] = -1;
       global_device_ids[i] = -1;
       comms[i] = nullptr;
+      tp_comms[i] = nullptr;
     }
 
     // Initialize function objects - these will be set during init()
@@ -241,6 +243,9 @@ class CommunicatorHandler {
       for (int i = 0; i < num_devices_per_process; i++) {
         if (comms[i] != nullptr) {
           ncclCommDestroy(comms[i]);
+        }
+        if (tp_comms[i] != nullptr) {
+          ncclCommDestroy(tp_comms[i]);
         }
       }
     }

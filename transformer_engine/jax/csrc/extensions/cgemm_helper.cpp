@@ -134,7 +134,25 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   std::cout << "=== Ending NCCL group initialization" << std::endl;
   NVTE_CHECK_NCCL(ncclGroupEnd());
 
-  std::cout << "=== Successfully initialized " << num_devices_per_process << " NCCL communicators"
+  std::cout << "=== Successfully initialized " << num_devices_per_process << " global NCCL communicators"
+            << std::endl;
+
+  // Create TP-domain communicators for userbuffers coordination
+  std::cout << "=== Starting TP-domain NCCL group initialization for " << num_devices_per_process
+            << " devices" << std::endl;
+  NVTE_CHECK_NCCL(ncclGroupStart());
+  for (int local_idx = 0; local_idx < num_devices_per_process; local_idx++) {
+    NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids_within_process[local_idx]));
+    int tp_local_rank = handler.local_device_ids_within_tp_node[local_idx];
+    std::cout << "=== Initializing TP NCCL comm for local_idx=" << local_idx
+              << ", tp_local_rank=" << tp_local_rank
+              << ", tp_size=" << handler.tp_size << std::endl;
+    NVTE_CHECK_NCCL(ncclCommInitRank(&handler.tp_comms[local_idx], handler.tp_size, id, tp_local_rank));
+  }
+  std::cout << "=== Ending TP-domain NCCL group initialization" << std::endl;
+  NVTE_CHECK_NCCL(ncclGroupEnd());
+
+  std::cout << "=== Successfully initialized " << num_devices_per_process << " TP-domain NCCL communicators"
             << std::endl;
 
   // Clean up the temporary file (only process 0 needs to do this)
