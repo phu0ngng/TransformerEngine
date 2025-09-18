@@ -5,6 +5,7 @@
  ************************************************************************/
 
 #include "../extensions.h"
+#include "cgemm_helper.h"
 #include "common/util/cuda_runtime.h"
 
 namespace transformer_engine {

@@ -4,22 +4,15 @@
  * See LICENSE for license information.
  ************************************************************************/
 #include "transformer_engine/gemm.h"
-#include "transformer_engine/comm_gemm_overlap.h"
 
-#include <chrono>
-#include <cstdio>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string_view>
-#include <thread>
 #include <tuple>
-#include <unistd.h>
 
 #include "../extensions.h"
 #include "common.h"
-#include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/string.h"
 #include "common/util/system.h"
@@ -27,6 +20,7 @@
 #include "nccl.h"
 #include "transformer_engine/swizzle.h"
 #include "xla/ffi/api/c_api.h"
+#include "cgemm_helper.h"
 
 #define MXFP8_BLOCK_SIZE 32
 
@@ -78,49 +72,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
   return std::make_tuple(std::move(input), input_shape);
 }
 
-class CgemmConfig {
- public:
-  int num_max_streams;
-  int gemm_priority;
-  int comm_priority;
-  int num_comm_sm;
-  bool use_ce;
-  bool aggregate_ag;
 
-  static void init(int _num_max_streams, int _gemm_priority, int _comm_priority, int _num_comm_sm,
-                   bool _use_ce, bool _aggregate_ag) {
-    auto &config = get(false);
-    config._initialized = true;
-    config.num_max_streams = _num_max_streams;
-    config.gemm_priority = _gemm_priority;
-    config.comm_priority = _comm_priority;
-    config.num_comm_sm = _num_comm_sm;
-    config.use_ce = _use_ce;
-    config.aggregate_ag = _aggregate_ag;
-  }
-
-  static CgemmConfig &get(bool is_initialized = true) {
-    static thread_local CgemmConfig instance;
-    NVTE_CHECK(instance._initialized == is_initialized, "CgemmConfig must be initialized before using it, got is_initialized=", is_initialized);
-    return instance;
-  }
-
-  CgemmConfig(const CgemmConfig &) = delete;
-  CgemmConfig &operator=(const CgemmConfig &) = delete;
-
- private:
-  CgemmConfig() = default;
-  ~CgemmConfig() = default;
-  bool _initialized = false;
-};
-
-class CollectiveGemmPlanRegistry;
-
-#ifndef MAX_DEVICES
-#define MAX_DEVICES 8
-#endif
-
-// Support both single process single device AND single process multi device
 // Two scenarios:
 // 1. Single process multiple devices: TP domain = process (num_devices_per_process == tp_size)
 // 2. Single process single device: TP domain spans processes (num_devices_per_process == 1)

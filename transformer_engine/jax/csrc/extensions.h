@@ -121,22 +121,6 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 
-struct CollectiveGemmConfig {
-  JAXX_Collective_Op collective_op;
-  int64_t tp_size;
-  int64_t num_max_streams;
-  int64_t gemm_priority;
-  int64_t comm_priority;
-  int64_t num_comm_sm;
-  bool use_ce;
-  bool aggregate_ag;
-};
-
-void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
-                                 int tp_size, int num_max_streams, int gemm_priority,
-                                 int comm_priority, int num_comm_sm, bool use_ce,
-                                 bool aggregate_ag);
-int GetCgemmNumMaxStreams();
 
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
