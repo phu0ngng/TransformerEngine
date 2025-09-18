@@ -602,9 +602,9 @@ class GemmPrimitive(BasePrimitive):
         if collective_op.is_all_gather and not transpose_batch_sequence and not is_outer:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             # TODO: Make sure it works with DP + batch_size_per_process = 1
+            original_shape = output.shape
             assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, f"Original_shape[0]={original_shape[0]} is not divisible by dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
             assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, f"Original_shape[1]={original_shape[1]} is not divisible by tpsp_axis_size()={tpsp_axis_size()}"
-            original_shape = output.shape
             reshaped = output.reshape(
                 tpsp_axis_size(),
                 dp_or_fsdp_axis_size(),
