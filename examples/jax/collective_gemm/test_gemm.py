@@ -398,17 +398,13 @@ class TestCollectiveGemm(unittest.TestCase):
         jax.sharding.set_mesh(self.mesh)
         self.args.enable_result_check = True
         os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
-        self.args.batch_size = 1
-        self.args.seq_len = 128
-        self.args.hidden_in = 64
-        self.args.hidden_out = 64
+        # self.args.batch_size = 1
+        # self.args.seq_len = 128
+        # self.args.hidden_in = 64
+        # self.args.hidden_out = 64
 
     def tearDown(self):
         """Clean up after each test."""
-        # Clear the mesh to prevent interference between tests
-        # Note: JAX doesn't accept None, so we create a minimal 1-device mesh to reset
-        # single_device_mesh = jax.sharding.Mesh([jax.devices()[0]], axis_names=())
-        # jax.sharding.set_mesh(single_device_mesh)
         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_all_gather(self):
@@ -416,10 +412,10 @@ class TestCollectiveGemm(unittest.TestCase):
         self.args.collective_type = "all_gather"
         run_gemm_tests(self.args, self.mesh)
 
-    # def test_te_bf16_reduce_scatter(self):
-    #     """Test Collective GEMM with ReduceScatter"""
-    #     self.args.collective_type = "reduce_scatter"
-    #     run_gemm_tests(self.args, self.mesh)
+    def test_te_bf16_reduce_scatter(self):
+        """Test Collective GEMM with ReduceScatter"""
+        self.args.collective_type = "reduce_scatter"
+        run_gemm_tests(self.args, self.mesh)
 
 
 # class TestCollectiveGemmWithDP(unittest.TestCase):
