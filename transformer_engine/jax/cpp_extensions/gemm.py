@@ -567,11 +567,13 @@ class GemmPrimitive(BasePrimitive):
         if collective_op.is_reduce_scatter and not transpose_batch_sequence and not is_outer:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = lhs.shape
+            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, f"Original_shape[0]={original_shape[0]} is not divisible by dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, f"Original_shape[1]={original_shape[1]} is not divisible by tpsp_axis_size()={tpsp_axis_size()}"
             reshaped = lhs.reshape(
                 dp_or_fsdp_axis_size(),
-                int(original_shape[0] / dp_or_fsdp_axis_size()),
+                max(1, int(original_shape[0] / dp_or_fsdp_axis_size())),
                 tpsp_axis_size(),
-                int(original_shape[1] / tpsp_axis_size()),
+                max(1, int(original_shape[1] / tpsp_axis_size())),
                 *original_shape[2:],
             )
             reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
@@ -600,11 +602,13 @@ class GemmPrimitive(BasePrimitive):
         if collective_op.is_all_gather and not transpose_batch_sequence and not is_outer:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = output.shape
+            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, f"Original_shape[0]={original_shape[0]} is not divisible by dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, f"Original_shape[1]={original_shape[1]} is not divisible by tpsp_axis_size()={tpsp_axis_size()}"
             reshaped = output.reshape(
                 tpsp_axis_size(),
                 dp_or_fsdp_axis_size(),
-                int(original_shape[0] / dp_or_fsdp_axis_size()),
-                int(original_shape[1] / tpsp_axis_size()),
+                max(1, int(original_shape[0] / dp_or_fsdp_axis_size())),
+                max(1, int(original_shape[1] / tpsp_axis_size())),
                 *original_shape[2:],
             )
             reordered = reshaped.transpose(1, 2, 0, 3, *range(4, reshaped.ndim))
