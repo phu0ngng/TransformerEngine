@@ -166,7 +166,8 @@ def _get_operand_sharding(mesh, collective_op, is_with_dp):
 
 
 def _get_dp_and_tp_sizes(args):
-    num_gpu = jax.device_count()
+    # num_gpu = jax.device_count() #TODO
+    num_gpu = 2
     if args.tensor_parallel_size is None:
         num_gpu_dp = 2 if args.enable_data_parallel else 1
         assert (
