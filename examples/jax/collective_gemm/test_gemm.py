@@ -185,7 +185,7 @@ def _get_dp_and_tp_sizes(args):
 def _create_mesh(args):
     """Create mesh configuration with proper validation."""
     num_gpu = args.num_processes * args.num_devices_per_process
-    assert num_gpu == len(jax.local_devices()), "Number of GPUs must be equal to number of local devices"
+    assert num_gpu == len(jax.devices()), "Number of GPUs must be equal to number of local devices"
     num_gpu_dp, num_gpu_tp = _get_dp_and_tp_sizes(args)
 
     print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")

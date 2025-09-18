@@ -21,7 +21,6 @@
 #include "common/util/logging.h"
 #include "transformer_engine/comm_gemm_overlap.h"
 #include "../extensions.h"
-#include "misc.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -56,7 +55,7 @@ class CgemmConfig {
 
   static CgemmConfig &get(bool is_initialized = true) {
     static thread_local CgemmConfig instance;
-    NVTE_CHECK(instance._initialized == is_initialized, 
+    NVTE_CHECK(instance._initialized == is_initialized,
                "CgemmConfig must be initialized before using it, got is_initialized=", is_initialized);
     return instance;
   }
@@ -198,6 +197,10 @@ class CommunicatorHandler {
     return instance;
   }
 
+  // Cached function objects for userbuffers coordination
+  ExtAllgatherOp allgather_func;
+  ExtBarrierOp barrier_func;
+
   CommunicatorHandler(const CommunicatorHandler &) = delete;
   CommunicatorHandler &operator=(const CommunicatorHandler &) = delete;
 
@@ -211,7 +214,7 @@ class CommunicatorHandler {
       global_device_ids[i] = -1;
       comms[i] = nullptr;
     }
-    
+
     // Initialize function objects - these will be set during init()
     allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf, size_t input_bytes, ExtComm comm) {
       this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
@@ -237,10 +240,6 @@ class CommunicatorHandler {
   bool _initialize = false;
   // Device memory for barrier operations (single buffer for in-place AllReduce)
   int *_barrier = nullptr;
-  
-  // Cached function objects for userbuffers coordination
-  ExtAllgatherOp allgather_func;
-  ExtBarrierOp barrier_func;
 };
 
 // Plan registry for caching collective GEMM executors
