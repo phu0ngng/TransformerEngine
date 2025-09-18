@@ -571,31 +571,56 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
                                 (uint64_t)0);
 
     // Check if we have working NCCL-based coordination functions
-    bool has_nccl_coordination = (comm->_allgather != nullptr && comm->_barrier != nullptr);
+    bool has_external_coordination = (comm->_allgather != nullptr && comm->_barrier != nullptr);
     
     printf("=== DEBUG: mnnvl_fabric=%s, has_nccl_coordination=%s, will use %s path\n", 
            mnnvl_fabric ? "true" : "false",
-           has_nccl_coordination ? "true" : "false",
+           has_external_coordination ? "true" : "false",
            (mnnvl_fabric || has_nccl_coordination) ? "allgather (NCCL)" : "UDS socket");
     
-    // if (mnnvl_fabric || has_nccl_coordination) {
     if (mnnvl_fabric) {
       printf("=== DEBUG: Using allgather path for memory handle exchange\n");
-      CUmemFabricHandle *exphndl;
-      CUmemFabricHandle myhndl;
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemExportToShareableHandle, &myhndl,
-                                  comm->uchandles[hndl][myrank], CU_MEM_HANDLE_TYPE_FABRIC, 0);
-      NVTE_CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&exphndl),
-                                     comm->nvsize * sizeof(CUmemFabricHandle)));
-      comm->_allgather(reinterpret_cast<void *>(exphndl), comm->nvsize * sizeof(CUmemFabricHandle),
-                       reinterpret_cast<void *>(&myhndl), sizeof(CUmemFabricHandle),
-                       comm->comm_intra);
-      for (int p = 0; p < nranks; p++)
-        if (p != myrank)
-          NVTE_CALL_CHECK_CUDA_DRIVER(cuMemImportFromShareableHandle, &comm->uchandles[hndl][p],
-                                      reinterpret_cast<void *>(&exphndl[p]),
-                                      CU_MEM_HANDLE_TYPE_FABRIC);
-      NVTE_CHECK_CUDA(cudaFreeHost(exphndl));
+        // Use fabric handles for MNNVL
+        printf("=== DEBUG: Using FABRIC handles with allgather\n");
+        CUmemFabricHandle *exphndl;
+        CUmemFabricHandle myhndl;
+        NVTE_CALL_CHECK_CUDA_DRIVER(cuMemExportToShareableHandle, &myhndl,
+                                    comm->uchandles[hndl][myrank], CU_MEM_HANDLE_TYPE_FABRIC, 0);
+        NVTE_CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&exphndl),
+                                       comm->nvsize * sizeof(CUmemFabricHandle)));
+        comm->_allgather(reinterpret_cast<void *>(exphndl), comm->nvsize * sizeof(CUmemFabricHandle),
+                         reinterpret_cast<void *>(&myhndl), sizeof(CUmemFabricHandle),
+                         comm->comm_intra);
+        for (int p = 0; p < nranks; p++)
+          if (p != myrank)
+            NVTE_CALL_CHECK_CUDA_DRIVER(cuMemImportFromShareableHandle, &comm->uchandles[hndl][p],
+                                        reinterpret_cast<void *>(&exphndl[p]),
+                                        CU_MEM_HANDLE_TYPE_FABRIC);
+        NVTE_CHECK_CUDA(cudaFreeHost(exphndl));
+      } else if (has_external_coordination) {
+        // Use POSIX file descriptors with NCCL allgather (no UDS sockets!)
+        printf("=== DEBUG: Using POSIX file descriptors with NCCL allgather\n");
+        int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
+        NVTE_CALL_CHECK_CUDA_DRIVER(
+            cuMemExportToShareableHandle, reinterpret_cast<void *>(&peerfd[myrank]),
+            comm->uchandles[hndl][myrank],
+            static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
+            (uint64_t)0);
+
+        // Use NCCL allgather instead of UDS sockets
+        printf("=== DEBUG: Calling NCCL allgather for file descriptors\n");
+        comm->_allgather(reinterpret_cast<void *>(peerfd), nranks * sizeof(int),
+                         reinterpret_cast<void *>(&peerfd[myrank]), sizeof(int),
+                         comm->comm_intra);
+
+        for (int p = 0; p < nranks; p++) {
+          if (p != myrank)
+            NVTE_CALL_CHECK_CUDA_DRIVER(
+                cuMemImportFromShareableHandle, &comm->uchandles[hndl][p],
+                reinterpret_cast<void *>(&peerfd[p]),
+                static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+        }
+        free(peerfd);
     } else {
       int *peerfd = reinterpret_cast<int *>(malloc(nranks * sizeof(int)));
       NVTE_CALL_CHECK_CUDA_DRIVER(
