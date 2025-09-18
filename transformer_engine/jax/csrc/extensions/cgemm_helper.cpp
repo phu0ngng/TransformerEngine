@@ -114,7 +114,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       attempts++;
     }
-    NVTE_CHECK(attempts < max_attempts, 
+    NVTE_CHECK(attempts < max_attempts,
                "Timeout waiting for NCCL unique ID file from process 0: ", id_file);
   }
 
@@ -149,6 +149,10 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
 
   // Mark as initialized
   handler._initialize = true;
+
+  // Bootstrap UB via creating a dummy CommOverlapP2PBase object
+  std::vector<size_t> buffer_shape{0, 0};
+  auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER);
 }
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
@@ -189,9 +193,9 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   if (it != plan_map.end()) {
     return it->second.get();  // Return existing executor
   }
-  
+
   std::cout << "=== CollectiveGemmPlanRegistry calls handler init" << std::endl;
-  
+
   // Validate TP configuration and determine scenario
   if (comm_handler.num_devices_per_process == comm_handler.tp_size) {
     // Scenario 1: Multi-device per process - TP domain = single process
@@ -212,7 +216,7 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
                "(1) num_devices_per_process == tp_size (multi-device per process), "
                "(2) num_devices_per_process == 1 (single device per process)");
   }
-  
+
   printf(
       "Global rank %d, num_total_devices %d, tp_local_rank %d, tp_size %d, tp_node_id %d, "
       "tp_num_nodes %d",
