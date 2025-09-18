@@ -438,7 +438,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         jax.sharding.set_mesh(self.mesh)
         self.args.enable_result_check = True
         os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
-        self.args.batch_size = 1
+        self.args.batch_size = 2
         self.args.seq_len = 128
         self.args.hidden_in = 64
         self.args.hidden_out = 64
