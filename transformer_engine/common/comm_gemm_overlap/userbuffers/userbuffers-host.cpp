@@ -116,7 +116,10 @@ bool has_mnnvl_fabric(int device_id) {
   int fabric_handle_supported = 0;
   NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &fabric_handle_supported,
                               CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, dev);
+  printf("=== DEBUG: fabric_handle_supported=%d on device %d\n", fabric_handle_supported, device_id);
+  
   if (fabric_handle_supported) {
+    printf("=== DEBUG: Checking NVML fabric info...\n");
     NVTE_CALL_CHECK_CUDA_NVML(nvmlInit_v2);
     nvmlDevice_t local_device;
     NVTE_CALL_CHECK_CUDA_NVML(nvmlDeviceGetHandleByIndex_v2, device_id, &local_device);
@@ -125,8 +128,13 @@ bool has_mnnvl_fabric(int device_id) {
     fabricInfo.clusterUuid[0] = '\0';
     NVTE_CALL_CHECK_CUDA_NVML(nvmlDeviceGetGpuFabricInfoV, local_device, &fabricInfo);
     NVTE_CALL_CHECK_CUDA_NVML(nvmlShutdown);
+    printf("=== DEBUG: fabricInfo.state=%d, clusterUuid[0]=%d\n", fabricInfo.state, fabricInfo.clusterUuid[0]);
     if (fabricInfo.state >= NVML_GPU_FABRIC_STATE_COMPLETED && fabricInfo.clusterUuid[0] != '\0') {
       mnnvl_fabric_support = true;
+      printf("=== DEBUG: MNNVL fabric support enabled\n");
+    } else {
+      printf("=== DEBUG: MNNVL fabric support disabled - state=%d, uuid_empty=%s\n", 
+             fabricInfo.state, fabricInfo.clusterUuid[0] == '\0' ? "true" : "false");
     }
   }
   if (getenv("NVTE_UBDEBUG")) {
@@ -522,7 +530,10 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   comm->mem_dealloc[hndl] = alloc;
 
 #if CUDART_VERSION >= 12010
+  printf("=== DEBUG: comm->use_mc=%s, alloc=%s\n", comm->use_mc ? "true" : "false", alloc ? "true" : "false");
+  
   if (comm->use_mc && alloc) {
+    printf("=== DEBUG: Taking multicast (MC) path\n");
     bool mnnvl_fabric = has_mnnvl_fabric(comm->mydev);
     int nranks = comm->nvsize;  // total GPUs in NVLINK domain
     int myrank = comm->nvrank;
@@ -559,7 +570,17 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemCreate, &(comm->uchandles[hndl][myrank]), aligned_size, &prop,
                                 (uint64_t)0);
 
+    // Check if we have working NCCL-based coordination functions
+    bool has_nccl_coordination = (comm->_allgather != nullptr && comm->_barrier != nullptr);
+    
+    printf("=== DEBUG: mnnvl_fabric=%s, has_nccl_coordination=%s, will use %s path\n", 
+           mnnvl_fabric ? "true" : "false",
+           has_nccl_coordination ? "true" : "false",
+           (mnnvl_fabric || has_nccl_coordination) ? "allgather (NCCL)" : "UDS socket");
+    
+    // if (mnnvl_fabric || has_nccl_coordination) {
     if (mnnvl_fabric) {
+      printf("=== DEBUG: Using allgather path for memory handle exchange\n");
       CUmemFabricHandle *exphndl;
       CUmemFabricHandle myhndl;
       NVTE_CALL_CHECK_CUDA_DRIVER(cuMemExportToShareableHandle, &myhndl,
@@ -589,6 +610,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       ipcSocketResult_t ret = ipcSocketSuccess;
 
       // All-gather POSIX file descriptors across local ranks
+      printf("=== DEBUG: Taking UDS socket path for file descriptor exchange, myrank=%d, nranks=%d\n", myrank, nranks);
       IPCCHECK(ipcSocketInit(&ipcSock, myrank, (uint64_t)opId, &abortFlag));
       for (int p = 1; p < nranks; p++) {
         int send_to = (myrank + p) % nranks;
