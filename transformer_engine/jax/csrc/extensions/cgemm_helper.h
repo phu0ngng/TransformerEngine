@@ -106,16 +106,16 @@ class CommunicatorHandler {
 
   // NCCL-based coordination methods for userbuffers
   void nccl_barrier_impl(ExtComm /* not used*/) {
-    std::cout << "=== NCCL global barrier called! Process " << process_id << std::endl;
+    std::cout << "=== NCCL TP barrier called! Process " << process_id << std::endl;
     NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using barrier");
 
     int device_idx = get_local_device_idx_for_current_device();
-    ncclComm_t global_comm = comms[device_idx];  // Use global communicator for barriers
+    ncclComm_t tp_comm = tp_comms[device_idx];  // Use TP-domain communicator for barriers
 
-    std::cout << "=== NCCL global barrier executing AllReduce across all processes" << std::endl;
-    NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, global_comm, 0));
+    std::cout << "=== NCCL TP barrier executing AllReduce within TP domain" << std::endl;
+    NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, tp_comm, 0));
     cudaStreamSynchronize(0);
-    std::cout << "=== NCCL global barrier completed" << std::endl;
+    std::cout << "=== NCCL TP barrier completed" << std::endl;
   }
 
   void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf,
