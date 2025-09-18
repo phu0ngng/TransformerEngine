@@ -88,9 +88,9 @@ class CommunicatorHandler {
 
   // Tensor Parallel (TP) information - calculated once during init
   int tp_size = -1;                                         // Tensor parallel group size
-  int tp_num_nodes = -1;                                    // Number of TP nodes
-  int local_device_ids_within_tp_node[MAX_DEVICES] = {-1};  // TP local device ID for each device
-  int tp_node_ids[MAX_DEVICES] = {-1};                      // TP node ID for each device
+  int tp_num_domains = -1;                                  // Number of TP domains
+  int local_device_ids_within_tp_domain[MAX_DEVICES] = {-1}; // TP local device ID for each device
+  int tp_domain_ids[MAX_DEVICES] = {-1};                    // TP domain ID for each device
 
   // Device-level information (arrays for multi-device support)
   int local_device_ids_within_process[MAX_DEVICES];  // CUDA device IDs within this process
@@ -166,33 +166,18 @@ class CommunicatorHandler {
   // These methods return ranks/nodes within the TP (tensor parallel) domain, not process domain
 
   // Convenience methods for current device (most common usage)
-  int get_local_device_id_within_tp_node() const {
+  int get_local_device_id_within_tp_domain() const {
     int device_idx = get_local_device_idx_for_current_device();
-    return local_device_ids_within_tp_node[device_idx];
+    return local_device_ids_within_tp_domain[device_idx];
   }
 
-  int get_tp_node_id() const {
+  int get_tp_domain_id() const {
     int device_idx = get_local_device_idx_for_current_device();
-    return tp_node_ids[device_idx];
+    return tp_domain_ids[device_idx];
   }
 
-  int get_tp_num_nodes() const {
-    return tp_num_nodes;
-  }
-
-  // Explicit device index methods (for advanced usage)
-  int get_local_device_id_within_tp_node(int local_device_idx) const {
-    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_devices_per_process,
-               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_devices_per_process,
-               ")");
-    return local_device_ids_within_tp_node[local_device_idx];
-  }
-
-  int get_tp_node_id(int local_device_idx) const {
-    NVTE_CHECK(local_device_idx >= 0 && local_device_idx < num_devices_per_process,
-               "Invalid local_device_idx=", local_device_idx, ", must be in [0, ", num_devices_per_process,
-               ")");
-    return tp_node_ids[local_device_idx];
+  int get_tp_num_domains() const {
+    return tp_num_domains;
   }
 
   static void init(int num_total_devices, int num_devices_per_process, int process_id, int tp_size);
@@ -224,8 +209,8 @@ class CommunicatorHandler {
     // Initialize arrays to safe defaults
     for (int i = 0; i < MAX_DEVICES; i++) {
       local_device_ids_within_process[i] = -1;
-      local_device_ids_within_tp_node[i] = -1;
-      tp_node_ids[i] = -1;
+      local_device_ids_within_tp_domain[i] = -1;
+      tp_domain_ids[i] = -1;
       global_device_ids[i] = -1;
       tp_comms[i] = nullptr;
     }

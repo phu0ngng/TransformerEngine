@@ -15,17 +15,17 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string& i
   ncclUniqueId unique_id;
   
   // Get all needed info from class members
-  int tp_node_id = get_tp_node_id();
-  bool is_tp_leader = (get_local_device_id_within_tp_node() == 0);
+  int tp_domain_id = get_tp_domain_id();
+  bool is_tp_leader = (get_local_device_id_within_tp_domain() == 0);
   
   pid_t pgid = getpgid(0);
   std::string id_file = "/tmp/nccl_" + id_type + "_unique_id_pgid_" + std::to_string(pgid) + "_" +
                         std::to_string(num_total_devices) + "_" + std::to_string(tp_size) + 
-                        "_node_" + std::to_string(tp_node_id) + ".bin";
+                        "_domain_" + std::to_string(tp_domain_id) + ".bin";
 
   if (is_tp_leader) {
     NVTE_CHECK_NCCL(ncclGetUniqueId(&unique_id));
-    std::cout << "=== Process " << process_id << " (leader in " << id_type << " group " << tp_node_id 
+    std::cout << "=== Process " << process_id << " (leader in " << id_type << " domain " << tp_domain_id 
               << ") generated NCCL unique ID" << std::endl;
     
     // Write the ID to a temporary file
@@ -97,7 +97,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   handler.process_id = process_id;
   handler.num_processes = num_total_devices / num_devices_per_process;
   handler.tp_size = tp_size;
-  handler.tp_num_nodes = num_total_devices / tp_size;
+  handler.tp_num_domains = num_total_devices / tp_size;
 
   NVTE_CHECK(0 <= process_id && process_id < handler.num_processes,
              "Invalid process_id=", process_id, ", which is out of range [0, ",
@@ -113,21 +113,21 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
 
     // Calculate TP-related values for this device
     int global_device_id = handler.global_device_ids[local_idx];
-    if (num_devices_per_process == tp_size) {
-      // Scenario 1: Multi-device per process - TP domain = single process
-      handler.local_device_ids_within_tp_node[local_idx] = local_idx;
-      handler.tp_node_ids[local_idx] = process_id;
-    } else {
-      // Scenario 2: Single device per process - TP domain spans multiple processes
-      handler.local_device_ids_within_tp_node[local_idx] = global_device_id % tp_size;
-      handler.tp_node_ids[local_idx] = global_device_id / tp_size;
-    }
+      if (num_devices_per_process == tp_size) {
+        // Scenario 1: Multi-device per process - TP domain = single process
+        handler.local_device_ids_within_tp_domain[local_idx] = local_idx;
+        handler.tp_domain_ids[local_idx] = process_id;
+      } else {
+        // Scenario 2: Single device per process - TP domain spans multiple processes
+        handler.local_device_ids_within_tp_domain[local_idx] = global_device_id % tp_size;
+        handler.tp_domain_ids[local_idx] = global_device_id / tp_size;
+      }
 
     std::cout << "=== Process " << process_id << ", local_idx=" << local_idx
               << " -> Using JAX-assigned CUDA device=" << current_device
               << ", global_device_id=" << global_device_id
-              << ", tp_local_device_id=" << handler.local_device_ids_within_tp_node[local_idx]
-              << ", tp_node_id=" << handler.tp_node_ids[local_idx] << std::endl;
+              << ", tp_local_device_id=" << handler.local_device_ids_within_tp_domain[local_idx]
+              << ", tp_domain_id=" << handler.tp_domain_ids[local_idx] << std::endl;
 
     // Device is already set by JAX, no need to change it
   }
@@ -141,7 +141,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   NVTE_CHECK_NCCL(ncclGroupStart());
   for (int local_idx = 0; local_idx < num_devices_per_process; local_idx++) {
     NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids_within_process[local_idx]));
-    int tp_local_rank = handler.local_device_ids_within_tp_node[local_idx];
+    int tp_local_rank = handler.local_device_ids_within_tp_domain[local_idx];
     std::cout << "=== Initializing TP NCCL comm for local_idx=" << local_idx
               << ", tp_local_rank=" << tp_local_rank
               << ", tp_size=" << handler.tp_size << std::endl;
