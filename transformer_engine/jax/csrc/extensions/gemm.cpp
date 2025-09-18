@@ -198,17 +198,23 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 
   // Launch TE/common kernel with swapped LHS/RHS for cuBLAS column-major order
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
+  std::cout << "=== GemmFFI: About to execute GEMM, collective_op=" << static_cast<int>(collective_op) << std::endl;
+  
   if (collective_op == JAXX_Collective_Op::NONE) {
+    std::cout << "=== GemmFFI: Taking regular GEMM path (no collective)" << std::endl;
     auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
     NVTE_CHECK(out_.numel() == output->element_count(),
                "cuBLAS GEMM output buffer size is incorrect, expected ", out_.numel(), " elements ",
                to_string_like(out_shape), " but got ", output->element_count(), " elements ",
                to_string_like(output->dimensions()));
 
+    std::cout << "=== GemmFFI: Calling nvte_cublas_gemm" << std::endl;
     nvte_cublas_gemm(rhs_.data(), lhs_.data(), out_.data(), bias_.data(), pre_gelu_.data(),
                      rhs_transposed, lhs_transposed, grad, workspace_.data(), false,
                      use_split_accumulator, num_math_sm, stream);
+    std::cout << "=== GemmFFI: nvte_cublas_gemm completed" << std::endl;
   } else {
+    std::cout << "=== GemmFFI: Taking collective GEMM path" << std::endl;
     std::vector<size_t> buffer_shape{0, 0};
     DType buffer_dtype = out_dtype;
     auto &comm_handler = CommunicatorHandler::get();
@@ -222,9 +228,14 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
       buffer_shape[1] = out_shape[1];
       out_shape[0] = out_shape[0] / comm_handler.tp_size;
     }
+    std::cout << "=== GemmFFI: Getting collective executor, buffer_shape=[" << buffer_shape[0] 
+              << "," << buffer_shape[1] << "]" << std::endl;
     auto executor = CollectiveGemmPlanRegistry::getInstance().get_executor(
         buffer_shape, buffer_dtype, collective_op);
+    std::cout << "=== GemmFFI: Got collective executor successfully" << std::endl;
+    std::cout << "=== GemmFFI: buffer_dtype=" << static_cast<int>(buffer_dtype) << std::endl;
     if (collective_op == JAXX_Collective_Op::REDUCE_SCATTER) {
+      std::cout << "=== GemmFFI: Executing REDUCE_SCATTER path" << std::endl;
       auto ubuf_out_ = TensorWrapper(executor->get_ubuf_dptr(), buffer_shape, out_dtype);
       // Prepare the auxiliary buffer for the reduce-scattered GEMM output
       auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
@@ -234,12 +245,15 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                  " elements ", to_string_like(output->dimensions()));
 
       // Launch GEMM+RS
+      std::cout << "=== GemmFFI: Calling split_overlap_rs" << std::endl;
       executor->split_overlap_rs(rhs_, rhs_transposed, lhs_, lhs_transposed, ubuf_out_, bias_,
                                  pre_gelu_, workspace_, grad, false, use_split_accumulator, out_,
                                  stream);
+      std::cout << "=== GemmFFI: split_overlap_rs completed" << std::endl;
 
       // TODO: Don't we need to copy the output back to the original buffer?
     } else if (collective_op == JAXX_Collective_Op::ALL_GATHER) {
+      std::cout << "=== GemmFFI: Executing ALL_GATHER path" << std::endl;
       auto aux_out_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);  // Empty
 
       auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
@@ -249,13 +263,16 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                  " elements ", to_string_like(output->dimensions()));
       // Copy the distributed LHS operand into the local chunk of the communication buffer
       executor->copy_into_buffer(stream, lhs_, true, make_lhs_rowwise);
-
+      std::cout << "=== GemmFFI: copy_into_buffer completed" << std::endl;
       // Launch AG+GEMM
+      std::cout << "=== GemmFFI: Calling split_overlap_ag" << std::endl;
       executor->split_overlap_ag(rhs_, rhs_transposed, lhs_, lhs_transposed, out_, bias_, pre_gelu_,
                                  workspace_, grad, false, use_split_accumulator, aux_out_, stream);
+      std::cout << "=== GemmFFI: split_overlap_ag completed" << std::endl;
     }
   }
 
+  std::cout << "=== GemmFFI: Returning with CUDA error check" << std::endl;
   return ffi_with_cuda_error_check();
 }
 
