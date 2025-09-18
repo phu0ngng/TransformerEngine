@@ -358,8 +358,8 @@ class CommunicatorHandler {
     handler._initialize = true;
 
     // Bootstrap UB via creating a dummy CommOverlapP2PBase object
-    std::vector<size_t> buffer_shape{0, 0};
-    auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER);
+    // std::vector<size_t> buffer_shape{0, 0};
+    // auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER);
   }
 
   static CommunicatorHandler &get(bool is_initialized = true) {
