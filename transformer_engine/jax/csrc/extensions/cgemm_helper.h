@@ -113,8 +113,8 @@ class CommunicatorHandler {
     ncclComm_t tp_comm = tp_comms[device_idx];  // Use TP-domain communicator for barriers
 
     std::cout << "=== NCCL TP barrier executing AllReduce within TP domain" << std::endl;
-    NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, tp_comm, 0));
-    cudaStreamSynchronize(0);
+    NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, tp_comm, nullptr));
+    cudaDeviceSynchronize();
     std::cout << "=== NCCL TP barrier completed" << std::endl;
   }
 
@@ -133,10 +133,10 @@ class CommunicatorHandler {
                expected_output_bytes, ", got ", output_bytes);
 
     std::cout << "=== NCCL TP allgather executing within TP domain" << std::endl;
-    // Use NULL stream to let NCCL handle stream management (CUDA graph friendly)
+    // Use NULL stream to let NCCL handle stream management
     NVTE_CHECK_NCCL(
-        ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, tp_comm, 0));
-    cudaStreamSynchronize(0);
+        ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, tp_comm, nullptr));
+    cudaDeviceSynchronize();
     std::cout << "=== NCCL TP allgather completed" << std::endl;
   }
 
