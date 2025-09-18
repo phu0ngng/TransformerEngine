@@ -95,8 +95,7 @@ class CommunicatorHandler {
   // Device-level information (arrays for multi-device support)
   int local_device_ids_within_process[MAX_DEVICES];  // CUDA device IDs within this process
   int global_device_ids[MAX_DEVICES];                // Global device ID for each local device
-  ncclComm_t comms[MAX_DEVICES];                     // Global NCCL communicator for each local device
-  ncclComm_t tp_comms[MAX_DEVICES];                  // TP-domain NCCL communicator for each local device
+  ncclComm_t tp_comms[MAX_DEVICES];                     // TP-domain NCCL communicator for each local device
 
   // Process-level convenience accessors (NOT TP-domain specific)
   int get_global_rank() const {
@@ -198,6 +197,12 @@ class CommunicatorHandler {
 
   static void init(int num_total_devices, int num_devices_per_process, int process_id, int tp_size);
 
+ private:
+  // Helper function for NCCL unique ID coordination via file system
+  ncclUniqueId coordinate_nccl_unique_id(const std::string& id_type);
+
+ public:
+
   static CommunicatorHandler &get(bool is_initialized = true) {
     std::cout << "CommunicatorHandler is called with is_initialized=" << is_initialized
               << std::endl;
@@ -222,7 +227,6 @@ class CommunicatorHandler {
       local_device_ids_within_tp_node[i] = -1;
       tp_node_ids[i] = -1;
       global_device_ids[i] = -1;
-      comms[i] = nullptr;
       tp_comms[i] = nullptr;
     }
 
@@ -241,9 +245,6 @@ class CommunicatorHandler {
     // Clean up NCCL communicators
     if (_initialize) {
       for (int i = 0; i < num_devices_per_process; i++) {
-        if (comms[i] != nullptr) {
-          ncclCommDestroy(comms[i]);
-        }
         if (tp_comms[i] != nullptr) {
           ncclCommDestroy(tp_comms[i]);
         }

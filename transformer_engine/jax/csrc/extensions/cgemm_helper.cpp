@@ -10,6 +10,62 @@
 namespace transformer_engine {
 namespace jax {
 
+// Helper function for NCCL unique ID coordination via file system
+ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string& id_type) {
+  ncclUniqueId unique_id;
+  
+  // Get all needed info from class members
+  int tp_node_id = get_tp_node_id();
+  bool is_tp_leader = (get_local_device_id_within_tp_node() == 0);
+  
+  pid_t pgid = getpgid(0);
+  std::string id_file = "/tmp/nccl_" + id_type + "_unique_id_pgid_" + std::to_string(pgid) + "_" +
+                        std::to_string(num_total_devices) + "_" + std::to_string(tp_size) + 
+                        "_node_" + std::to_string(tp_node_id) + ".bin";
+
+  if (is_tp_leader) {
+    NVTE_CHECK_NCCL(ncclGetUniqueId(&unique_id));
+    std::cout << "=== Process " << process_id << " (leader in " << id_type << " group " << tp_node_id 
+              << ") generated NCCL unique ID" << std::endl;
+    
+    // Write the ID to a temporary file
+    std::ofstream file(id_file, std::ios::binary);
+    NVTE_CHECK(file.is_open(), "Failed to create NCCL unique ID file: ", id_file);
+    file.write(reinterpret_cast<const char*>(&unique_id), sizeof(ncclUniqueId));
+    file.close();
+    std::cout << "=== Process " << process_id << " wrote " << id_type << " NCCL unique ID to file: " << id_file << std::endl;
+  } else {
+    // Wait for the ID file to be created and read it
+    std::cout << "=== Process " << process_id << " waiting for " << id_type << " NCCL unique ID file: " << id_file << std::endl;
+    int attempts = 0;
+    const int max_attempts = 100;
+    while (attempts < max_attempts) {
+      std::ifstream file(id_file, std::ios::binary);
+      if (file.is_open()) {
+        file.read(reinterpret_cast<char*>(&unique_id), sizeof(ncclUniqueId));
+        if (file.gcount() == sizeof(ncclUniqueId)) {
+          file.close();
+          std::cout << "=== Process " << process_id << " successfully read " << id_type << " NCCL unique ID" << std::endl;
+          break;
+        }
+        file.close();
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      attempts++;
+    }
+    NVTE_CHECK(attempts < max_attempts,
+               "Timeout waiting for " + id_type + " NCCL unique ID file from leader: ", id_file);
+  }
+
+  // Clean up the unique ID file (only the leader that created it)
+  if (is_tp_leader) {
+    std::remove(id_file.c_str());
+    std::cout << "=== Process " << process_id << " (" << id_type << " leader) cleaned up NCCL unique ID file: " << id_file << std::endl;
+  }
+
+  return unique_id;
+}
+
 void CommunicatorHandler::init(int num_total_devices, int num_devices_per_process, int process_id, int tp_size) {
   // Validate inputs
   NVTE_CHECK(num_devices_per_process <= MAX_DEVICES,
@@ -76,112 +132,9 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
     // Device is already set by JAX, no need to change it
   }
 
-  // Create NCCL communicators for all local devices
-  ncclUniqueId id;
-
-  // Process 0 generates the unique ID, then broadcast via file system
-  // Use process group ID to ensure different job runs don't interfere
-  pid_t pgid = getpgid(0);
-  std::string id_file = "/tmp/nccl_unique_id_pgid_" + std::to_string(pgid) + "_" +
-                        std::to_string(num_total_devices) + "_" + std::to_string(tp_size) + ".bin";
-
-  if (process_id == 0) {
-    NVTE_CHECK_NCCL(ncclGetUniqueId(&id));
-    std::cout << "=== Process 0 generated NCCL unique ID" << std::endl;
-
-    // Write the ID to a temporary file
-    std::ofstream file(id_file, std::ios::binary);
-    NVTE_CHECK(file.is_open(), "Failed to create NCCL unique ID file: ", id_file);
-    file.write(reinterpret_cast<const char*>(&id), sizeof(ncclUniqueId));
-    file.close();
-    std::cout << "=== Process 0 wrote NCCL unique ID to file: " << id_file << std::endl;
-  } else {
-    // Wait for the file to be created and read it
-    std::cout << "=== Process " << process_id << " waiting for NCCL unique ID file: " << id_file << std::endl;
-    int attempts = 0;
-    const int max_attempts = 100; // 10 seconds with 100ms sleep
-    while (attempts < max_attempts) {
-      std::ifstream file(id_file, std::ios::binary);
-      if (file.is_open()) {
-        file.read(reinterpret_cast<char*>(&id), sizeof(ncclUniqueId));
-        if (file.gcount() == sizeof(ncclUniqueId)) {
-          file.close();
-          std::cout << "=== Process " << process_id << " successfully read NCCL unique ID" << std::endl;
-          break;
-        }
-        file.close();
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      attempts++;
-    }
-    NVTE_CHECK(attempts < max_attempts,
-               "Timeout waiting for NCCL unique ID file from process 0: ", id_file);
-  }
-
-  // Initialize communicators using NCCL group API for efficiency
-  std::cout << "=== Starting NCCL group initialization for " << num_devices_per_process
-            << " devices" << std::endl;
-  NVTE_CHECK_NCCL(ncclGroupStart());
-  for (int local_idx = 0; local_idx < num_devices_per_process; local_idx++) {
-    NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids_within_process[local_idx]));
-    std::cout << "=== Initializing NCCL comm for local_idx=" << local_idx
-              << ", global_device_id=" << handler.global_device_ids[local_idx]
-              << ", device_id=" << handler.local_device_ids_within_process[local_idx]
-              << std::endl;
-    NVTE_CHECK_NCCL(ncclCommInitRank(&handler.comms[local_idx], handler.num_total_devices, id,
-                                     handler.global_device_ids[local_idx]));
-  }
-  std::cout << "=== Ending NCCL group initialization" << std::endl;
-  NVTE_CHECK_NCCL(ncclGroupEnd());
-
-  std::cout << "=== Successfully initialized " << num_devices_per_process << " global NCCL communicators"
-            << std::endl;
-
-  // Create TP-domain communicators for userbuffers coordination
-  // Generate separate unique ID for each TP group
-  ncclUniqueId tp_id;
-  
-  // Each TP group needs its own unique ID file
-  // Use the TP node ID to distinguish between TP groups
-  int tp_node_id = handler.tp_node_ids[0]; // All devices in this process have same TP node ID
-  std::string tp_id_file = "/tmp/nccl_tp_unique_id_pgid_" + std::to_string(pgid) + "_" +
-                           std::to_string(num_total_devices) + "_" + std::to_string(tp_size) + 
-                           "_node_" + std::to_string(tp_node_id) + ".bin";
-
-  // Only TP rank 0 in each TP group generates the ID
-  if (handler.get_local_device_id_within_tp_node() == 0) {
-    NVTE_CHECK_NCCL(ncclGetUniqueId(&tp_id));
-    std::cout << "=== Process " << process_id << " (first in TP group " << tp_node_id 
-              << ") generated TP NCCL unique ID" << std::endl;
-    
-    // Write the TP ID to a separate temporary file
-    std::ofstream tp_file(tp_id_file, std::ios::binary);
-    NVTE_CHECK(tp_file.is_open(), "Failed to create TP NCCL unique ID file: ", tp_id_file);
-    tp_file.write(reinterpret_cast<const char*>(&tp_id), sizeof(ncclUniqueId));
-    tp_file.close();
-    std::cout << "=== Process " << process_id << " wrote TP NCCL unique ID to file: " << tp_id_file << std::endl;
-  } else {
-    // Wait for the TP ID file to be created and read it
-    std::cout << "=== Process " << process_id << " waiting for TP NCCL unique ID file: " << tp_id_file << std::endl;
-    int attempts = 0;
-    const int max_attempts = 100;
-    while (attempts < max_attempts) {
-      std::ifstream tp_file(tp_id_file, std::ios::binary);
-      if (tp_file.is_open()) {
-        tp_file.read(reinterpret_cast<char*>(&tp_id), sizeof(ncclUniqueId));
-        if (tp_file.gcount() == sizeof(ncclUniqueId)) {
-          tp_file.close();
-          std::cout << "=== Process " << process_id << " successfully read TP NCCL unique ID" << std::endl;
-          break;
-        }
-        tp_file.close();
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      attempts++;
-    }
-    NVTE_CHECK(attempts < max_attempts,
-               "Timeout waiting for TP NCCL unique ID file from process 0: ", tp_id_file);
-  }
+  // Create TP-domain communicators only (no global communicators needed)
+  // Get TP unique ID using helper function (completely self-contained)
+  ncclUniqueId tp_id = handler.coordinate_nccl_unique_id("tp");
 
   std::cout << "=== Starting TP-domain NCCL group initialization for " << num_devices_per_process
             << " devices" << std::endl;
@@ -197,20 +150,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   std::cout << "=== Ending TP-domain NCCL group initialization" << std::endl;
   NVTE_CHECK_NCCL(ncclGroupEnd());
 
-  // Clean up the TP unique ID file (only TP rank 0 that created it)
-  if (handler.get_local_device_id_within_tp_node() == 0) {
-    std::remove(tp_id_file.c_str());
-    std::cout << "=== Process " << process_id << " (TP rank 0) cleaned up TP NCCL unique ID file: " << tp_id_file << std::endl;
-  }
-
   std::cout << "=== Successfully initialized " << num_devices_per_process << " TP-domain NCCL communicators"
             << std::endl;
-
-  // Clean up the temporary file (only process 0 needs to do this)
-  if (process_id == 0) {
-    std::remove(id_file.c_str());
-    std::cout << "=== Process 0 cleaned up NCCL unique ID file: " << id_file << std::endl;
-  }
 
   // Allocate device memory for barrier operations
   NVTE_CHECK_CUDA(cudaMalloc(&handler._barrier, sizeof(int)));
