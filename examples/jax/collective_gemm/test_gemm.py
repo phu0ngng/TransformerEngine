@@ -146,9 +146,7 @@ def _initialize_distributed(args):
     print(f"JAX device count: {jax.local_device_count()}")
 
     collective_gemm_bootstrap(
-        num_total_devices=total_ranks,
-        devices_per_process=num_local_ranks,
-        process_id=args.process_id,
+        num_total_devices=total_ranks, devices_per_process=num_local_ranks, process_id=args.process_id,
         tensor_parallel_size=args.num_devices_per_process,
     )
 
@@ -167,25 +165,26 @@ def _get_operand_sharding(mesh, collective_op, is_with_dp):
 
     return x_sharding, weight_sharding, bias_sharding
 
-
-def _create_mesh(args):
-    """Create mesh configuration with proper validation."""
+def _get_tp_and_dp_sizes(args):
     num_gpu = jax.device_count()
-    numranks = args.num_processes * args.num_devices_per_process
     if args.tensor_parallel_size is None:
-        assert (
-            num_gpu == numranks
-        ), f"Requires {num_gpu} processes for {num_gpu} GPUs, got {numranks}!"
         num_gpu_dp = 2 if args.enable_data_parallel else 1
+        assert (
+            num_gpu > 1 and num_gpu % num_gpu_dp == 0
+        ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
         num_gpu_tp = num_gpu // num_gpu_dp
     else:
         num_gpu_tp = args.tensor_parallel_size
+        assert (
+            num_gpu > 1 and num_gpu % num_gpu_tp == 0
+        ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
         num_gpu_dp = num_gpu // num_gpu_tp
+    return num_gpu_dp, num_gpu_tp
 
-    assert (
-        num_gpu > 1 and num_gpu % num_gpu_dp == 0
-    ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
-    assert num_gpu_tp > 1, f"Number of GPUs for tensor parallelism ({num_gpu_tp}) must be > 1"
+def _create_mesh(args):
+    """Create mesh configuration with proper validation."""
+    num_gpu_dp, num_gpu_tp = _get_tp_and_dp_sizes(args)
+
     print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")
 
     device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
@@ -391,7 +390,7 @@ class TestCollectiveGemm(unittest.TestCase):
         self.args.process_id = self.process_id
         self.args.local_device_ids = self.local_device_ids
         self.args.num_devices_per_process = self.num_devices_per_process
-        self.args.tensor_parallel_size = self.args.num_devices_per_process * self.num_processes
+        self.args.tensor_parallel_size = _get_tp_and_dp_sizes(self.args)[1]
         _initialize_distributed(self.args)
         # Create mesh once for all tests
         self.mesh = _create_mesh(self.args)
@@ -434,6 +433,7 @@ class TestCollectiveGemm(unittest.TestCase):
 #         self.args.process_id = self.process_id
 #         self.args.local_device_ids = self.local_device_ids
 #         self.args.num_devices_per_process = self.num_devices_per_process
+#         self.args.tensor_parallel_size = _get_tp_and_dp_sizes(self.args)[1]
 #         _initialize_distributed(self.args)
 #         # Create mesh once for all tests
 #         self.args.enable_data_parallel = True
