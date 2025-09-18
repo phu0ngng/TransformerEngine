@@ -105,16 +105,21 @@ class CommunicatorHandler {
 
   // NCCL-based coordination methods for userbuffers
   void nccl_barrier_impl(ExtComm /* not used*/) {
+    std::cout << "=== NCCL barrier called! Process " << process_id << std::endl;
     NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using barrier");
 
     int device_idx = get_local_device_idx_for_current_device();
     ncclComm_t nccl_comm = comms[device_idx];
 
+    std::cout << "=== NCCL barrier executing AllReduce" << std::endl;
     NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, nccl_comm, nullptr));
+    std::cout << "=== NCCL barrier completed" << std::endl;
   }
 
   void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf,
                            size_t input_bytes, ExtComm /*ExtComm - unused*/) {
+    std::cout << "=== NCCL allgather called! Process " << process_id << ", input_bytes=" << input_bytes 
+              << ", output_bytes=" << output_bytes << std::endl;
     NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
 
     int device_idx = get_local_device_idx_for_current_device();
@@ -125,9 +130,11 @@ class CommunicatorHandler {
     // NVTE_CHECK(output_bytes == expected_output_bytes, "Output buffer size mismatch: expected ",
     //            expected_output_bytes, ", got ", output_bytes);
 
+    std::cout << "=== NCCL allgather executing" << std::endl;
     // Use NULL stream to let NCCL handle stream management
     NVTE_CHECK_NCCL(
         ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, nccl_comm, nullptr));
+    std::cout << "=== NCCL allgather completed" << std::endl;
   }
 
   // Get communicator for current CUDA device
@@ -217,9 +224,11 @@ class CommunicatorHandler {
 
     // Initialize function objects - these will be set during init()
     allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf, size_t input_bytes, ExtComm comm) {
+      std::cout << "=== Lambda allgather function called!" << std::endl;
       this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
     };
     barrier_func = [this](ExtComm comm) {
+      std::cout << "=== Lambda barrier function called!" << std::endl;
       this->nccl_barrier_impl(comm);
     };
   }
