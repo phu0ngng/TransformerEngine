@@ -112,13 +112,14 @@ class CommunicatorHandler {
     ncclComm_t nccl_comm = comms[device_idx];
 
     std::cout << "=== NCCL barrier executing AllReduce" << std::endl;
-    NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, nccl_comm, nullptr));
+    NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, nccl_comm, 0));
+    cudaStreamSynchronize(0);
     std::cout << "=== NCCL barrier completed" << std::endl;
   }
 
   void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf,
                            size_t input_bytes, ExtComm /*ExtComm - unused*/) {
-    std::cout << "=== NCCL allgather called! Process " << process_id << ", input_bytes=" << input_bytes 
+    std::cout << "=== NCCL allgather called! Process " << process_id << ", input_bytes=" << input_bytes
               << ", output_bytes=" << output_bytes << std::endl;
     NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
 
@@ -133,7 +134,8 @@ class CommunicatorHandler {
     std::cout << "=== NCCL allgather executing" << std::endl;
     // Use NULL stream to let NCCL handle stream management
     NVTE_CHECK_NCCL(
-        ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, nccl_comm, nullptr));
+        ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, nccl_comm, 0));
+    cudaStreamSynchronize(0);
     std::cout << "=== NCCL allgather completed" << std::endl;
   }
 

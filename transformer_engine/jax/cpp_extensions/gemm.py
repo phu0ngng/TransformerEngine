@@ -225,17 +225,19 @@ def collective_gemm_bootstrap(
         num_total_devices % devices_per_process == 0
     ), f"Invalid num_total_devices={num_total_devices}, devices_per_process={devices_per_process}"
     assert 0 <= process_id < num_total_devices, f"Invalid process_id={process_id}"
-    initialize_cgemm_communicator(
-        num_total_devices,
-        devices_per_process,
-        process_id,
-        tensor_parallel_size,
-        num_max_streams,
-        gemm_priority,
-        comm_priority,
-        num_comm_sm,
-        use_ce,
-        aggregate_ag,
+    jax.lax.optimization_barrier(
+        initialize_cgemm_communicator(
+            num_total_devices,
+            devices_per_process,
+            process_id,
+            tensor_parallel_size,
+            num_max_streams,
+            gemm_priority,
+            comm_priority,
+            num_comm_sm,
+            use_ce,
+            aggregate_ag,
+        )
     )
 
 
