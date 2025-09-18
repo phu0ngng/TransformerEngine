@@ -15,6 +15,7 @@ Example:
 import argparse
 import unittest
 import os
+import numpy as np
 
 import jax
 import jax.numpy as jnp
@@ -190,7 +191,9 @@ def _create_mesh(args):
 
     print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")
 
-    device_mesh = mesh_utils.create_device_mesh((num_gpu_dp, num_gpu_tp))
+    # We need to use a manual, ID-ordered layout so that devices within a TP domain have contiguous IDs
+    # mesh_utils.create_device_mesh won't work here
+    device_mesh = np.array(jax.devices()).reshape(num_gpu_dp, num_gpu_tp)
     mesh = jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS))
     jax.sharding.set_mesh(mesh)
 
