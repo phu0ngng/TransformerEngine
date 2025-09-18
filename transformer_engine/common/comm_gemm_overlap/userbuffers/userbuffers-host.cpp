@@ -117,7 +117,7 @@ bool has_mnnvl_fabric(int device_id) {
   NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGetAttribute, &fabric_handle_supported,
                               CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, dev);
   printf("=== DEBUG: fabric_handle_supported=%d on device %d\n", fabric_handle_supported, device_id);
-  
+
   if (fabric_handle_supported) {
     printf("=== DEBUG: Checking NVML fabric info...\n");
     NVTE_CALL_CHECK_CUDA_NVML(nvmlInit_v2);
@@ -133,7 +133,7 @@ bool has_mnnvl_fabric(int device_id) {
       mnnvl_fabric_support = true;
       printf("=== DEBUG: MNNVL fabric support enabled\n");
     } else {
-      printf("=== DEBUG: MNNVL fabric support disabled - state=%d, uuid_empty=%s\n", 
+      printf("=== DEBUG: MNNVL fabric support disabled - state=%d, uuid_empty=%s\n",
              fabricInfo.state, fabricInfo.clusterUuid[0] == '\0' ? "true" : "false");
     }
   }
@@ -531,7 +531,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
 #if CUDART_VERSION >= 12010
   printf("=== DEBUG: comm->use_mc=%s, alloc=%s\n", comm->use_mc ? "true" : "false", alloc ? "true" : "false");
-  
+
   if (comm->use_mc && alloc) {
     printf("=== DEBUG: Taking multicast (MC) path\n");
     bool mnnvl_fabric = has_mnnvl_fabric(comm->mydev);
@@ -572,12 +572,12 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     // Check if we have working NCCL-based coordination functions
     bool has_external_coordination = (comm->_allgather != nullptr && comm->_barrier != nullptr);
-    
-    printf("=== DEBUG: mnnvl_fabric=%s, has_nccl_coordination=%s, will use %s path\n", 
+
+    printf("=== DEBUG: mnnvl_fabric=%s, has_nccl_coordination=%s, will use %s path\n",
            mnnvl_fabric ? "true" : "false",
            has_external_coordination ? "true" : "false",
-           (mnnvl_fabric || has_nccl_coordination) ? "allgather (NCCL)" : "UDS socket");
-    
+           (mnnvl_fabric || has_external_coordination) ? "allgather (NCCL)" : "UDS socket");
+
     if (mnnvl_fabric) {
       printf("=== DEBUG: Using allgather path for memory handle exchange\n");
         // Use fabric handles for MNNVL
