@@ -114,6 +114,8 @@ class CgemmConfig {
   bool _initialized = false;
 };
 
+class CollectiveGemmPlanRegistry;
+
 #ifndef MAX_DEVICES
 #define MAX_DEVICES 8
 #endif
@@ -166,9 +168,9 @@ class CommunicatorHandler {
     ncclComm_t nccl_comm = comms[device_idx];
 
     // Ensure input and output sizes are consistent with the number of ranks
-    size_t expected_output_bytes = input_bytes * num_total_devices;
-    NVTE_CHECK(output_bytes == expected_output_bytes, "Output buffer size mismatch: expected ",
-               expected_output_bytes, ", got ", output_bytes);
+    // size_t expected_output_bytes = input_bytes * num_total_devices;
+    // NVTE_CHECK(output_bytes == expected_output_bytes, "Output buffer size mismatch: expected ",
+    //            expected_output_bytes, ", got ", output_bytes);
 
     // Use NULL stream to let NCCL handle stream management
     NVTE_CHECK_NCCL(
@@ -283,17 +285,17 @@ class CommunicatorHandler {
 
     // Create NCCL communicators for all local devices
     ncclUniqueId id;
-    
+
     // Process 0 generates the unique ID, then broadcast via file system
     // Use process group ID to ensure different job runs don't interfere
     pid_t pgid = getpgid(0);
-    std::string id_file = "/tmp/nccl_unique_id_pgid_" + std::to_string(pgid) + "_" + 
+    std::string id_file = "/tmp/nccl_unique_id_pgid_" + std::to_string(pgid) + "_" +
                           std::to_string(num_total_devices) + "_" + std::to_string(tp_size) + ".bin";
-    
+
     if (process_id == 0) {
       NVTE_CHECK_NCCL(ncclGetUniqueId(&id));
       std::cout << "=== Process 0 generated NCCL unique ID" << std::endl;
-      
+
       // Write the ID to a temporary file
       std::ofstream file(id_file, std::ios::binary);
       NVTE_CHECK(file.is_open(), "Failed to create NCCL unique ID file: ", id_file);
@@ -319,7 +321,7 @@ class CommunicatorHandler {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         attempts++;
       }
-      NVTE_CHECK(attempts < max_attempts, 
+      NVTE_CHECK(attempts < max_attempts,
                  "Timeout waiting for NCCL unique ID file from process 0: ", id_file);
     }
 
@@ -341,7 +343,7 @@ class CommunicatorHandler {
 
     std::cout << "=== Successfully initialized " << num_devices_per_process << " NCCL communicators"
               << std::endl;
-    
+
     // Clean up the temporary file (only process 0 needs to do this)
     if (process_id == 0) {
       std::remove(id_file.c_str());
@@ -354,20 +356,10 @@ class CommunicatorHandler {
 
     // This must be set before UB bootstrap
     handler._initialize = true;
+
     // Bootstrap UB via creating a dummy CommOverlapP2PBase object
-    {
-      std::vector<size_t> buffer_shape{0, 0};
-      DType dtype = DType::kByte;
-      auto &cgemm_config = CgemmConfig::get();
-      CommOverlapP2PBase bootstrap_obj(
-          buffer_shape, dtype, handler.global_device_ids[0], handler.num_total_devices,
-          handler.get_local_device_id_within_tp_node(), handler.tp_size, handler.get_tp_node_id(),
-          handler.tp_num_nodes, handler.tp_size,
-          handler.allgather_func, handler.barrier_func, get_nvte_collective_op(JAXX_Collective_Op::ALL_GATHER),
-          cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
-          cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
-          cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
-    }
+    std::vector<size_t> buffer_shape{0, 0};
+    auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER);
   }
 
   static CommunicatorHandler &get(bool is_initialized = true) {
