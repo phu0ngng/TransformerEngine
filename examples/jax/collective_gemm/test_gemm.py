@@ -166,8 +166,7 @@ def _get_operand_sharding(mesh, collective_op, is_with_dp):
 
 
 def _get_dp_and_tp_sizes(args):
-    # num_gpu = jax.device_count() #TODO
-    num_gpu = 2
+    num_gpu = args.num_processes * args.num_devices_per_process
     if args.tensor_parallel_size is None:
         num_gpu_dp = 2 if args.enable_data_parallel else 1
         assert (
@@ -185,6 +184,8 @@ def _get_dp_and_tp_sizes(args):
 
 def _create_mesh(args):
     """Create mesh configuration with proper validation."""
+    num_gpu = args.num_processes * args.num_devices_per_process
+    assert num_gpu == len(jax.local_devices()), "Number of GPUs must be equal to number of local devices"
     num_gpu_dp, num_gpu_tp = _get_dp_and_tp_sizes(args)
 
     print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")
