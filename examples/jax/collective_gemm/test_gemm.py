@@ -19,148 +19,29 @@ import numpy as np
 
 import jax
 import jax.numpy as jnp
-from jax.experimental import mesh_utils
 from jax.sharding import PartitionSpec, NamedSharding
 
-from common import assert_allclose, assert_allclose_print_index
+from common import (
+    assert_allclose, _initialize_distributed, _get_dp_and_tp_sizes, _create_mesh,
+    DP_AXIS, TPSP_AXIS, PARAMS_KEY, cgemm_parser
+)
 
 import transformer_engine.jax.cpp_extensions as tex
-
-# from transformer_engine.jax.quantize import is_fp8_available, ScalingMode, Quantizer, QuantizeConfig, fp8_autocast
 from transformer_engine.jax.quantize import fp8_autocast
-from transformer_engine.jax.cpp_extensions.gemm import (
-    CollectiveOp,
-    collective_gemm_bootstrap,
-)
+from transformer_engine.jax.cpp_extensions.gemm import CollectiveOp
 from transformer_engine.jax.sharding import MeshResource
-
-DEVICE_DP_AXIS = "data"
-DEVICE_TPSP_AXIS = "tensor_sequence"
-PARAMS_KEY = "params"
-
-# Global flag to track if distributed has been initialized
-_distributed_initialized = False
-
-
-def _is_distributed_initialized():
-    """Check if JAX distributed has been initialized."""
-    return _distributed_initialized
-
-
-def _initialize_distributed(args):
-    """Initialize JAX distributed with custom arguments."""
-    global _distributed_initialized
-
-    # Check if already initialized
-    if _distributed_initialized:
-        print("JAX distributed already initialized, skipping...")
-        return
-
-    if args.coordinator_address is None or args.num_processes is None or args.process_id is None:
-        raise ValueError(
-            "All distributed initialization arguments are required: "
-            "--coordinator-address, --num-processes, --process-id"
-        )
-    if args.local_device_ids is None:
-        assert (
-            args.num_devices_per_process is not None
-        ), "Either local_device_ids or num_devices_per_process must be provided"
-        # Calculate device range for this process
-        # Single process single device: each process gets one unique device
-        # Single process multiple devices: each process gets a unique range of devices
-        start_device = args.process_id * args.num_devices_per_process
-        device_range = range(start_device, start_device + args.num_devices_per_process)
-        global_device_ids_for_this_process = ",".join(map(str, device_range))
-    else:
-        # Use explicitly provided global device IDs
-        global_device_ids_for_this_process = args.local_device_ids
-        args.num_devices_per_process = len(args.local_device_ids.split(","))
-
-    assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
-
-    print(
-        f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
-        f"num_processes={args.num_processes}, process_id={args.process_id}"
-    )
-    print(f"This process will manage global CUDA devices: {global_device_ids_for_this_process}")
-
-    # Validate device assignment
-    device_list = global_device_ids_for_this_process.split(",")
-    print(f"Process {args.process_id} assigned devices: {device_list}")
-
-    if args.num_devices_per_process == 1:
-        # Single device per process: validate device = process_id
-        assert (
-            len(device_list) == 1
-        ), f"Expected 1 device per process, got {len(device_list)} devices: {device_list}"
-        expected_device = str(args.process_id)
-        actual_device = device_list[0]
-        print(f"Single device per process: process {args.process_id} → device {actual_device}")
-        assert actual_device == expected_device, (
-            f"Device assignment mismatch: process {args.process_id} should use device"
-            f" {expected_device}, but got {actual_device}"
-        )
-    else:
-        # Multiple devices per process: validate device range
-        expected_start = args.process_id * args.num_devices_per_process
-        expected_devices = [
-            str(i) for i in range(expected_start, expected_start + args.num_devices_per_process)
-        ]
-        print(f"Multiple devices per process: process {args.process_id} → devices {device_list}")
-        assert device_list == expected_devices, (
-            f"Device range mismatch: process {args.process_id} should use devices"
-            f" {expected_devices}, but got {device_list}"
-        )
-
-    # Note: "local_device_ids" is a JAX term meaning "global CUDA devices managed by this process"
-    jax.distributed.initialize(
-        coordinator_address=args.coordinator_address,
-        num_processes=args.num_processes,
-        process_id=args.process_id,
-        local_device_ids=global_device_ids_for_this_process,
-    )
-
-    # Mark as initialized
-    _distributed_initialized = True
-
-    # Configure JAX after distributed initialization
-    jax.clear_caches()
-    jax.config.update("jax_use_shardy_partitioner", False)  # CollectiveGEMM does not work with Shardy yet
-
-    assert jax.local_device_count() == 1, (
-        f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found"
-        f" {jax.local_device_count()}"
-    )
-
-    # Initialize CGEMM communicator for single device per process scenario
-    # num_ranks = total ranks across all processes (args.num_processes in this case)
-    # num_local_ranks = GPUs per process (1 for single device per process)
-    num_local_ranks = 1  # Single GPU per process
-    total_ranks = args.num_processes  # Total number of processes/ranks
-
-    print(
-        f"Initializing CGEMM communicator with num_ranks={total_ranks},"
-        f" num_local_ranks={num_local_ranks}, process_id={args.process_id}"
-    )
-    print(f"JAX local devices: {jax.local_devices()}")
-    print(f"JAX device count: {jax.local_device_count()}")
-
-    collective_gemm_bootstrap(
-        num_total_devices=total_ranks, devices_per_process=num_local_ranks, process_id=args.process_id,
-        tensor_parallel_size=args.tensor_parallel_size,
-    )
 
 
 def _get_operand_sharding(mesh, collective_op, is_with_dp):
 
-    dp_axis = DEVICE_DP_AXIS if is_with_dp else None
+    dp_axis = DP_AXIS if is_with_dp else None
     if collective_op == CollectiveOp.ALL_GATHER:
-        x_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, DEVICE_TPSP_AXIS, None))
-        weight_sharding = NamedSharding(mesh, PartitionSpec(None, DEVICE_TPSP_AXIS))
-        bias_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS))
+        x_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, TPSP_AXIS, None))
+        weight_sharding = NamedSharding(mesh, PartitionSpec(None, TPSP_AXIS))
+        bias_sharding = NamedSharding(mesh, PartitionSpec(TPSP_AXIS))
     else:  # RS
-        x_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, None, DEVICE_TPSP_AXIS))
-        weight_sharding = NamedSharding(mesh, PartitionSpec(DEVICE_TPSP_AXIS, None))
+        x_sharding = NamedSharding(mesh, PartitionSpec(dp_axis, None, TPSP_AXIS))
+        weight_sharding = NamedSharding(mesh, PartitionSpec(TPSP_AXIS, None))
         bias_sharding = NamedSharding(mesh, PartitionSpec(None))
 
     return x_sharding, weight_sharding, bias_sharding
@@ -181,23 +62,6 @@ def _get_dp_and_tp_sizes(args):
         ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
         num_gpu_dp = num_gpu // num_gpu_tp
     return num_gpu_dp, num_gpu_tp
-
-
-def _create_mesh(args):
-    """Create mesh configuration with proper validation."""
-    num_gpu = args.num_processes * args.num_devices_per_process
-    assert num_gpu == len(jax.devices()), "Number of GPUs must be equal to number of local devices"
-    num_gpu_dp, num_gpu_tp = _get_dp_and_tp_sizes(args)
-
-    print(f"Using {num_gpu_dp}x{num_gpu_tp} mesh ({num_gpu_dp * num_gpu_tp} total GPUs)")
-
-    # We need to use a manual, ID-ordered layout so that devices within a TP domain have contiguous IDs
-    # mesh_utils.create_device_mesh won't work here
-    device_mesh = np.array(jax.devices()).reshape(num_gpu_dp, num_gpu_tp)
-    mesh = jax.sharding.Mesh(devices=device_mesh, axis_names=(DEVICE_DP_AXIS, DEVICE_TPSP_AXIS))
-    jax.sharding.set_mesh(mesh)
-
-    return mesh
 
 
 def _jitted_cgemm(x, weight, bias, contracting_dims, collective_op):
@@ -232,7 +96,7 @@ def run_gemm_tests(args, mesh=None):
     with mesh, fp8_autocast(
         enabled=False,
         fp8_recipe=None,
-        mesh_resource=MeshResource(dp_resource=DEVICE_DP_AXIS, tpsp_resource=DEVICE_TPSP_AXIS),
+        mesh_resource=MeshResource(dp_resource=DP_AXIS, tpsp_resource=TPSP_AXIS),
     ):
         print(f"Device mesh: {mesh}")
 
@@ -460,22 +324,14 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) < 7:  # Need at least the 3 required distributed args
+    if len(sys.argv) < 5:  # Need at least the 3 required distributed args
         print("Error: This script requires distributed initialization arguments.")
         print(
             "Usage: python test_gemm.py --coordinator-address <address> --num-processes <num>"
             " --process-id <id> [--local-device-ids <ids>] [other args]"
         )
-        print(
-            "Example: python test_gemm.py --coordinator-address localhost:1234 --num-processes 4"
-            " --process-id 0"
-        )
-        print(
-            "Example: python test_gemm.py --coordinator-address localhost:1234 --num-processes 2"
-            " --process-id 0 --local-device-ids 0,1,2,3"
-        )
         sys.exit(1)
 
-    args = gemm_parser(None)
+    args = cgemm_parser("Collective GEMM test on multi-GPU with tensor parallelism").parse_args()
     _initialize_distributed(args)
     run_gemm_tests(args, mesh=None)
