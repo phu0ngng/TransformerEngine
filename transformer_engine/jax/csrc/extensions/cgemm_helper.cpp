@@ -103,7 +103,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
              "Invalid process_id=", process_id, ", which is out of range [0, ",
              handler.num_processes, ")");
 
-  // Initialize local devices and their global ranks
+  // Initialize local devices and calculate their global device IDs and TP topology
   for (int local_idx = 0; local_idx < num_devices_per_process; local_idx++) {
     // Use the device that JAX has already assigned to this process
     int current_device;
@@ -228,18 +228,18 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   }
 
   printf(
-      "Global rank %d, num_total_devices %d, tp_local_rank %d, tp_size %d, tp_node_id %d, "
-      "tp_num_nodes %d",
+      "Global rank %d, num_total_devices %d, tp_local_rank %d, tp_size %d, tp_domain_id %d, "
+      "tp_num_domains %d",
       comm_handler.get_global_rank(), comm_handler.num_total_devices,
-      comm_handler.get_local_device_id_within_tp_node(), comm_handler.tp_size,
-      comm_handler.get_tp_node_id(), comm_handler.tp_num_nodes);
+      comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
+      comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains());
 
   // Create executor with device-specific parameters (device_idx determined above)
   std::unique_ptr<CommOverlapCore> executor;
   executor = std::make_unique<CommOverlapP2PBase>(
       buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
-      comm_handler.get_local_device_id_within_tp_node(), comm_handler.tp_size,
-      comm_handler.get_tp_node_id(), comm_handler.tp_num_nodes, comm_handler.tp_size,
+      comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
+      comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size,
       comm_handler.allgather_func, comm_handler.barrier_func, get_nvte_collective_op(collective_op),
       cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
       cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
@@ -248,6 +248,77 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   CommOverlapCore *executor_ptr = executor.get();
   plan_map[plan_id] = std::move(executor);
   return executor_ptr;
+}
+
+// CommunicatorHandler method implementations
+
+void CommunicatorHandler::nccl_barrier_impl(ExtComm /* not used*/) {
+  std::cout << "=== NCCL TP barrier called! Process " << process_id << std::endl;
+  NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using barrier");
+
+  int device_idx = get_local_device_idx_for_current_device();
+  ncclComm_t tp_comm = tp_comms[device_idx];  // Use TP-domain communicator for barriers
+
+  std::cout << "=== NCCL TP barrier executing AllReduce within TP domain" << std::endl;
+  NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, tp_comm, nullptr));
+  cudaDeviceSynchronize();
+  std::cout << "=== NCCL TP barrier completed" << std::endl;
+}
+
+void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf,
+                         size_t input_bytes, ExtComm /*ExtComm - unused*/) {
+  std::cout << "=== NCCL TP allgather called! Process " << process_id << ", input_bytes=" << input_bytes
+            << ", output_bytes=" << output_bytes << std::endl;
+  NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
+
+  int device_idx = get_local_device_idx_for_current_device();
+  ncclComm_t tp_comm = tp_comms[device_idx];  // Use TP-domain communicator
+
+  // Ensure input and output sizes are consistent with TP size (not total devices)
+  size_t expected_output_bytes = input_bytes * tp_size;
+  NVTE_CHECK(output_bytes == expected_output_bytes, "TP allgather buffer size mismatch: expected ",
+             expected_output_bytes, ", got ", output_bytes);
+
+  std::cout << "=== NCCL TP allgather executing within TP domain" << std::endl;
+  // Use nullptr stream to let NCCL handle stream management
+  NVTE_CHECK_NCCL(
+      ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, tp_comm, nullptr));
+  cudaDeviceSynchronize();
+  std::cout << "=== NCCL TP allgather completed" << std::endl;
+}
+
+CommunicatorHandler::CommunicatorHandler() : _barrier(nullptr) {
+  // Initialize arrays to safe defaults
+  for (int i = 0; i < MAX_DEVICES; i++) {
+    local_device_ids_within_process[i] = -1;
+    local_device_ids_within_tp_domain[i] = -1;
+    tp_domain_ids[i] = -1;
+    global_device_ids[i] = -1;
+    tp_comms[i] = nullptr;
+  }
+
+  // Initialize function objects - these are used by userbuffers for coordination
+  allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf, size_t input_bytes, ExtComm comm) {
+    std::cout << "=== Lambda allgather function called!" << std::endl;
+    this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
+  };
+  barrier_func = [this](ExtComm comm) {
+    std::cout << "=== Lambda barrier function called!" << std::endl;
+    this->nccl_barrier_impl(comm);
+  };
+}
+
+CommunicatorHandler::~CommunicatorHandler() {
+  // Clean up NCCL communicators
+  if (_initialize) {
+    for (int i = 0; i < num_devices_per_process; i++) {
+      if (tp_comms[i] != nullptr) {
+        ncclCommDestroy(tp_comms[i]);
+      }
+    }
+  }
+  // Clean up device memory
+  if (_barrier) cudaFree(_barrier);
 }
 
 }  // namespace jax

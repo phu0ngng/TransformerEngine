@@ -104,45 +104,15 @@ class CommunicatorHandler {
   }
 
   // NCCL-based coordination methods for userbuffers
-  void nccl_barrier_impl(ExtComm /* not used*/) {
-    std::cout << "=== NCCL TP barrier called! Process " << process_id << std::endl;
-    NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using barrier");
-
-    int device_idx = get_local_device_idx_for_current_device();
-    ncclComm_t tp_comm = tp_comms[device_idx];  // Use TP-domain communicator for barriers
-
-    std::cout << "=== NCCL TP barrier executing AllReduce within TP domain" << std::endl;
-    NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, tp_comm, nullptr));
-    cudaDeviceSynchronize();
-    std::cout << "=== NCCL TP barrier completed" << std::endl;
-  }
+  void nccl_barrier_impl(ExtComm /* not used*/);
 
   void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf,
-                           size_t input_bytes, ExtComm /*ExtComm - unused*/) {
-    std::cout << "=== NCCL TP allgather called! Process " << process_id << ", input_bytes=" << input_bytes
-              << ", output_bytes=" << output_bytes << std::endl;
-    NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
-
-    int device_idx = get_local_device_idx_for_current_device();
-    ncclComm_t tp_comm = tp_comms[device_idx];  // Use TP-domain communicator
-
-    // Ensure input and output sizes are consistent with TP size (not total devices)
-    size_t expected_output_bytes = input_bytes * tp_size;
-    NVTE_CHECK(output_bytes == expected_output_bytes, "TP allgather buffer size mismatch: expected ",
-               expected_output_bytes, ", got ", output_bytes);
-
-    std::cout << "=== NCCL TP allgather executing within TP domain" << std::endl;
-    // Use NULL stream to let NCCL handle stream management
-    NVTE_CHECK_NCCL(
-        ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, tp_comm, nullptr));
-    cudaDeviceSynchronize();
-    std::cout << "=== NCCL TP allgather completed" << std::endl;
-  }
+                           size_t input_bytes, ExtComm /*ExtComm - unused*/);
 
   // Get communicator for current CUDA device
   ncclComm_t get_comm_for_current_device() const {
     int device_idx = get_local_device_idx_for_current_device();
-    return comms[device_idx];
+    return tp_comms[device_idx];
   }
 
   // Get local device index for current CUDA device
@@ -150,20 +120,16 @@ class CommunicatorHandler {
   int get_local_device_idx_for_current_device() const {
     int current_device;
     NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-
-    // Find the local device index that corresponds to the current CUDA device
-    // This is thread-safe since local_device_ids is immutable after initialization
     for (int i = 0; i < num_devices_per_process; i++) {
       if (local_device_ids_within_process[i] == current_device) {
         return i;
       }
     }
-
-    NVTE_ERROR("Current CUDA device ", current_device, " not found in local_device_ids");
+    NVTE_ERROR("Current CUDA device ", current_device, " not found in local_device_ids_within_process");
   }
 
   // TP-domain-specific accessors for CommOverlapP2P
-  // These methods return ranks/nodes within the TP (tensor parallel) domain, not process domain
+  // These methods return ranks/domains within the TP (tensor parallel) domain, not process domain
 
   // Convenience methods for current device (most common usage)
   int get_local_device_id_within_tp_domain() const {
@@ -193,7 +159,7 @@ class CommunicatorHandler {
               << std::endl;
     static CommunicatorHandler instance;
     NVTE_CHECK(instance._initialize == is_initialized,
-               "interface._initialize=", instance._initialize, ", is_initialized=", is_initialized);
+               "CommunicatorHandler._initialize=", instance._initialize, ", is_initialized=", is_initialized);
     return instance;
   }
 
@@ -205,39 +171,8 @@ class CommunicatorHandler {
   CommunicatorHandler &operator=(const CommunicatorHandler &) = delete;
 
  private:
-  CommunicatorHandler() : _barrier(nullptr) {
-    // Initialize arrays to safe defaults
-    for (int i = 0; i < MAX_DEVICES; i++) {
-      local_device_ids_within_process[i] = -1;
-      local_device_ids_within_tp_domain[i] = -1;
-      tp_domain_ids[i] = -1;
-      global_device_ids[i] = -1;
-      tp_comms[i] = nullptr;
-    }
-
-    // Initialize function objects - these will be set during init()
-    allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf, size_t input_bytes, ExtComm comm) {
-      std::cout << "=== Lambda allgather function called!" << std::endl;
-      this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
-    };
-    barrier_func = [this](ExtComm comm) {
-      std::cout << "=== Lambda barrier function called!" << std::endl;
-      this->nccl_barrier_impl(comm);
-    };
-  }
-
-  ~CommunicatorHandler() {
-    // Clean up NCCL communicators
-    if (_initialize) {
-      for (int i = 0; i < num_devices_per_process; i++) {
-        if (tp_comms[i] != nullptr) {
-          ncclCommDestroy(tp_comms[i]);
-        }
-      }
-    }
-    // Clean up device memory
-    if (_barrier) cudaFree(_barrier);
-  }
+  CommunicatorHandler();
+  ~CommunicatorHandler();
 
   bool _initialize = false;
   // Device memory for barrier operations (single buffer for in-place AllReduce)
