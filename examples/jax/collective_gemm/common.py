@@ -151,7 +151,7 @@ def _initialize_distributed(args):
 
     collective_gemm_bootstrap(
         num_total_devices=num_total_devices,
-        devices_per_process=devices_per_process,
+        num_devices_per_process=devices_per_process,
         process_id=args.process_id,
         tensor_parallel_size=args.tensor_parallel_size,
     )
