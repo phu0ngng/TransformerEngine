@@ -13,12 +13,11 @@ namespace transformer_engine {
 namespace jax {
 
 // Helper function for NCCL unique ID coordination via file system
-ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &id_type) {
+ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &id_type, int tp_domain_id, bool is_tp_leader) {
   ncclUniqueId unique_id;
 
-  // Get all needed info from class members
-  int tp_domain_id = get_tp_domain_id();
-  bool is_tp_leader = (get_local_device_id_within_tp_domain() == 0);
+  std::cout << "=== coordinate_nccl_unique_id: tp_domain_id=" << tp_domain_id 
+            << ", is_tp_leader=" << is_tp_leader << std::endl;
 
   pid_t pgid = getpgid(0);
 
@@ -145,8 +144,13 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   }
 
   // Create TP-domain communicators only (no global communicators needed)
-  // Get TP unique ID using helper function (completely self-contained)
-  ncclUniqueId tp_id = handler.coordinate_nccl_unique_id("tp");
+  // Use first device's TP domain info for coordination (all devices in same process have same TP domain)
+  int tp_domain_id = handler.tp_domain_ids[0];
+  bool is_tp_leader = (handler.local_device_ids_within_tp_domain[0] == 0);
+  std::cout << "=== About to call coordinate_nccl_unique_id for TP" << std::endl;
+  // Get TP unique ID using helper function with explicit parameters
+  ncclUniqueId tp_id = handler.coordinate_nccl_unique_id("tp", tp_domain_id, is_tp_leader);
+  std::cout << "=== Successfully got TP unique ID" << std::endl;
 
   std::cout << "=== Starting TP-domain NCCL group initialization for " << num_devices_per_process
             << " devices" << std::endl;
@@ -159,6 +163,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
               << std::endl;
     NVTE_CHECK_NCCL(
         ncclCommInitRank(&handler.tp_comms[local_idx], handler.tp_size, tp_id, tp_local_rank));
+    std::cout << "=== Successfully initialized TP NCCL comm for local_idx=" << local_idx << std::endl;
   }
   std::cout << "=== Ending TP-domain NCCL group initialization" << std::endl;
   NVTE_CHECK_NCCL(ncclGroupEnd());
