@@ -70,11 +70,11 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &i
                "Timeout waiting for " + id_type + " NCCL unique ID file from leader: ", id_file);
   }
 
-  // Clean up the unique ID file (only the leader that created it)
+  // Store file path for cleanup in destructor (only for leader)
   if (is_tp_leader) {
-    std::remove(id_file.c_str());
+    _nccl_id_file_name.push_back(id_file);
     std::cout << "=== Process " << process_id << " (" << id_type
-              << " leader) cleaned up NCCL unique ID file: " << id_file << std::endl;
+              << " leader) will cleanup NCCL unique ID file in destructor: " << id_file << std::endl;
   }
 
   return unique_id;
@@ -341,6 +341,12 @@ CommunicatorHandler::~CommunicatorHandler() {
   }
   // Clean up device memory
   if (_barrier) cudaFree(_barrier);
+  
+  // Clean up NCCL unique ID files (only leaders have files to cleanup)
+  for (const auto& file_path : _nccl_id_file_name) {
+    std::remove(file_path.c_str());
+    std::cout << "=== Destructor cleaned up NCCL unique ID file: " << file_path << std::endl;
+  }
 }
 
 }  // namespace jax

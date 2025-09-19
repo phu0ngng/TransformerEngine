@@ -177,6 +177,8 @@ class CommunicatorHandler {
   bool _initialize = false;
   // Device memory for barrier operations (single buffer for in-place AllReduce)
   int *_barrier = nullptr;
+
+  std::vector<std::string> _nccl_id_file_name;
 };
 
 // Plan registry for caching collective GEMM executors
