@@ -179,9 +179,6 @@ class CommOverlapBase : public CommOverlapCore {
 
   virtual ~CommOverlapBase();
 
-  void copy_into_buffer(cudaStream_t stream, const TensorWrapper &source, bool local_chunk,
-                        bool rowwise = true) override;
-
   /*
   ** Bulk GEMM + COMM
   ** This function assumes the communication input is pre-copied to _ubuf
