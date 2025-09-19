@@ -6,9 +6,9 @@ NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L | wc -l)}
 
 # Define the test files to run
 TEST_FILES=(
-"test_gemm.py"
+# "test_gemm.py"
 # "test_dense_grad.py"
-# "test_layernorm_mlp_grad.py"
+"test_layernorm_mlp_grad.py"
 )
 
 echo

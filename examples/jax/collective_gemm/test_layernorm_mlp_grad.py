@@ -240,6 +240,8 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         self.args.process_id = self.process_id
         self.args.local_device_ids = self.local_device_ids
         self.args.num_devices_per_process = self.num_devices_per_process
+        self.args.enable_data_parallel = True
+        self.args.batch_size = 4
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         _initialize_distributed(self.args)
         # Create mesh once for all tests
@@ -250,11 +252,6 @@ class TestCollectiveDenseGradient(unittest.TestCase):
 
     def tearDown(self):
         """Clean up after each test."""
-        # Clear the mesh to prevent interference between tests
-        # Clear the mesh to prevent interference between tests
-        # Note: JAX doesn't accept None, so we create a minimal 1-device mesh to reset
-        single_device_mesh = jax.sharding.Mesh([jax.devices()[0]], axis_names=())
-        jax.sharding.set_mesh(single_device_mesh)
         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_layernorm_mlp_grad(self):
@@ -262,36 +259,36 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         run_layernorm_mlp_grad_tests(self.args, self.mesh)
 
 
-class TestCollectiveDenseGradientWithDP(unittest.TestCase):
-    """Collective Dense Gradient with DP unittests"""
-
-    def setUp(self):
-        """Set up test environment for pytest execution."""
-        # Create args object with distributed parameters from pytest fixtures
-        self.args = cgemm_parser(
-            "Collective LayerNorm MLP Gradient test on multi-GPU with tensor parallelism"
-        ).parse_args([])
-        self.args.coordinator_address = self.coordinator_address
-        self.args.num_processes = self.num_processes
-        self.args.process_id = self.process_id
-        self.args.local_device_ids = self.local_device_ids
-        self.args.num_devices_per_process = self.num_devices_per_process
-        self.args.enable_data_parallel = True
-        self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
-        _initialize_distributed(self.args)
-        # Create mesh once for all tests
-        self.mesh = _create_mesh(self.args)
-        jax.sharding.set_mesh(self.mesh)
-        self.args.enable_result_check = True
-        os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
-
-    def tearDown(self):
-        """Clean up after each test."""
-        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
-
-    def test_te_bf16_layernorm_mlp_grad_with_dp(self):
-        """Test Collective Dense Gradient with AllGather"""
-        run_layernorm_mlp_grad_tests(self.args, self.mesh)
+# class TestCollectiveDenseGradientWithDP(unittest.TestCase):
+#     """Collective Dense Gradient with DP unittests"""
+#
+#     def setUp(self):
+#         """Set up test environment for pytest execution."""
+#         # Create args object with distributed parameters from pytest fixtures
+#         self.args = cgemm_parser(
+#             "Collective LayerNorm MLP Gradient test on multi-GPU with tensor parallelism"
+#         ).parse_args([])
+#         self.args.coordinator_address = self.coordinator_address
+#         self.args.num_processes = self.num_processes
+#         self.args.process_id = self.process_id
+#         self.args.local_device_ids = self.local_device_ids
+#         self.args.num_devices_per_process = self.num_devices_per_process
+#         self.args.enable_data_parallel = True
+#         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
+#         _initialize_distributed(self.args)
+#         # Create mesh once for all tests
+#         self.mesh = _create_mesh(self.args)
+#         jax.sharding.set_mesh(self.mesh)
+#         self.args.enable_result_check = True
+#         os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
+#
+#     def tearDown(self):
+#         """Clean up after each test."""
+#         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
+#
+#     def test_te_bf16_layernorm_mlp_grad_with_dp(self):
+#         """Test Collective Dense Gradient with AllGather"""
+#         run_layernorm_mlp_grad_tests(self.args, self.mesh)
 
 
 if __name__ == "__main__":

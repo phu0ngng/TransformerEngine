@@ -286,7 +286,7 @@ def _dense_bwd_rule(
         casted_kernel_rhs,
         contracting_dims=(g_contracting_dim, k_contracting_dim),
         transpose_batch_sequence=batch_sequence_transpose,
-        collective_op_set=collective_op_set.backward,
+        collective_op=collective_op_set.backward,
     )
 
     # GEMM TN
