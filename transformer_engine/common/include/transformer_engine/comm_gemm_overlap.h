@@ -75,23 +75,11 @@ class CommOverlapCore {
  public:
   CommOverlapCore() {}  // dummy constructor for exposing type to Python
 
-  // External/framework collectives-based constructor
   CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
                   int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
                   int num_splits, int num_max_streams, int comm_cga_size, int gemm_priority,
                   int comm_priority, int num_comm_sm, bool set_sm_margin, bool use_ce,
                   bool atomic_gemm);
-
-  // MPI-based constructor
-  CommOverlapCore(int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
-                  int gemm_priority, int comm_priority, int num_comm_sm, bool set_sm_margin,
-                  bool use_ce, bool atomic_gemm);
-
-  // NCCL-based constructor
-  CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
-                  int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
-                  int gemm_priority, int comm_priority, int num_comm_sm, bool set_sm_margin,
-                  bool use_ce, bool atomic_gemm);
 
   virtual ~CommOverlapCore();
 
@@ -181,7 +169,6 @@ class CommOverlapBase : public CommOverlapCore {
  public:
   CommOverlapBase() {}  // dummy constructor for exposing type to Python
 
-  // External/framework collective-based constructor
   CommOverlapBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                   int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                   ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle, int num_splits = 3,
