@@ -651,7 +651,6 @@ class GemmPrimitive(BasePrimitive):
             and not output.shape[0] == 1
         ):
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
-            # TODO: Make sure it works with DP + batch_size_per_process = 1
             original_shape = output.shape
             assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
                 f"Original_shape[0]={original_shape[0]} is not divisible by"
@@ -688,6 +687,10 @@ class GemmPrimitive(BasePrimitive):
         fuse_gelu,
         grad,
         use_split_accumulator,
+        transpose_batch_sequence,
+        sequence_dim,
+        is_outer,
+        collective_op,
     ):
         return GemmPrimitive.impl(
             lhs,
@@ -703,6 +706,10 @@ class GemmPrimitive(BasePrimitive):
             fuse_gelu,
             grad,
             use_split_accumulator,
+            transpose_batch_sequence,
+            sequence_dim,
+            is_outer,
+            collective_op,
         )
 
     @staticmethod
@@ -756,6 +763,9 @@ class GemmPrimitive(BasePrimitive):
                 grad=grad,
                 use_split_accumulator=use_split_accumulator,
                 collective_op=collective_op,
+                transpose_batch_sequence=transpose_batch_sequence,
+                sequence_dim=sequence_dim,
+                is_outer=is_outer,
             ),
             (out_bdims, bias_bdims, pre_gelu_bdims),
         )
