@@ -206,17 +206,17 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
     parser.add_argument(
         "--coordinator-address",
         type=str,
-        required=True,
+        default=None,
         help="Coordinator address for distributed initialization",
     )
     parser.add_argument(
         "--num-processes",
         type=int,
-        required=True,
+        default=None,
         help="Number of processes for distributed initialization",
     )
     parser.add_argument(
-        "--process-id", type=int, required=True, help="Process ID for distributed initialization"
+        "--process-id", type=int, default=None, help="Process ID for distributed initialization"
     )
     parser.add_argument(
         "--local-device-ids",
