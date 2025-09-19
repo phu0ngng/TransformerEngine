@@ -150,145 +150,46 @@ def run_gemm_tests(args, mesh=None):
         # assert_allclose_print_index(gathered_ref_output, gathered_output, rtol=1e-2, atol=1e-5)
 
 
-def gemm_parser(args):
-    """Test settings."""
-    parser = argparse.ArgumentParser(description="JAX Collective GEMM Test")
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=4,
-        metavar="N",
-        help="input batch size (default: 4)",
-    )
-    parser.add_argument(
-        "--seq-len",
-        type=int,
-        default=128,
-        metavar="N",
-        help="sequence length (default: 2048)",
-    )
-    parser.add_argument(
-        "--hidden-in",
-        type=int,
-        default=1024,
-        metavar="N",
-        help="input hidden dimension (default: 1024)",
-    )
-    parser.add_argument(
-        "--hidden-out",
-        type=int,
-        default=2048,
-        metavar="N",
-        help="output hidden dimension (default: 2048)",
-    )
-    parser.add_argument(
-        "--collective-type",
-        type=str,
-        default="all_gather",
-        choices=["all_gather", "reduce_scatter"],
-        help="Collective operation type (default: all_gather)",
-    )
-    parser.add_argument(
-        "--fp8-recipe",
-        type=str,
-        default="DelayedScaling",
-        help="FP8 recipe (default: DelayedScaling)",
-    )
-    parser.add_argument(
-        "--enable-data-parallel",
-        action="store_true",
-        default=False,
-        help="Enable data parallel (default: False)",
-    )
-    parser.add_argument(
-        "--enable-result-check",
-        action="store_true",
-        default=False,
-        help="Enable result check (default: False)",
-    )
-    parser.add_argument(
-        "--coordinator-address",
-        type=str,
-        default="127.0.0.1:1234",
-        help=(
-            "the IP address of process 0 and a port on which that"
-            " process should launch a coordinator service (default:"
-            " 127.0.0.1:1234)"
-        ),
-    )
-    parser.add_argument(
-        "--num-processes",
-        type=int,
-        default=None,
-        help="Number of processes for distributed initialization",
-    )
-    parser.add_argument(
-        "--num-devices-per-process",
-        type=int,
-        default=1,
-        help="Number of devices per process for distributed initialization",
-    )
-    parser.add_argument(
-        "--process-id",
-        type=int,
-        default=None,
-        help="Process ID for distributed initialization",
-    )
-    parser.add_argument(
-        "--local-device-ids",
-        type=str,
-        default=None,
-        help="List of local device IDs for distributed initialization",
-    )
-    parser.add_argument(
-        "--tensor-parallel-size",
-        type=int,
-        default=None,
-        help="Tensor parallel size for distributed initialization",
-    )
-    return parser.parse_args(args)
+class TestCollectiveGemm(unittest.TestCase):
+    """Collective GEMM unittests"""
 
+    # is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
+    # is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
-# class TestCollectiveGemm(unittest.TestCase):
-#     """Collective GEMM unittests"""
-#
-#     # is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
-#     # is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
-#
-#     def setUp(self):
-#         """Set up test environment for pytest execution."""
-#         # Create args object with distributed parameters from pytest fixtures
-#         self.args = gemm_parser([])
-#         self.args.coordinator_address = self.coordinator_address
-#         self.args.num_processes = self.num_processes
-#         self.args.process_id = self.process_id
-#         self.args.local_device_ids = self.local_device_ids
-#         self.args.num_devices_per_process = self.num_devices_per_process
-#         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
-#         _initialize_distributed(self.args)
-#         # Create mesh once for all tests
-#         self.mesh = _create_mesh(self.args)
-#         jax.sharding.set_mesh(self.mesh)
-#         self.args.enable_result_check = True
-#         os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
-#         # self.args.batch_size = 1
-#         # self.args.seq_len = 128
-#         # self.args.hidden_in = 64
-#         # self.args.hidden_out = 64
-#
-#     def tearDown(self):
-#         """Clean up after each test."""
-#         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
-#
-#     def test_te_bf16_all_gather(self):
-#         """Test Collective GEMM with AllGather"""
-#         self.args.collective_type = "all_gather"
-#         run_gemm_tests(self.args, self.mesh)
-#
-#     def test_te_bf16_reduce_scatter(self):
-#         """Test Collective GEMM with ReduceScatter"""
-#         self.args.collective_type = "reduce_scatter"
-#         run_gemm_tests(self.args, self.mesh)
+    def setUp(self):
+        """Set up test environment for pytest execution."""
+        # Create args object with distributed parameters from pytest fixtures
+        self.args = cgemm_parser([])
+        self.args.coordinator_address = self.coordinator_address
+        self.args.num_processes = self.num_processes
+        self.args.process_id = self.process_id
+        self.args.local_device_ids = self.local_device_ids
+        self.args.num_devices_per_process = self.num_devices_per_process
+        self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
+        _initialize_distributed(self.args)
+        # Create mesh once for all tests
+        self.mesh = _create_mesh(self.args)
+        jax.sharding.set_mesh(self.mesh)
+        self.args.enable_result_check = True
+        os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
+        # self.args.batch_size = 1
+        # self.args.seq_len = 128
+        # self.args.hidden_in = 64
+        # self.args.hidden_out = 64
+
+    def tearDown(self):
+        """Clean up after each test."""
+        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
+
+    def test_te_bf16_all_gather(self):
+        """Test Collective GEMM with AllGather"""
+        self.args.collective_type = "all_gather"
+        run_gemm_tests(self.args, self.mesh)
+
+    def test_te_bf16_reduce_scatter(self):
+        """Test Collective GEMM with ReduceScatter"""
+        self.args.collective_type = "reduce_scatter"
+        run_gemm_tests(self.args, self.mesh)
 
 
 class TestCollectiveGemmWithDP(unittest.TestCase):
@@ -297,7 +198,9 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     def setUp(self):
         """Set up test environment for pytest execution."""
         # Create args object with distributed parameters from pytest fixtures
-        self.args = gemm_parser([])
+        self.args = cgemm_parser(
+            "Collective GEMM test on multi-GPU with tensor parallelism"
+        ).parse_args()
         self.args.coordinator_address = self.coordinator_address
         self.args.num_processes = self.num_processes
         self.args.process_id = self.process_id
