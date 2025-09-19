@@ -6,6 +6,7 @@
 
 #include "cgemm_helper.h"
 #include "nccl.h"
+#include "common/util/system.h"  
 
 namespace transformer_engine {
 namespace jax {
@@ -19,9 +20,14 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string& i
   bool is_tp_leader = (get_local_device_id_within_tp_domain() == 0);
   
   pid_t pgid = getpgid(0);
-  std::string id_file = "/tmp/nccl_" + id_type + "_unique_id_pgid_" + std::to_string(pgid) + "_" +
+  
+  std::string base_path = getenv<std::string>("NVTE_JAX_NCCL_FILE_PATH", "/tmp");
+  std::string id_file = base_path + "/nccl_" + id_type + "_unique_id_pgid_" + std::to_string(pgid) + "_" +
                         std::to_string(num_total_devices) + "_" + std::to_string(tp_size) + 
                         "_domain_" + std::to_string(tp_domain_id) + ".bin";
+  
+  std::cout << "=== Using NCCL unique ID file path: " << id_file 
+            << " (base_path=" << base_path << ")" << std::endl;
 
   if (is_tp_leader) {
     NVTE_CHECK_NCCL(ncclGetUniqueId(&unique_id));
