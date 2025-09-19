@@ -19,7 +19,6 @@ PIDS=()  # Array to store all process PIDs
 
 # Cleanup function to kill all processes
 cleanup() {
-  echo "=== Cleaning up processes ==="
   for pid in "${PIDS[@]}"; do
     if kill -0 "$pid" 2>/dev/null; then
       echo "Killing process $pid"
