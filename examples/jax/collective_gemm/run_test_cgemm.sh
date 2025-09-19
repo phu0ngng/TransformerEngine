@@ -6,8 +6,8 @@ NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L | wc -l)}
 
 # Define the test files to run
 TEST_FILES=(
-# "test_gemm.py"
-# "test_dense_grad.py"
+"test_gemm.py"
+"test_dense_grad.py"
 "test_layernorm_mlp_grad.py"
 )
 
@@ -86,7 +86,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
 
   # Remove the log files after processing them
   wait
-  # rm ${TEST_FILE}_gpu_*.log
+  rm ${TEST_FILE}_gpu_*.log
 done
 
 wait
