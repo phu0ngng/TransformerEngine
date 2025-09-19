@@ -16,11 +16,12 @@ namespace jax {
 ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &id_type) {
   ncclUniqueId unique_id;
 
-  std::cout << "=== coordinate_nccl_unique_id: Getting TP domain info from current device" << std::endl;
+  std::cout << "=== coordinate_nccl_unique_id: Getting TP domain info from current device"
+            << std::endl;
   // Get all needed info from class members (uses current device context set by JAX)
   int tp_domain_id = get_tp_domain_id();
   bool is_tp_leader = (get_local_device_id_within_tp_domain() == 0);
-  std::cout << "=== coordinate_nccl_unique_id: tp_domain_id=" << tp_domain_id 
+  std::cout << "=== coordinate_nccl_unique_id: tp_domain_id=" << tp_domain_id
             << ", is_tp_leader=" << is_tp_leader << std::endl;
 
   pid_t pgid = getpgid(0);
@@ -74,7 +75,8 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &i
   if (is_tp_leader) {
     _nccl_id_file_name.push_back(id_file);
     std::cout << "=== Process " << process_id << " (" << id_type
-              << " leader) will cleanup NCCL unique ID file in destructor: " << id_file << std::endl;
+              << " leader) will cleanup NCCL unique ID file in destructor: " << id_file
+              << std::endl;
   }
 
   return unique_id;
@@ -165,7 +167,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
               << std::endl;
     NVTE_CHECK_NCCL(
         ncclCommInitRank(&handler.tp_comms[local_idx], handler.tp_size, tp_id, tp_local_rank));
-    std::cout << "=== Successfully initialized TP NCCL comm for local_idx=" << local_idx << std::endl;
+    std::cout << "=== Successfully initialized TP NCCL comm for local_idx=" << local_idx
+              << std::endl;
   }
   std::cout << "=== Ending TP-domain NCCL group initialization" << std::endl;
   NVTE_CHECK_NCCL(ncclGroupEnd());
@@ -341,9 +344,9 @@ CommunicatorHandler::~CommunicatorHandler() {
   }
   // Clean up device memory
   if (_barrier) cudaFree(_barrier);
-  
+
   // Clean up NCCL unique ID files (only leaders have files to cleanup)
-  for (const auto& file_path : _nccl_id_file_name) {
+  for (const auto &file_path : _nccl_id_file_name) {
     std::remove(file_path.c_str());
     std::cout << "=== Destructor cleaned up NCCL unique ID file: " << file_path << std::endl;
   }
