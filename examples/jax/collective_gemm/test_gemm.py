@@ -98,6 +98,11 @@ def run_gemm_tests(args, mesh=None):
     )
     weight = jax.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16)
     bias = jax.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
+    collective_op = (
+        CollectiveOp.ALL_GATHER
+        if args.collective_type == "all_gather"
+        else CollectiveOp.REDUCE_SCATTER
+    )
 
     with mesh, fp8_autocast(
         enabled=False,
@@ -105,13 +110,6 @@ def run_gemm_tests(args, mesh=None):
         mesh_resource=MeshResource(dp_resource=DP_AXIS, tpsp_resource=TPSP_AXIS),
     ):
         print(f"Device mesh: {mesh}")
-
-        # Collective GEMM configs need to be created under the mesh_resource context
-        collective_op = (
-            CollectiveOp.ALL_GATHER
-            if args.collective_type == "all_gather"
-            else CollectiveOp.REDUCE_SCATTER
-        )
 
         x_sharding, weight_sharding, bias_sharding = _get_operand_sharding(
             mesh, collective_op, args.enable_data_parallel
@@ -151,8 +149,6 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
     """Collective GEMM with DP unittests"""
 
     def setUp(self):
-        """Set up test environment for pytest execution."""
-        # Create args object with distributed parameters from pytest fixtures
         self.args = cgemm_parser(
             "Collective GEMM test on multi-GPU with tensor parallelism"
         ).parse_args([])
@@ -165,14 +161,12 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         _initialize_distributed(self.args)
         self.args.batch_size = 4
-        # Create mesh once for all tests
         self.mesh = _create_mesh(self.args)
         jax.sharding.set_mesh(self.mesh)
         self.args.enable_result_check = True
         os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
 
     def tearDown(self):
-        """Clean up after each test."""
         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_all_gather_with_dp(self):

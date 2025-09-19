@@ -146,6 +146,10 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
     gamma = jax.random.normal(gamma_rng, (args.hidden_in,), dtype=jnp.bfloat16) / jnp.sqrt(
         args.hidden_in
     )
+    collective_op_set_1 = CollectiveOpSet.create(forward_collective_op=CollectiveOp.ALL_GATHER)
+    collective_op_set_2 = CollectiveOpSet.create(forward_collective_op=CollectiveOp.REDUCE_SCATTER)
+    collective_op_sets = (collective_op_set_1, collective_op_set_2)
+    noop_collective_op_sets = (noop_collective_op_set, noop_collective_op_set)
 
     with mesh, fp8_autocast(
         enabled=False,
@@ -157,16 +161,6 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
         axis_rules += ((TPSP_AXIS, TPSP_AXIS), (DP_AXIS, DP_AXIS))
         te_extended_axis_rules = te_flax.extend_logical_axis_rules(axis_rules)
         with flax.linen.logical_axis_rules(te_extended_axis_rules):
-            # Collective GEMM configs need to be created under the mesh_resource context
-            collective_op_set_1 = CollectiveOpSet.create(
-                forward_collective_op=CollectiveOp.ALL_GATHER
-            )
-            collective_op_set_2 = CollectiveOpSet.create(
-                forward_collective_op=CollectiveOp.REDUCE_SCATTER
-            )
-            collective_op_sets = (collective_op_set_1, collective_op_set_2)
-            noop_collective_op_sets = (noop_collective_op_set, noop_collective_op_set)
-
             x_sharding, weight_1_sharding, bias_1_sharding, weight_2_sharding, bias_2_sharding = (
                 _get_operand_sharding(mesh)
             )
@@ -230,8 +224,6 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     # is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
 
     def setUp(self):
-        """Set up test environment for pytest execution."""
-        # Create args object with distributed parameters from pytest fixtures
         self.args = cgemm_parser(
             "Collective LayerNorm MLP Gradient test on multi-GPU with tensor parallelism"
         ).parse_args([])
@@ -250,44 +242,11 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
 
     def tearDown(self):
-        """Clean up after each test."""
         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_layernorm_mlp_grad(self):
         """Test Collective Dense Gradient with AllGather"""
         run_layernorm_mlp_grad_tests(self.args, self.mesh)
-
-
-# class TestCollectiveDenseGradientWithDP(unittest.TestCase):
-#     """Collective Dense Gradient with DP unittests"""
-#
-#     def setUp(self):
-#         """Set up test environment for pytest execution."""
-#         # Create args object with distributed parameters from pytest fixtures
-#         self.args = cgemm_parser(
-#             "Collective LayerNorm MLP Gradient test on multi-GPU with tensor parallelism"
-#         ).parse_args([])
-#         self.args.coordinator_address = self.coordinator_address
-#         self.args.num_processes = self.num_processes
-#         self.args.process_id = self.process_id
-#         self.args.local_device_ids = self.local_device_ids
-#         self.args.num_devices_per_process = self.num_devices_per_process
-#         self.args.enable_data_parallel = True
-#         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
-#         _initialize_distributed(self.args)
-#         # Create mesh once for all tests
-#         self.mesh = _create_mesh(self.args)
-#         jax.sharding.set_mesh(self.mesh)
-#         self.args.enable_result_check = True
-#         os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
-#
-#     def tearDown(self):
-#         """Clean up after each test."""
-#         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
-#
-#     def test_te_bf16_layernorm_mlp_grad_with_dp(self):
-#         """Test Collective Dense Gradient with AllGather"""
-#         run_layernorm_mlp_grad_tests(self.args, self.mesh)
 
 
 if __name__ == "__main__":

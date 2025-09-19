@@ -12,17 +12,11 @@
 namespace transformer_engine {
 namespace jax {
 
-// Helper function for NCCL unique ID coordination via file system
 ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &id_type) {
   ncclUniqueId unique_id;
 
-  std::cout << "=== coordinate_nccl_unique_id: Getting TP domain info from current device"
-            << std::endl;
-  // Get all needed info from class members (uses current device context set by JAX)
   int tp_domain_id = get_tp_domain_id();
   bool is_tp_leader = (get_local_device_id_within_tp_domain() == 0);
-  std::cout << "=== coordinate_nccl_unique_id: tp_domain_id=" << tp_domain_id
-            << ", is_tp_leader=" << is_tp_leader << std::endl;
 
   pid_t pgid = getpgid(0);
 
@@ -31,25 +25,16 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &i
                         "_" + std::to_string(num_total_devices) + "_" + std::to_string(tp_size) +
                         "_domain_" + std::to_string(tp_domain_id) + ".bin";
 
-  std::cout << "=== Using NCCL unique ID file path: " << id_file << " (base_path=" << base_path
-            << ")" << std::endl;
-
   if (is_tp_leader) {
     NVTE_CHECK_NCCL(ncclGetUniqueId(&unique_id));
-    std::cout << "=== Process " << process_id << " (leader in " << id_type << " domain "
-              << tp_domain_id << ") generated NCCL unique ID" << std::endl;
 
     // Write the ID to a temporary file
     std::ofstream file(id_file, std::ios::binary);
     NVTE_CHECK(file.is_open(), "Failed to create NCCL unique ID file: ", id_file);
     file.write(reinterpret_cast<const char *>(&unique_id), sizeof(ncclUniqueId));
     file.close();
-    std::cout << "=== Process " << process_id << " wrote " << id_type
-              << " NCCL unique ID to file: " << id_file << std::endl;
   } else {
     // Wait for the ID file to be created and read it
-    std::cout << "=== Process " << process_id << " waiting for " << id_type
-              << " NCCL unique ID file: " << id_file << std::endl;
     int attempts = 0;
     const int max_attempts = 100;
     while (attempts < max_attempts) {
@@ -58,8 +43,6 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &i
         file.read(reinterpret_cast<char *>(&unique_id), sizeof(ncclUniqueId));
         if (file.gcount() == sizeof(ncclUniqueId)) {
           file.close();
-          std::cout << "=== Process " << process_id << " successfully read " << id_type
-                    << " NCCL unique ID" << std::endl;
           break;
         }
         file.close();
@@ -71,12 +54,8 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &i
                "Timeout waiting for " + id_type + " NCCL unique ID file from leader: ", id_file);
   }
 
-  // Store file path for cleanup in destructor (only for leader)
   if (is_tp_leader) {
     _nccl_id_file_name.push_back(id_file);
-    std::cout << "=== Process " << process_id << " (" << id_type
-              << " leader) will cleanup NCCL unique ID file in destructor: " << id_file
-              << std::endl;
   }
 
   return unique_id;
@@ -103,10 +82,6 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   NVTE_CHECK(num_total_devices % tp_size == 0,
              "num_total_devices must be divisible by tp_size, got num_total_devices=",
              num_total_devices, ", tp_size=", tp_size);
-
-  std::cout << "=== Calling from init with num_total_devices=" << num_total_devices
-            << ", num_devices_per_process=" << num_devices_per_process
-            << ", process_id=" << process_id << ", tp_size=" << tp_size << std::endl;
 
   auto &handler = get(false);
   handler.num_total_devices = num_total_devices;
@@ -139,48 +114,22 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
       handler.local_device_ids_within_tp_domain[local_idx] = global_device_id % tp_size;
       handler.tp_domain_ids[local_idx] = global_device_id / tp_size;
     }
-
-    std::cout << "=== Process " << process_id << ", local_idx=" << local_idx
-              << " -> Using JAX-assigned CUDA device=" << current_device
-              << ", global_device_id=" << global_device_id
-              << ", tp_local_device_id=" << handler.local_device_ids_within_tp_domain[local_idx]
-              << ", tp_domain_id=" << handler.tp_domain_ids[local_idx] << std::endl;
-
-    // Device is already set by JAX, no need to change it
   }
 
-  // Create TP-domain communicators only (no global communicators needed)
-  // JAX has already set the device context, so coordinate_nccl_unique_id can safely query current device
-  std::cout << "=== About to call coordinate_nccl_unique_id for TP" << std::endl;
-  // Get TP unique ID using helper function (uses current device context set by JAX)
   ncclUniqueId tp_id = handler.coordinate_nccl_unique_id("tp");
-  std::cout << "=== Successfully got TP unique ID" << std::endl;
 
-  std::cout << "=== Starting TP-domain NCCL group initialization for " << num_devices_per_process
-            << " devices" << std::endl;
   NVTE_CHECK_NCCL(ncclGroupStart());
   for (int local_idx = 0; local_idx < num_devices_per_process; local_idx++) {
     NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids_within_process[local_idx]));
     int tp_local_rank = handler.local_device_ids_within_tp_domain[local_idx];
-    std::cout << "=== Initializing TP NCCL comm for local_idx=" << local_idx
-              << ", tp_local_rank=" << tp_local_rank << ", tp_size=" << handler.tp_size
-              << std::endl;
     NVTE_CHECK_NCCL(
         ncclCommInitRank(&handler.tp_comms[local_idx], handler.tp_size, tp_id, tp_local_rank));
-    std::cout << "=== Successfully initialized TP NCCL comm for local_idx=" << local_idx
-              << std::endl;
   }
-  std::cout << "=== Ending TP-domain NCCL group initialization" << std::endl;
   NVTE_CHECK_NCCL(ncclGroupEnd());
-
-  std::cout << "=== Successfully initialized " << num_devices_per_process
-            << " TP-domain NCCL communicators" << std::endl;
 
   // Allocate device memory for barrier operations
   NVTE_CHECK_CUDA(cudaMalloc(&handler._barrier, sizeof(int)));
-  std::cout << "=== Allocated device memory for NCCL barrier operations" << std::endl;
 
-  // Mark as initialized
   handler._initialize = true;
 
   // Bootstrap UB via creating a dummy CommOverlapP2PBase object
@@ -199,50 +148,37 @@ void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_proc
   handler.init(num_total_devices, num_devices_per_process, process_id, tp_size);
 }
 
-// Accessor function to get cached num_max_streams for Python
 int GetCgemmNumMaxStreams() {
   auto &config = CgemmConfig::get();
   return config.num_max_streams;
 }
 
-// Implementation of CollectiveGemmPlanRegistry::get_executor
 CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> buffer_shape,
                                                           DType dtype,
                                                           JAXX_Collective_Op collective_op) {
   auto &comm_handler = CommunicatorHandler::get();
   auto &cgemm_config = CgemmConfig::get();
 
-  // Get device index from current CUDA context (JAX sets this via FFI)
   int device_idx = comm_handler.get_local_device_idx_for_current_device();
-
-  // Include device_idx in plan cache key to ensure device-specific caching
   int64_t plan_id = 0;
   hash_combine(plan_id, buffer_shape[0], buffer_shape[1], static_cast<size_t>(dtype),
                static_cast<int>(collective_op), comm_handler.tp_size, cgemm_config.num_max_streams,
                cgemm_config.gemm_priority, cgemm_config.comm_priority, cgemm_config.num_comm_sm,
                cgemm_config.use_ce, cgemm_config.aggregate_ag, device_idx);
 
-  // Check if plan already exists
   auto it = plan_map.find(plan_id);
   if (it != plan_map.end()) {
-    return it->second.get();  // Return existing executor
+    return it->second.get();
   }
 
-  std::cout << "=== CollectiveGemmPlanRegistry calls handler init" << std::endl;
-
-  // Validate TP configuration and determine scenario
   if (comm_handler.num_devices_per_process == comm_handler.tp_size) {
-    // Scenario 1: Multi-device per process - TP domain = single process
-    std::cout << "=== TP Scenario 1: Multi-device per process (TP domain = single process)"
-              << std::endl;
+    // Multi-device per process
   } else if (comm_handler.num_devices_per_process == 1) {
-    // Scenario 2: Single device per process - TP domain spans multiple processes
+    // Single device per process
     NVTE_CHECK(comm_handler.num_total_devices % comm_handler.tp_size == 0,
                "For single device per process, num_total_devices must be divisible by tp_size, "
                "got num_total_devices=",
                comm_handler.num_total_devices, ", tp_size=", comm_handler.tp_size);
-    std::cout << "=== TP Scenario 2: Single device per process (TP domain spans processes)"
-              << std::endl;
   } else {
     NVTE_ERROR("Unsupported TP configuration: num_devices_per_process=",
                comm_handler.num_devices_per_process, ", tp_size=", comm_handler.tp_size,
@@ -251,14 +187,6 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
                "(2) num_devices_per_process == 1 (single device per process)");
   }
 
-  printf(
-      "Global rank %d, num_total_devices %d, tp_local_rank %d, tp_size %d, tp_domain_id %d, "
-      "tp_num_domains %d",
-      comm_handler.get_global_rank(), comm_handler.num_total_devices,
-      comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
-      comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains());
-
-  // Create executor with device-specific parameters (device_idx determined above)
   std::unique_ptr<CommOverlapCore> executor;
   executor = std::make_unique<CommOverlapP2PBase>(
       buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
@@ -274,45 +202,32 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   return executor_ptr;
 }
 
-// CommunicatorHandler method implementations
-
-void CommunicatorHandler::nccl_barrier_impl(ExtComm /* not used*/) {
-  std::cout << "=== NCCL TP barrier called! Process " << process_id << std::endl;
+void CommunicatorHandler::nccl_barrier_impl(ExtComm) {
   NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using barrier");
 
   int device_idx = get_local_device_idx_for_current_device();
-  ncclComm_t tp_comm = tp_comms[device_idx];  // Use TP-domain communicator for barriers
+  ncclComm_t tp_comm = tp_comms[device_idx];
 
-  std::cout << "=== NCCL TP barrier executing AllReduce within TP domain" << std::endl;
   NVTE_CHECK_NCCL(ncclAllReduce(_barrier, _barrier, 1, ncclInt, ncclSum, tp_comm, nullptr));
   cudaDeviceSynchronize();
-  std::cout << "=== NCCL TP barrier completed" << std::endl;
 }
 
 void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_bytes,
-                                              void *input_buf, size_t input_bytes,
-                                              ExtComm /*ExtComm - unused*/) {
-  std::cout << "=== NCCL TP allgather called! Process " << process_id
-            << ", input_bytes=" << input_bytes << ", output_bytes=" << output_bytes << std::endl;
+                                              void *input_buf, size_t input_bytes, ExtComm) {
   NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
 
   int device_idx = get_local_device_idx_for_current_device();
-  ncclComm_t tp_comm = tp_comms[device_idx];  // Use TP-domain communicator
+  ncclComm_t tp_comm = tp_comms[device_idx];
 
-  // Ensure input and output sizes are consistent with TP size (not total devices)
   size_t expected_output_bytes = input_bytes * tp_size;
   NVTE_CHECK(output_bytes == expected_output_bytes, "TP allgather buffer size mismatch: expected ",
              expected_output_bytes, ", got ", output_bytes);
 
-  std::cout << "=== NCCL TP allgather executing within TP domain" << std::endl;
-  // Use nullptr stream to let NCCL handle stream management
   NVTE_CHECK_NCCL(ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, tp_comm, nullptr));
   cudaDeviceSynchronize();
-  std::cout << "=== NCCL TP allgather completed" << std::endl;
 }
 
 CommunicatorHandler::CommunicatorHandler() : _barrier(nullptr) {
-  // Initialize arrays to safe defaults
   for (int i = 0; i < MAX_DEVICES; i++) {
     local_device_ids_within_process[i] = -1;
     local_device_ids_within_tp_domain[i] = -1;
@@ -321,20 +236,14 @@ CommunicatorHandler::CommunicatorHandler() : _barrier(nullptr) {
     tp_comms[i] = nullptr;
   }
 
-  // Initialize function objects - these are used by userbuffers for coordination
   allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf,
                           size_t input_bytes, ExtComm comm) {
-    std::cout << "=== Lambda allgather function called!" << std::endl;
     this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
   };
-  barrier_func = [this](ExtComm comm) {
-    std::cout << "=== Lambda barrier function called!" << std::endl;
-    this->nccl_barrier_impl(comm);
-  };
+  barrier_func = [this](ExtComm comm) { this->nccl_barrier_impl(comm); };
 }
 
 CommunicatorHandler::~CommunicatorHandler() {
-  // Clean up NCCL communicators
   if (_initialize) {
     for (int i = 0; i < num_devices_per_process; i++) {
       if (tp_comms[i] != nullptr) {
@@ -342,13 +251,10 @@ CommunicatorHandler::~CommunicatorHandler() {
       }
     }
   }
-  // Clean up device memory
   if (_barrier) cudaFree(_barrier);
 
-  // Clean up NCCL unique ID files (only leaders have files to cleanup)
   for (const auto &file_path : _nccl_id_file_name) {
     std::remove(file_path.c_str());
-    std::cout << "=== Destructor cleaned up NCCL unique ID file: " << file_path << std::endl;
   }
 }
 

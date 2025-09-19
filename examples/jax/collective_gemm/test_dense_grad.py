@@ -79,12 +79,7 @@ def _value_and_grad_dense(x, weight, bias, input_axes, weight_axes, output_axes,
 def run_dense_grad_tests(args, mesh=None):
     """Execute Dense Gradient tests."""
     print(args)
-    # Collective GEMM requires Shardy partitioner to be disabled
-    jax.config.update("jax_use_shardy_partitioner", False)
-
-    # Initialize distributed with provided arguments
     _initialize_distributed(args)
-
     mesh = mesh or _create_mesh(args)
 
     # Create test data
@@ -96,6 +91,13 @@ def run_dense_grad_tests(args, mesh=None):
     weight = jax.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16)
     bias = jax.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
 
+    collective_op = (
+        CollectiveOp.ALL_GATHER
+        if args.collective_type == "all_gather"
+        else CollectiveOp.REDUCE_SCATTER
+    )
+    collective_op_set = CollectiveOpSet.create(forward_collective_op=collective_op)
+
     with mesh, fp8_autocast(
         enabled=False,
         fp8_recipe=None,
@@ -106,13 +108,6 @@ def run_dense_grad_tests(args, mesh=None):
         axis_rules += ((TPSP_AXIS, TPSP_AXIS), (DP_AXIS, DP_AXIS))
         te_extended_axis_rules = te_flax.extend_logical_axis_rules(axis_rules)
         with flax.linen.logical_axis_rules(te_extended_axis_rules):
-            # Collective GEMM configs need to be created under the mesh_resource context
-            collective_op = (
-                CollectiveOp.ALL_GATHER
-                if args.collective_type == "all_gather"
-                else CollectiveOp.REDUCE_SCATTER
-            )
-            collective_op_set = CollectiveOpSet.create(forward_collective_op=collective_op)
 
             x_sharding, weight_sharding, bias_sharding = _get_operand_sharding(mesh, collective_op)
             x_sharded = jax.device_put(x, x_sharding)
@@ -161,12 +156,7 @@ def run_dense_grad_tests(args, mesh=None):
 class TestCollectiveDenseGradient(unittest.TestCase):
     """Collective Dense Gradient unittests"""
 
-    # is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
-    # is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
-
     def setUp(self):
-        """Set up test environment for pytest execution."""
-        # Create args object with distributed parameters from pytest fixtures
         self.args = cgemm_parser(
             "Collective Dense Gradient test on multi-GPU with tensor parallelism"
         ).parse_args([])
@@ -186,7 +176,6 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
 
     def tearDown(self):
-        """Clean up after each test."""
         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_all_gather(self):
