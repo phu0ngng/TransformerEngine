@@ -13,9 +13,13 @@ namespace transformer_engine {
 namespace jax {
 
 // Helper function for NCCL unique ID coordination via file system
-ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &id_type, int tp_domain_id, bool is_tp_leader) {
+ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &id_type) {
   ncclUniqueId unique_id;
 
+  std::cout << "=== coordinate_nccl_unique_id: Getting TP domain info from current device" << std::endl;
+  // Get all needed info from class members (uses current device context set by JAX)
+  int tp_domain_id = get_tp_domain_id();
+  bool is_tp_leader = (get_local_device_id_within_tp_domain() == 0);
   std::cout << "=== coordinate_nccl_unique_id: tp_domain_id=" << tp_domain_id 
             << ", is_tp_leader=" << is_tp_leader << std::endl;
 
@@ -144,12 +148,10 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   }
 
   // Create TP-domain communicators only (no global communicators needed)
-  // Use first device's TP domain info for coordination (all devices in same process have same TP domain)
-  int tp_domain_id = handler.tp_domain_ids[0];
-  bool is_tp_leader = (handler.local_device_ids_within_tp_domain[0] == 0);
+  // JAX has already set the device context, so coordinate_nccl_unique_id can safely query current device
   std::cout << "=== About to call coordinate_nccl_unique_id for TP" << std::endl;
-  // Get TP unique ID using helper function with explicit parameters
-  ncclUniqueId tp_id = handler.coordinate_nccl_unique_id("tp", tp_domain_id, is_tp_leader);
+  // Get TP unique ID using helper function (uses current device context set by JAX)
+  ncclUniqueId tp_id = handler.coordinate_nccl_unique_id("tp");
   std::cout << "=== Successfully got TP unique ID" << std::endl;
 
   std::cout << "=== Starting TP-domain NCCL group initialization for " << num_devices_per_process

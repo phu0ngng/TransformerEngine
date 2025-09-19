@@ -150,7 +150,7 @@ class CommunicatorHandler {
  private:
   // Helper function for NCCL unique ID coordination via file system
   // Uses NVTE_JAX_NCCL_FILE_PATH environment variable for custom path, defaults to /tmp
-  ncclUniqueId coordinate_nccl_unique_id(const std::string &id_type, int tp_domain_id, bool is_tp_leader);
+  ncclUniqueId coordinate_nccl_unique_id(const std::string &id_type);
 
  public:
   static CommunicatorHandler &get(bool is_initialized = true) {
