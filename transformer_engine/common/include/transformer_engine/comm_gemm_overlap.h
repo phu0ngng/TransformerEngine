@@ -190,13 +190,6 @@ class CommOverlapBase : public CommOverlapCore {
                   bool set_sm_margin = true, bool atomic_gemm = false,
                   bool rs_overlap_first_gemm = false);
 
-  // MPI-based constructor
-  CommOverlapBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int tp_size,
-                  int num_splits = 3, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
-                  int comm_cga_size = 2, int gemm_priority = 0, int comm_priority = 0,
-                  int num_comm_sm = 16, bool set_sm_margin = true, bool atomic_gemm = false,
-                  bool rs_overlap_first_gemm = false);
-
   virtual ~CommOverlapBase();
 
   void copy_into_buffer(cudaStream_t stream, const TensorWrapper &source, bool local_chunk,
@@ -276,21 +269,6 @@ class CommOverlapP2PBase : public CommOverlapCore {
   CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                      int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                      ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
-                     CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
-                     int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
-                     int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
-                     bool atomic_gemm = false, bool aggregate = false);
-
-  // MPI-based constructor
-  CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int tp_size,
-                     CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
-                     int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
-                     int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
-                     bool atomic_gemm = false, bool aggregate = false);
-
-  // NCCL-based only constructor
-  CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
-                     int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                      CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
                      int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,

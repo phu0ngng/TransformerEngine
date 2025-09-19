@@ -65,28 +65,6 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
              num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
 }
 
-CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode,
-                                 int numnodes, int tp_size, int num_splits, int num_max_streams,
-                                 int comm_cga_size, int gemm_priority, int comm_priority,
-                                 int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                 bool atomic_gemm) {
-  // Dummy allgather_handle and barrier_handle
-  ExtAllgatherOp allgather_handle = [](void *, size_t, void *, size_t, ExtComm) {};
-  ExtBarrierOp barrier_handle = [](ExtComm) {};
-
-  // Initialize userbuf communicator
-  if (!_comm_created) {
-    create_communicator_grouped2(&_ub_comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                 allgather_handle, barrier_handle, 1, 1, tp_size, 1);
-    _comm_created = true;
-    if (_ub_comm->myrank == 0) {
-      printf("!!! [UB] Initialized Userbuffers Communicator\n");
-    }
-  }
-
-  initialize(tp_size, num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority,
-             num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
-}
 
 CommOverlapCore::CommOverlapCore(int tp_size, int num_splits, int num_max_streams,
                                  int comm_cga_size, int gemm_priority, int comm_priority,
@@ -322,16 +300,6 @@ CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType 
                       allgather_handle, barrier_handle, num_splits, num_max_streams, comm_cga_size,
                       gemm_priority, comm_priority, num_comm_sm, set_sm_margin, false,
                       atomic_gemm) {
-  initialize(buffer_shape, buffer_dtype, rs_overlap_first_gemm);
-}
-
-CommOverlapBase::CommOverlapBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
-                                 int tp_size, int num_splits, int num_max_streams,
-                                 int comm_cga_size, int gemm_priority, int comm_priority,
-                                 int num_comm_sm, bool set_sm_margin, bool atomic_gemm,
-                                 bool rs_overlap_first_gemm)
-    : CommOverlapCore(tp_size, num_splits, num_max_streams, comm_cga_size, gemm_priority,
-                      comm_priority, num_comm_sm, set_sm_margin, false, atomic_gemm) {
   initialize(buffer_shape, buffer_dtype, rs_overlap_first_gemm);
 }
 
@@ -737,28 +705,6 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
   initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
 }
 
-CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
-                                       int tp_size, CommOverlapType comm_type, int num_max_streams,
-                                       int comm_cga_size, int gemm_priority, int comm_priority,
-                                       int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                       bool atomic_gemm, bool aggregate)
-    : CommOverlapCore(tp_size, tp_size, num_max_streams, comm_cga_size, gemm_priority,
-                      comm_priority, num_comm_sm, set_sm_margin, use_ce, atomic_gemm) {
-  initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
-}
-
-CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
-                                       int myrank, int numranks, int mylocal, int numlocal,
-                                       int mynode, int numnodes, int tp_size,
-                                       CommOverlapType comm_type, int num_max_streams,
-                                       int comm_cga_size, int gemm_priority, int comm_priority,
-                                       int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                       bool atomic_gemm, bool aggregate)
-    : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size, tp_size,
-                      num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm,
-                      set_sm_margin, use_ce, atomic_gemm) {
-  initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
-}
 
 void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                                     CommOverlapType comm_type, bool aggregate) {
