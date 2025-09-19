@@ -249,7 +249,6 @@ class CommOverlapP2PBase : public CommOverlapCore {
  public:
   CommOverlapP2PBase() {}  // dummy constructor for exposing type to Python
 
-  // External/framework collective-based constructor
   CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                      int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                      ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
