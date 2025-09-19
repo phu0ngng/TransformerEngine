@@ -159,7 +159,7 @@ class TestCollectiveGemm(unittest.TestCase):
     def setUp(self):
         """Set up test environment for pytest execution."""
         # Create args object with distributed parameters from pytest fixtures
-        self.args = cgemm_parser([])
+        self.args = cgemm_parser("Collective GEMM test on multi-GPU with tensor parallelism").parse_args([])
         self.args.coordinator_address = self.coordinator_address
         self.args.num_processes = self.num_processes
         self.args.process_id = self.process_id
@@ -200,7 +200,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         # Create args object with distributed parameters from pytest fixtures
         self.args = cgemm_parser(
             "Collective GEMM test on multi-GPU with tensor parallelism"
-        ).parse_args()
+        ).parse_args([])
         self.args.coordinator_address = self.coordinator_address
         self.args.num_processes = self.num_processes
         self.args.process_id = self.process_id

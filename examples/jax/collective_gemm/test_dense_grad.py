@@ -169,7 +169,7 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         # Create args object with distributed parameters from pytest fixtures
         self.args = cgemm_parser(
             "Collective Dense Gradient test on multi-GPU with tensor parallelism"
-        ).parse_args()
+        ).parse_args([])
         self.args.coordinator_address = self.coordinator_address
         self.args.num_processes = self.num_processes
         self.args.process_id = self.process_id
@@ -206,7 +206,7 @@ class TestCollectiveDenseGradientWithDP(unittest.TestCase):
         # Create args object with distributed parameters from pytest fixtures
         self.args = cgemm_parser(
             "Collective Dense Gradient test on multi-GPU with tensor parallelism"
-        ).parse_args()
+        ).parse_args([])
         self.args.coordinator_address = self.coordinator_address
         self.args.num_processes = self.num_processes
         self.args.process_id = self.process_id
@@ -257,6 +257,6 @@ if __name__ == "__main__":
 
     args = cgemm_parser(
         "Collective Dense Gradient test on multi-GPU with tensor parallelism"
-    ).parse_args()
+    ).parse_args([])
     _initialize_distributed(args)
     run_dense_grad_tests(args, mesh=None)
