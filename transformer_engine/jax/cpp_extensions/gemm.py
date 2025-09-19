@@ -562,7 +562,7 @@ class GemmPrimitive(BasePrimitive):
             rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
 
         # Alter lhs blocks so that CGEMM RS outputs correctly
-        if collective_op.is_reduce_scatter and not transpose_batch_sequence and not is_outer:
+        if collective_op.is_reduce_scatter and not transpose_batch_sequence and not is_outer and not lhs.shape[0] == 1:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = lhs.shape
             assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
@@ -603,7 +603,7 @@ class GemmPrimitive(BasePrimitive):
             is_outer=is_outer,
         )
         # Alter output blocks for CGEMM AG
-        if collective_op.is_all_gather and not transpose_batch_sequence and not is_outer:
+        if collective_op.is_all_gather and not transpose_batch_sequence and not is_outer and not output.shape[0] == 1:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             # TODO: Make sure it works with DP + batch_size_per_process = 1
             original_shape = output.shape
