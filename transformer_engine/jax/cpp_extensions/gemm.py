@@ -169,15 +169,15 @@ def _quantize_gemm_operands(lhs, rhs, lhs_quantizer, rhs_quantizer, contracting_
 
 def collective_gemm_bootstrap(
     num_total_devices,
-    devices_per_process,
+    num_devices_per_process,
     process_id,
     tensor_parallel_size,
     num_max_streams=3,
-    gemm_priority=0,
-    comm_priority=0,
-    num_comm_sm=2,
+    compute_stream_priority=0,
+    communication_stream_priority=0,
+    num_sm_for_communication=2,
     use_ce=True,
-    aggregate_ag=False,
+    aggregate_all_gather=False,
 ):
     """Initialize NCCL communicators for Collective GEMM operations.
 
@@ -185,57 +185,93 @@ def collective_gemm_bootstrap(
     tensor parallel collective GEMM operations. It supports two main scenarios:
 
     1. **Multi-device per process**: TP domain = single process
-       - Each process manages multiple GPUs (num_local_ranks > 1)
+       - Each process manages multiple GPUs (num_devices_per_process > 1)
        - TP group consists of GPUs within the same process
        - Example: 2 processes × 4 GPUs each = 8 total ranks, tp_size=4
 
     2. **Single device per process**: TP domain spans multiple processes
-       - Each process manages one GPU (num_local_ranks = 1)
+       - Each process manages one GPU (num_devices_per_process = 1)
        - TP group spans across multiple processes
        - Example: 8 processes × 1 GPU each = 8 total ranks, tp_size=4
 
     Args:
         num_total_devices (int): Total number of ranks across all processes.
-            Must be divisible by num_local_ranks.
-        num_local_ranks (int): Number of GPUs per process.
+            Must be divisible by num_devices_per_process.
+        num_devices_per_process (int): Number of GPUs per process.
             - For multi-device: equals tp_size (e.g., 4 GPUs per process)
             - For single-device: equals 1 (1 GPU per process)
         process_id (int): Process identifier (0-based).
-            Must be in range [0, num_total_devices // devices_per_process).
+            Must be in range [0, num_total_devices // num_devices_per_process).
+        tensor_parallel_size (int): Size of tensor parallel groups.
+            Must divide num_total_devices evenly.
+        num_max_streams (int, optional): Maximum number of CUDA streams for overlap.
+            Higher values enable more parallelism but use more GPU resources. Default: 3.
+        compute_stream_priority (int, optional): Priority for GEMM computation streams.
+            Lower values = higher priority. Range: 0 (highest) to 3 (lowest). Default: 0.
+        communication_stream_priority (int, optional): Priority for NCCL communication streams.
+            Lower values = higher priority. Range: 0 (highest) to 3 (lowest). Default: 0.
+        num_sm_for_communication (int, optional): Number of streaming multiprocessors
+            reserved for communication operations. Default: 2.
+        use_ce (bool, optional): Enable CUDA copy engines for memory transfers.
+            Can improve performance by offloading memory operations. Default: True.
+        aggregate_all_gather (bool, optional): Aggregate multiple small all-gather operations
+            into larger ones for better efficiency. Default: False.
 
     Raises:
-        AssertionError: If num_total_devices is not divisible by devices_per_process,
+        AssertionError: If num_total_devices is not divisible by num_devices_per_process,
             or if process_id is out of valid range.
+        AssertionError: If num_devices_per_process is not 1 (Temporary: only single device per process is supported for now)
         RuntimeError: If NCCL initialization fails or if configuration
             is invalid (e.g., insufficient GPUs).
 
     Example:
-        # Scenario 1: 2 processes, 4 GPUs per process, tp_size=4
-        collective_gemm_bootstrap(num_total_devices=8, devices_per_process=4, process_id=0, tensor_parallel_size=4)
+        # Basic initialization (single device per process)
+        collective_gemm_bootstrap(
+            num_total_devices=8,
+            num_devices_per_process=1,
+            process_id=0,
+            tensor_parallel_size=4
+        )
 
-        # Scenario 2: 4 processes, 1 GPU per process, tp_size=4
-        collective_gemm_bootstrap(num_total_devices=4, devices_per_process=1, process_id=2, tensor_parallel_size=4)
+        # Advanced configuration with custom performance settings
+        collective_gemm_bootstrap(
+            num_total_devices=8,
+            num_devices_per_process=1,
+            process_id=0,
+            tensor_parallel_size=4,
+            num_max_streams=5,                    # More parallelism
+            compute_stream_priority=1,            # Lower compute priority
+            communication_stream_priority=0,      # Higher comm priority
+            num_sm_for_communication=4,           # More SMs for communication
+            use_ce=True,                         # Enable copy engines
+            aggregate_all_gather=True            # Aggregate small operations
+        )
 
     Note:
         This function must be called after JAX distributed initialization
         and before any collective GEMM operations. Each process should call
         this function with its own unique process_id.
     """
+
     assert (
-        num_total_devices % devices_per_process == 0
-    ), f"Invalid num_total_devices={num_total_devices}, devices_per_process={devices_per_process}"
+        num_devices_per_process == 1 and jax.local_device_count() == 1
+    ), "Only single device per process is supported at the moment!"
+    assert num_total_devices % num_devices_per_process == 0, (
+        f"Invalid num_total_devices={num_total_devices},"
+        f" num_devices_per_process={num_devices_per_process}"
+    )
     assert 0 <= process_id < num_total_devices, f"Invalid process_id={process_id}"
     initialize_cgemm_communicator(
         num_total_devices,
-        devices_per_process,
+        num_devices_per_process,
         process_id,
         tensor_parallel_size,
         num_max_streams,
-        gemm_priority,
-        comm_priority,
-        num_comm_sm,
+        compute_stream_priority,
+        communication_stream_priority,
+        num_sm_for_communication,
         use_ce,
-        aggregate_ag,
+        aggregate_all_gather,
     )
 
 

@@ -94,7 +94,6 @@ def _initialize_distributed(args):
 
     # Check if already initialized
     if _distributed_initialized:
-        print("JAX distributed already initialized, skipping...")
         return
 
     if args.coordinator_address is None or args.num_processes is None or args.process_id is None:
@@ -123,8 +122,6 @@ def _initialize_distributed(args):
         f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
         f"num_processes={args.num_processes}, process_id={args.process_id}"
     )
-    print(f"This process will manage global CUDA devices: {global_device_ids_for_this_process}")
-
     # Note: "local_device_ids" is a JAX term meaning "global CUDA devices managed by this process"
     jax.distributed.initialize(
         coordinator_address=args.coordinator_address,
@@ -133,10 +130,7 @@ def _initialize_distributed(args):
         local_device_ids=global_device_ids_for_this_process,
     )
 
-    # Mark as initialized
     _distributed_initialized = True
-
-    # Configure JAX after distributed initialization
     jax.clear_caches()
     jax.config.update(
         "jax_use_shardy_partitioner", False
@@ -147,22 +141,17 @@ def _initialize_distributed(args):
         f" {jax.local_device_count()}"
     )
 
-    # Initialize CGEMM communicator for single device per process scenario
-    # num_ranks = total ranks across all processes (args.num_processes in this case)
-    # num_local_ranks = GPUs per process (1 for single device per process)
-    num_local_ranks = 1  # Single GPU per process
-    total_ranks = args.num_processes  # Total number of processes/ranks
+    devices_per_process = 1
+    num_total_devices = args.num_processes
 
     print(
-        f"Initializing CGEMM communicator with num_ranks={total_ranks},"
-        f" num_local_ranks={num_local_ranks}, process_id={args.process_id}"
+        f"Initializing CGEMM communicator with num_total_devices={num_total_devices},"
+        f" devices_per_process={devices_per_process}, process_id={args.process_id}"
     )
-    print(f"JAX local devices: {jax.local_devices()}")
-    print(f"JAX device count: {jax.local_device_count()}")
 
     collective_gemm_bootstrap(
-        num_total_devices=total_ranks,
-        devices_per_process=num_local_ranks,
+        num_total_devices=num_total_devices,
+        devices_per_process=devices_per_process,
         process_id=args.process_id,
         tensor_parallel_size=args.tensor_parallel_size,
     )

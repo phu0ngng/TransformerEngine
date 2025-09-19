@@ -79,44 +79,34 @@ class CollectiveGemmPlanRegistry;
 // 2. Single process single device: TP domain spans processes (num_devices_per_process == 1)
 class CommunicatorHandler {
  public:
-  // Process-level information
-  int num_total_devices = -1;  // Total number of devices across all processes
-  int num_devices_per_process =
-      -1;                  // Number of GPUs per process (1 for single GPU, tp_size for multi GPU)
-  int process_id = -1;     // Process ID (0-based)
-  int num_processes = -1;  // Total number of processes
+  int num_total_devices = -1;
+  int num_devices_per_process = -1;
+  int process_id = -1;
+  int num_processes = -1;
 
-  // Tensor Parallel (TP) information - calculated once during init
-  int tp_size = -1;                                           // Tensor parallel group size
-  int tp_num_domains = -1;                                    // Number of TP domains
-  int local_device_ids_within_tp_domain[MAX_DEVICES] = {-1};  // TP local device ID for each device
-  int tp_domain_ids[MAX_DEVICES] = {-1};                      // TP domain ID for each device
+  int tp_size = -1;
+  int tp_num_domains = -1;
+  int local_device_ids_within_tp_domain[MAX_DEVICES] = {-1};
+  int tp_domain_ids[MAX_DEVICES] = {-1};
+  ncclComm_t tp_comms[MAX_DEVICES];
 
-  // Device-level information (arrays for multi-device support)
-  int local_device_ids_within_process[MAX_DEVICES];  // CUDA device IDs within this process
-  int global_device_ids[MAX_DEVICES];                // Global device ID for each local device
-  ncclComm_t tp_comms[MAX_DEVICES];  // TP-domain NCCL communicator for each local device
+  int local_device_ids_within_process[MAX_DEVICES];
+  int global_device_ids[MAX_DEVICES];
 
-  // Process-level convenience accessors (NOT TP-domain specific)
   int get_global_rank() const {
     int device_idx = get_local_device_idx_for_current_device();
     return global_device_ids[device_idx];
   }
 
-  // NCCL-based coordination methods for userbuffers
-  void nccl_barrier_impl(ExtComm /* not used*/);
-
+  void nccl_barrier_impl(ExtComm);
   void nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf,
-                           size_t input_bytes, ExtComm /*ExtComm - unused*/);
+                           size_t input_bytes, ExtComm);
 
-  // Get communicator for current CUDA device
   ncclComm_t get_comm_for_current_device() const {
     int device_idx = get_local_device_idx_for_current_device();
     return tp_comms[device_idx];
   }
 
-  // Get local device index for current CUDA device
-  // Thread-safe: reads immutable data after initialization, cudaGetDevice() is thread-safe
   int get_local_device_idx_for_current_device() const {
     int current_device;
     NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
@@ -129,10 +119,6 @@ class CommunicatorHandler {
                " not found in local_device_ids_within_process");
   }
 
-  // TP-domain-specific accessors for CommOverlapP2P
-  // These methods return ranks/domains within the TP (tensor parallel) domain, not process domain
-
-  // Convenience methods for current device (most common usage)
   int get_local_device_id_within_tp_domain() const {
     int device_idx = get_local_device_idx_for_current_device();
     return local_device_ids_within_tp_domain[device_idx];
@@ -148,14 +134,10 @@ class CommunicatorHandler {
   static void init(int num_total_devices, int num_devices_per_process, int process_id, int tp_size);
 
  private:
-  // Helper function for NCCL unique ID coordination via file system
-  // Uses NVTE_JAX_NCCL_FILE_PATH environment variable for custom path, defaults to /tmp
   ncclUniqueId coordinate_nccl_unique_id(const std::string &id_type);
 
  public:
   static CommunicatorHandler &get(bool is_initialized = true) {
-    std::cout << "CommunicatorHandler is called with is_initialized=" << is_initialized
-              << std::endl;
     static CommunicatorHandler instance;
     NVTE_CHECK(instance._initialize == is_initialized,
                "CommunicatorHandler._initialize=", instance._initialize,
@@ -163,7 +145,6 @@ class CommunicatorHandler {
     return instance;
   }
 
-  // Cached function objects for userbuffers coordination
   ExtAllgatherOp allgather_func;
   ExtBarrierOp barrier_func;
 
@@ -175,9 +156,7 @@ class CommunicatorHandler {
   ~CommunicatorHandler();
 
   bool _initialize = false;
-  // Device memory for barrier operations (single buffer for in-place AllReduce)
   int *_barrier = nullptr;
-
   std::vector<std::string> _nccl_id_file_name;
 };
 
