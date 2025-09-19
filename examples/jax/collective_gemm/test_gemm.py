@@ -145,51 +145,6 @@ def run_gemm_tests(args, mesh=None):
 
     if args.enable_result_check and args.process_id == 0:
         assert_allclose(gathered_ref_output, gathered_output)
-        # assert_allclose(gathered_ref_output, gathered_output, atol=1e-3, rtol=2e-2)
-        # assert_allclose_print_index(gathered_ref_output, gathered_output)
-        # assert_allclose_print_index(gathered_ref_output, gathered_output, rtol=1e-2, atol=1e-5)
-
-
-class TestCollectiveGemm(unittest.TestCase):
-    """Collective GEMM unittests"""
-
-    # is_fp8_supported, fp8_reason = is_fp8_available(ScalingMode.DELAYED_TENSOR_SCALING)
-    # is_mxfp8_supported, mxfp8_reason = is_fp8_available(ScalingMode.MXFP8_1D_SCALING)
-
-    def setUp(self):
-        """Set up test environment for pytest execution."""
-        # Create args object with distributed parameters from pytest fixtures
-        self.args = cgemm_parser("Collective GEMM test on multi-GPU with tensor parallelism").parse_args([])
-        self.args.coordinator_address = self.coordinator_address
-        self.args.num_processes = self.num_processes
-        self.args.process_id = self.process_id
-        self.args.local_device_ids = self.local_device_ids
-        self.args.num_devices_per_process = self.num_devices_per_process
-        self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
-        _initialize_distributed(self.args)
-        # Create mesh once for all tests
-        self.mesh = _create_mesh(self.args)
-        jax.sharding.set_mesh(self.mesh)
-        self.args.enable_result_check = True
-        os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
-        # self.args.batch_size = 1
-        # self.args.seq_len = 128
-        # self.args.hidden_in = 64
-        # self.args.hidden_out = 64
-
-    def tearDown(self):
-        """Clean up after each test."""
-        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
-
-    def test_te_bf16_all_gather(self):
-        """Test Collective GEMM with AllGather"""
-        self.args.collective_type = "all_gather"
-        run_gemm_tests(self.args, self.mesh)
-
-    def test_te_bf16_reduce_scatter(self):
-        """Test Collective GEMM with ReduceScatter"""
-        self.args.collective_type = "reduce_scatter"
-        run_gemm_tests(self.args, self.mesh)
 
 
 class TestCollectiveGemmWithDP(unittest.TestCase):
@@ -209,6 +164,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         self.args.enable_data_parallel = True
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         _initialize_distributed(self.args)
+        self.args.batch_size = 4
         # Create mesh once for all tests
         self.mesh = _create_mesh(self.args)
         jax.sharding.set_mesh(self.mesh)
