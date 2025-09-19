@@ -7,20 +7,21 @@
 #ifndef TRANSFORMER_ENGINE_JAX_CGEMM_HELPER_H_
 #define TRANSFORMER_ENGINE_JAX_CGEMM_HELPER_H_
 
+#include <unistd.h>
+
 #include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <functional>
 #include <memory>
 #include <thread>
-#include <unistd.h>
 #include <unordered_map>
 
+#include "../extensions.h"
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/logging.h"
 #include "transformer_engine/comm_gemm_overlap.h"
-#include "../extensions.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -28,8 +29,6 @@ namespace jax {
 #ifndef MAX_DEVICES
 #define MAX_DEVICES 8
 #endif
-
-
 
 // Configuration singleton for CGEMM parameters
 class CgemmConfig {
@@ -55,8 +54,9 @@ class CgemmConfig {
 
   static CgemmConfig &get(bool is_initialized = true) {
     static thread_local CgemmConfig instance;
-    NVTE_CHECK(instance._initialized == is_initialized,
-               "CgemmConfig must be initialized before using it, got is_initialized=", is_initialized);
+    NVTE_CHECK(
+        instance._initialized == is_initialized,
+        "CgemmConfig must be initialized before using it, got is_initialized=", is_initialized);
     return instance;
   }
 
@@ -87,15 +87,15 @@ class CommunicatorHandler {
   int num_processes = -1;  // Total number of processes
 
   // Tensor Parallel (TP) information - calculated once during init
-  int tp_size = -1;                                         // Tensor parallel group size
-  int tp_num_domains = -1;                                  // Number of TP domains
-  int local_device_ids_within_tp_domain[MAX_DEVICES] = {-1}; // TP local device ID for each device
-  int tp_domain_ids[MAX_DEVICES] = {-1};                    // TP domain ID for each device
+  int tp_size = -1;                                           // Tensor parallel group size
+  int tp_num_domains = -1;                                    // Number of TP domains
+  int local_device_ids_within_tp_domain[MAX_DEVICES] = {-1};  // TP local device ID for each device
+  int tp_domain_ids[MAX_DEVICES] = {-1};                      // TP domain ID for each device
 
   // Device-level information (arrays for multi-device support)
   int local_device_ids_within_process[MAX_DEVICES];  // CUDA device IDs within this process
   int global_device_ids[MAX_DEVICES];                // Global device ID for each local device
-  ncclComm_t tp_comms[MAX_DEVICES];                     // TP-domain NCCL communicator for each local device
+  ncclComm_t tp_comms[MAX_DEVICES];  // TP-domain NCCL communicator for each local device
 
   // Process-level convenience accessors (NOT TP-domain specific)
   int get_global_rank() const {
@@ -125,7 +125,8 @@ class CommunicatorHandler {
         return i;
       }
     }
-    NVTE_ERROR("Current CUDA device ", current_device, " not found in local_device_ids_within_process");
+    NVTE_ERROR("Current CUDA device ", current_device,
+               " not found in local_device_ids_within_process");
   }
 
   // TP-domain-specific accessors for CommOverlapP2P
@@ -142,25 +143,23 @@ class CommunicatorHandler {
     return tp_domain_ids[device_idx];
   }
 
-  int get_tp_num_domains() const {
-    return tp_num_domains;
-  }
+  int get_tp_num_domains() const { return tp_num_domains; }
 
   static void init(int num_total_devices, int num_devices_per_process, int process_id, int tp_size);
 
  private:
   // Helper function for NCCL unique ID coordination via file system
   // Uses NVTE_JAX_NCCL_FILE_PATH environment variable for custom path, defaults to /tmp
-  ncclUniqueId coordinate_nccl_unique_id(const std::string& id_type);
+  ncclUniqueId coordinate_nccl_unique_id(const std::string &id_type);
 
  public:
-
   static CommunicatorHandler &get(bool is_initialized = true) {
     std::cout << "CommunicatorHandler is called with is_initialized=" << is_initialized
               << std::endl;
     static CommunicatorHandler instance;
     NVTE_CHECK(instance._initialize == is_initialized,
-               "CommunicatorHandler._initialize=", instance._initialize, ", is_initialized=", is_initialized);
+               "CommunicatorHandler._initialize=", instance._initialize,
+               ", is_initialized=", is_initialized);
     return instance;
   }
 

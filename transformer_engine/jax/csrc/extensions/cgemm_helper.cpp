@@ -5,53 +5,57 @@
  ************************************************************************/
 
 #include "cgemm_helper.h"
+
+#include "common/util/system.h"
 #include "nccl.h"
-#include "common/util/system.h"  
 
 namespace transformer_engine {
 namespace jax {
 
 // Helper function for NCCL unique ID coordination via file system
-ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string& id_type) {
+ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &id_type) {
   ncclUniqueId unique_id;
-  
+
   // Get all needed info from class members
   int tp_domain_id = get_tp_domain_id();
   bool is_tp_leader = (get_local_device_id_within_tp_domain() == 0);
-  
+
   pid_t pgid = getpgid(0);
-  
+
   std::string base_path = getenv<std::string>("NVTE_JAX_NCCL_FILE_PATH", "/tmp");
-  std::string id_file = base_path + "/nccl_" + id_type + "_unique_id_pgid_" + std::to_string(pgid) + "_" +
-                        std::to_string(num_total_devices) + "_" + std::to_string(tp_size) + 
+  std::string id_file = base_path + "/nccl_" + id_type + "_unique_id_pgid_" + std::to_string(pgid) +
+                        "_" + std::to_string(num_total_devices) + "_" + std::to_string(tp_size) +
                         "_domain_" + std::to_string(tp_domain_id) + ".bin";
-  
-  std::cout << "=== Using NCCL unique ID file path: " << id_file 
-            << " (base_path=" << base_path << ")" << std::endl;
+
+  std::cout << "=== Using NCCL unique ID file path: " << id_file << " (base_path=" << base_path
+            << ")" << std::endl;
 
   if (is_tp_leader) {
     NVTE_CHECK_NCCL(ncclGetUniqueId(&unique_id));
-    std::cout << "=== Process " << process_id << " (leader in " << id_type << " domain " << tp_domain_id 
-              << ") generated NCCL unique ID" << std::endl;
-    
+    std::cout << "=== Process " << process_id << " (leader in " << id_type << " domain "
+              << tp_domain_id << ") generated NCCL unique ID" << std::endl;
+
     // Write the ID to a temporary file
     std::ofstream file(id_file, std::ios::binary);
     NVTE_CHECK(file.is_open(), "Failed to create NCCL unique ID file: ", id_file);
-    file.write(reinterpret_cast<const char*>(&unique_id), sizeof(ncclUniqueId));
+    file.write(reinterpret_cast<const char *>(&unique_id), sizeof(ncclUniqueId));
     file.close();
-    std::cout << "=== Process " << process_id << " wrote " << id_type << " NCCL unique ID to file: " << id_file << std::endl;
+    std::cout << "=== Process " << process_id << " wrote " << id_type
+              << " NCCL unique ID to file: " << id_file << std::endl;
   } else {
     // Wait for the ID file to be created and read it
-    std::cout << "=== Process " << process_id << " waiting for " << id_type << " NCCL unique ID file: " << id_file << std::endl;
+    std::cout << "=== Process " << process_id << " waiting for " << id_type
+              << " NCCL unique ID file: " << id_file << std::endl;
     int attempts = 0;
     const int max_attempts = 100;
     while (attempts < max_attempts) {
       std::ifstream file(id_file, std::ios::binary);
       if (file.is_open()) {
-        file.read(reinterpret_cast<char*>(&unique_id), sizeof(ncclUniqueId));
+        file.read(reinterpret_cast<char *>(&unique_id), sizeof(ncclUniqueId));
         if (file.gcount() == sizeof(ncclUniqueId)) {
           file.close();
-          std::cout << "=== Process " << process_id << " successfully read " << id_type << " NCCL unique ID" << std::endl;
+          std::cout << "=== Process " << process_id << " successfully read " << id_type
+                    << " NCCL unique ID" << std::endl;
           break;
         }
         file.close();
@@ -66,13 +70,15 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string& i
   // Clean up the unique ID file (only the leader that created it)
   if (is_tp_leader) {
     std::remove(id_file.c_str());
-    std::cout << "=== Process " << process_id << " (" << id_type << " leader) cleaned up NCCL unique ID file: " << id_file << std::endl;
+    std::cout << "=== Process " << process_id << " (" << id_type
+              << " leader) cleaned up NCCL unique ID file: " << id_file << std::endl;
   }
 
   return unique_id;
 }
 
-void CommunicatorHandler::init(int num_total_devices, int num_devices_per_process, int process_id, int tp_size) {
+void CommunicatorHandler::init(int num_total_devices, int num_devices_per_process, int process_id,
+                               int tp_size) {
   // Validate inputs
   NVTE_CHECK(num_devices_per_process <= MAX_DEVICES,
              "num_devices_per_process exceeds MAX_DEVICES=", MAX_DEVICES,
@@ -119,15 +125,15 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
 
     // Calculate TP-related values for this device
     int global_device_id = handler.global_device_ids[local_idx];
-      if (num_devices_per_process == tp_size) {
-        // Scenario 1: Multi-device per process - TP domain = single process
-        handler.local_device_ids_within_tp_domain[local_idx] = local_idx;
-        handler.tp_domain_ids[local_idx] = process_id;
-      } else {
-        // Scenario 2: Single device per process - TP domain spans multiple processes
-        handler.local_device_ids_within_tp_domain[local_idx] = global_device_id % tp_size;
-        handler.tp_domain_ids[local_idx] = global_device_id / tp_size;
-      }
+    if (num_devices_per_process == tp_size) {
+      // Scenario 1: Multi-device per process - TP domain = single process
+      handler.local_device_ids_within_tp_domain[local_idx] = local_idx;
+      handler.tp_domain_ids[local_idx] = process_id;
+    } else {
+      // Scenario 2: Single device per process - TP domain spans multiple processes
+      handler.local_device_ids_within_tp_domain[local_idx] = global_device_id % tp_size;
+      handler.tp_domain_ids[local_idx] = global_device_id / tp_size;
+    }
 
     std::cout << "=== Process " << process_id << ", local_idx=" << local_idx
               << " -> Using JAX-assigned CUDA device=" << current_device
@@ -149,15 +155,16 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
     NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids_within_process[local_idx]));
     int tp_local_rank = handler.local_device_ids_within_tp_domain[local_idx];
     std::cout << "=== Initializing TP NCCL comm for local_idx=" << local_idx
-              << ", tp_local_rank=" << tp_local_rank
-              << ", tp_size=" << handler.tp_size << std::endl;
-    NVTE_CHECK_NCCL(ncclCommInitRank(&handler.tp_comms[local_idx], handler.tp_size, tp_id, tp_local_rank));
+              << ", tp_local_rank=" << tp_local_rank << ", tp_size=" << handler.tp_size
+              << std::endl;
+    NVTE_CHECK_NCCL(
+        ncclCommInitRank(&handler.tp_comms[local_idx], handler.tp_size, tp_id, tp_local_rank));
   }
   std::cout << "=== Ending TP-domain NCCL group initialization" << std::endl;
   NVTE_CHECK_NCCL(ncclGroupEnd());
 
-  std::cout << "=== Successfully initialized " << num_devices_per_process << " TP-domain NCCL communicators"
-            << std::endl;
+  std::cout << "=== Successfully initialized " << num_devices_per_process
+            << " TP-domain NCCL communicators" << std::endl;
 
   // Allocate device memory for barrier operations
   NVTE_CHECK_CUDA(cudaMalloc(&handler._barrier, sizeof(int)));
@@ -168,7 +175,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
 
   // Bootstrap UB via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
-  auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kFloat32, JAXX_Collective_Op::ALL_GATHER);
+  auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kFloat32,
+                                                                  JAXX_Collective_Op::ALL_GATHER);
 }
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
@@ -188,7 +196,8 @@ int GetCgemmNumMaxStreams() {
 }
 
 // Implementation of CollectiveGemmPlanRegistry::get_executor
-CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> buffer_shape, DType dtype,
+CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> buffer_shape,
+                                                          DType dtype,
                                                           JAXX_Collective_Op collective_op) {
   auto &comm_handler = CommunicatorHandler::get();
   auto &cgemm_config = CgemmConfig::get();
@@ -199,10 +208,9 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   // Include device_idx in plan cache key to ensure device-specific caching
   int64_t plan_id = 0;
   hash_combine(plan_id, buffer_shape[0], buffer_shape[1], static_cast<size_t>(dtype),
-               static_cast<int>(collective_op), comm_handler.tp_size,
-               cgemm_config.num_max_streams, cgemm_config.gemm_priority,
-               cgemm_config.comm_priority, cgemm_config.num_comm_sm, cgemm_config.use_ce,
-               cgemm_config.aggregate_ag, device_idx);
+               static_cast<int>(collective_op), comm_handler.tp_size, cgemm_config.num_max_streams,
+               cgemm_config.gemm_priority, cgemm_config.comm_priority, cgemm_config.num_comm_sm,
+               cgemm_config.use_ce, cgemm_config.aggregate_ag, device_idx);
 
   // Check if plan already exists
   auto it = plan_map.find(plan_id);
@@ -271,10 +279,11 @@ void CommunicatorHandler::nccl_barrier_impl(ExtComm /* not used*/) {
   std::cout << "=== NCCL TP barrier completed" << std::endl;
 }
 
-void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_bytes, void *input_buf,
-                         size_t input_bytes, ExtComm /*ExtComm - unused*/) {
-  std::cout << "=== NCCL TP allgather called! Process " << process_id << ", input_bytes=" << input_bytes
-            << ", output_bytes=" << output_bytes << std::endl;
+void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_bytes,
+                                              void *input_buf, size_t input_bytes,
+                                              ExtComm /*ExtComm - unused*/) {
+  std::cout << "=== NCCL TP allgather called! Process " << process_id
+            << ", input_bytes=" << input_bytes << ", output_bytes=" << output_bytes << std::endl;
   NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
 
   int device_idx = get_local_device_idx_for_current_device();
@@ -287,8 +296,7 @@ void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_by
 
   std::cout << "=== NCCL TP allgather executing within TP domain" << std::endl;
   // Use nullptr stream to let NCCL handle stream management
-  NVTE_CHECK_NCCL(
-      ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, tp_comm, nullptr));
+  NVTE_CHECK_NCCL(ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, tp_comm, nullptr));
   cudaDeviceSynchronize();
   std::cout << "=== NCCL TP allgather completed" << std::endl;
 }
@@ -304,7 +312,8 @@ CommunicatorHandler::CommunicatorHandler() : _barrier(nullptr) {
   }
 
   // Initialize function objects - these are used by userbuffers for coordination
-  allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf, size_t input_bytes, ExtComm comm) {
+  allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf,
+                          size_t input_bytes, ExtComm comm) {
     std::cout << "=== Lambda allgather function called!" << std::endl;
     this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
   };

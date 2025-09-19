@@ -135,7 +135,7 @@ def _initialize_distributed(args):
 
     # Mark as initialized
     _distributed_initialized = True
-    
+
     # Configure JAX after distributed initialization
     jax.clear_caches()
     jax.config.update(
@@ -201,38 +201,56 @@ def _create_mesh(args):
 def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor parallelism"):
     """Create common argument parser for all collective GEMM tests."""
     parser = argparse.ArgumentParser(description=description)
-    
+
     # Distributed initialization arguments
-    parser.add_argument("--coordinator-address", type=str, required=True,
-                       help="Coordinator address for distributed initialization")
-    parser.add_argument("--num-processes", type=int, required=True,
-                       help="Number of processes for distributed initialization")
-    parser.add_argument("--process-id", type=int, required=True,
-                       help="Process ID for distributed initialization")
-    parser.add_argument("--local-device-ids", type=str, default=None,
-                       help="Local device IDs for distributed initialization (comma-separated)")
-    parser.add_argument("--num-devices-per-process", type=int, default=1,
-                       help="Number of devices per process")
-    
+    parser.add_argument(
+        "--coordinator-address",
+        type=str,
+        required=True,
+        help="Coordinator address for distributed initialization",
+    )
+    parser.add_argument(
+        "--num-processes",
+        type=int,
+        required=True,
+        help="Number of processes for distributed initialization",
+    )
+    parser.add_argument(
+        "--process-id", type=int, required=True, help="Process ID for distributed initialization"
+    )
+    parser.add_argument(
+        "--local-device-ids",
+        type=str,
+        default=None,
+        help="Local device IDs for distributed initialization (comma-separated)",
+    )
+    parser.add_argument(
+        "--num-devices-per-process", type=int, default=1, help="Number of devices per process"
+    )
+
     # Test configuration arguments
-    parser.add_argument("--tensor-parallel-size", type=int, default=None,
-                       help="Tensor parallel size")
-    parser.add_argument("--batch-size", type=int, default=1,
-                       help="Batch size for testing")
-    parser.add_argument("--seq-len", type=int, default=128,
-                       help="Sequence length for testing")
-    parser.add_argument("--hidden-in", type=int, default=64,
-                       help="Input hidden dimension")
-    parser.add_argument("--hidden-out", type=int, default=64,
-                       help="Output hidden dimension")
-    parser.add_argument("--collective-type", type=str, default="all_gather",
-                       choices=["all_gather", "reduce_scatter"],
-                       help="Type of collective operation")
-    parser.add_argument("--fp8-recipe", type=str, default="DelayedScaling",
-                       help="FP8 recipe to use")
-    parser.add_argument("--enable-data-parallel", action="store_true",
-                       help="Enable data parallelism")
-    parser.add_argument("--enable-result-check", action="store_true", default=True,
-                       help="Enable result checking")
-    
+    parser.add_argument(
+        "--tensor-parallel-size", type=int, default=None, help="Tensor parallel size"
+    )
+    parser.add_argument("--batch-size", type=int, default=1, help="Batch size for testing")
+    parser.add_argument("--seq-len", type=int, default=128, help="Sequence length for testing")
+    parser.add_argument("--hidden-in", type=int, default=64, help="Input hidden dimension")
+    parser.add_argument("--hidden-out", type=int, default=64, help="Output hidden dimension")
+    parser.add_argument(
+        "--collective-type",
+        type=str,
+        default="all_gather",
+        choices=["all_gather", "reduce_scatter"],
+        help="Type of collective operation",
+    )
+    parser.add_argument(
+        "--fp8-recipe", type=str, default="DelayedScaling", help="FP8 recipe to use"
+    )
+    parser.add_argument(
+        "--enable-data-parallel", action="store_true", help="Enable data parallelism"
+    )
+    parser.add_argument(
+        "--enable-result-check", action="store_true", default=True, help="Enable result checking"
+    )
+
     return parser

@@ -12,8 +12,14 @@ from jax.sharding import PartitionSpec, NamedSharding
 import flax
 
 from common import (
-    assert_allclose, _initialize_distributed, _get_dp_and_tp_sizes, _create_mesh,
-    DP_AXIS, TPSP_AXIS, PARAMS_KEY, cgemm_parser
+    assert_allclose,
+    _initialize_distributed,
+    _get_dp_and_tp_sizes,
+    _create_mesh,
+    DP_AXIS,
+    TPSP_AXIS,
+    PARAMS_KEY,
+    cgemm_parser,
 )
 
 from transformer_engine.jax.dense import dense
@@ -26,7 +32,6 @@ from transformer_engine.jax.cpp_extensions.gemm import (
 )
 from transformer_engine.jax.sharding import MeshResource
 import transformer_engine.jax.flax as te_flax
-
 
 
 def _get_logical_axes(collective_op):
@@ -49,7 +54,6 @@ def _get_operand_sharding(mesh, collective_op):
     weight_sharding = NamedSharding(mesh, PartitionSpec(*weight_axes))
     bias_sharding = NamedSharding(mesh, PartitionSpec(*bias_axes))
     return x_sharding, weight_sharding, bias_sharding
-
 
 
 def _mean_dense(x, weight, bias, input_axes, weight_axes, output_axes, collective_op_set):
@@ -163,7 +167,9 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     def setUp(self):
         """Set up test environment for pytest execution."""
         # Create args object with distributed parameters from pytest fixtures
-        self.args = cgemm_parser("Collective Dense Gradient test on multi-GPU with tensor parallelism").parse_args()
+        self.args = cgemm_parser(
+            "Collective Dense Gradient test on multi-GPU with tensor parallelism"
+        ).parse_args()
         self.args.coordinator_address = self.coordinator_address
         self.args.num_processes = self.num_processes
         self.args.process_id = self.process_id
@@ -198,7 +204,9 @@ class TestCollectiveDenseGradientWithDP(unittest.TestCase):
     def setUp(self):
         """Set up test environment for pytest execution."""
         # Create args object with distributed parameters from pytest fixtures
-        self.args = cgemm_parser("Collective Dense Gradient test on multi-GPU with tensor parallelism").parse_args()
+        self.args = cgemm_parser(
+            "Collective Dense Gradient test on multi-GPU with tensor parallelism"
+        ).parse_args()
         self.args.coordinator_address = self.coordinator_address
         self.args.num_processes = self.num_processes
         self.args.process_id = self.process_id
@@ -247,6 +255,8 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    args = cgemm_parser("Collective Dense Gradient test on multi-GPU with tensor parallelism").parse_args()
+    args = cgemm_parser(
+        "Collective Dense Gradient test on multi-GPU with tensor parallelism"
+    ).parse_args()
     _initialize_distributed(args)
     run_dense_grad_tests(args, mesh=None)

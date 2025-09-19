@@ -565,8 +565,14 @@ class GemmPrimitive(BasePrimitive):
         if collective_op.is_reduce_scatter and not transpose_batch_sequence and not is_outer:
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             original_shape = lhs.shape
-            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, f"Original_shape[0]={original_shape[0]} is not divisible by dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
-            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, f"Original_shape[1]={original_shape[1]} is not divisible by tpsp_axis_size()={tpsp_axis_size()}"
+            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+                f"Original_shape[0]={original_shape[0]} is not divisible by"
+                f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+            )
+            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
+                f"Original_shape[1]={original_shape[1]} is not divisible by"
+                f" tpsp_axis_size()={tpsp_axis_size()}"
+            )
             reshaped = lhs.reshape(
                 dp_or_fsdp_axis_size(),
                 int(original_shape[0] / dp_or_fsdp_axis_size()),
@@ -601,8 +607,14 @@ class GemmPrimitive(BasePrimitive):
             assert sequence_dim == 1, f"Invalid sequence_dim. Got sequence_dim={sequence_dim}"
             # TODO: Make sure it works with DP + batch_size_per_process = 1
             original_shape = output.shape
-            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, f"Original_shape[0]={original_shape[0]} is not divisible by dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
-            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, f"Original_shape[1]={original_shape[1]} is not divisible by tpsp_axis_size()={tpsp_axis_size()}"
+            assert original_shape[0] % dp_or_fsdp_axis_size() == 0 or original_shape[0] == 1, (
+                f"Original_shape[0]={original_shape[0]} is not divisible by"
+                f" dp_or_fsdp_axis_size()={dp_or_fsdp_axis_size()}"
+            )
+            assert original_shape[1] % tpsp_axis_size() == 0 or original_shape[1] == 1, (
+                f"Original_shape[1]={original_shape[1]} is not divisible by"
+                f" tpsp_axis_size()={tpsp_axis_size()}"
+            )
             reshaped = output.reshape(
                 tpsp_axis_size(),
                 dp_or_fsdp_axis_size(),
@@ -697,7 +709,7 @@ class GemmPrimitive(BasePrimitive):
                 fuse_gelu=fuse_gelu,
                 grad=grad,
                 use_split_accumulator=use_split_accumulator,
-                collective_op=collective_op
+                collective_op=collective_op,
             ),
             (out_bdims, bias_bdims, pre_gelu_bdims),
         )
@@ -868,7 +880,7 @@ class GemmPrimitive(BasePrimitive):
         (_, (out_specs, dbias_specs, pre_gelu_specs), *_) = (
             GemmPrimitive._parse_operand_output_specs(
                 arg_infos, contracting_dims, transpose_batch_sequence, collective_op
-             )
+            )
         )
         out_sharding = NamedSharding(mesh, PartitionSpec(*out_specs))
 
@@ -909,7 +921,10 @@ class GemmPrimitive(BasePrimitive):
             reduce_spec,
             inferred_sequence_dim,
         ) = GemmPrimitive._parse_operand_output_specs(
-            arg_infos, contracting_dims, transpose_batch_sequence, collective_op,
+            arg_infos,
+            contracting_dims,
+            transpose_batch_sequence,
+            collective_op,
         )
 
         # Block scale inverses match their operands, but tensor scale inverses are unsharded.

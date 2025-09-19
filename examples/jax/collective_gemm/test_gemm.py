@@ -22,8 +22,14 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec, NamedSharding
 
 from common import (
-    assert_allclose, _initialize_distributed, _get_dp_and_tp_sizes, _create_mesh,
-    DP_AXIS, TPSP_AXIS, PARAMS_KEY, cgemm_parser
+    assert_allclose,
+    _initialize_distributed,
+    _get_dp_and_tp_sizes,
+    _create_mesh,
+    DP_AXIS,
+    TPSP_AXIS,
+    PARAMS_KEY,
+    cgemm_parser,
 )
 
 import transformer_engine.jax.cpp_extensions as tex

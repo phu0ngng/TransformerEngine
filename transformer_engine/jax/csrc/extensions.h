@@ -121,7 +121,6 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 
-
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmHandler);
 

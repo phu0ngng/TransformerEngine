@@ -12,8 +12,14 @@ from jax.sharding import PartitionSpec, NamedSharding
 import flax
 
 from common import (
-    assert_allclose, _initialize_distributed, _get_dp_and_tp_sizes, _create_mesh,
-    DP_AXIS, TPSP_AXIS, PARAMS_KEY, cgemm_parser
+    assert_allclose,
+    _initialize_distributed,
+    _get_dp_and_tp_sizes,
+    _create_mesh,
+    DP_AXIS,
+    TPSP_AXIS,
+    PARAMS_KEY,
+    cgemm_parser,
 )
 
 from transformer_engine.jax.layernorm_mlp import layernorm_mlp
@@ -217,8 +223,6 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
             assert_allclose(ref_grad, gathered_grad, dtype=jnp.bfloat16)
 
 
-
-
 class TestCollectiveDenseGradient(unittest.TestCase):
     """Collective Dense Gradient unittests"""
 
@@ -228,7 +232,9 @@ class TestCollectiveDenseGradient(unittest.TestCase):
     def setUp(self):
         """Set up test environment for pytest execution."""
         # Create args object with distributed parameters from pytest fixtures
-        self.args = cgemm_parser("Collective LayerNorm MLP Gradient test on multi-GPU with tensor parallelism").parse_args()
+        self.args = cgemm_parser(
+            "Collective LayerNorm MLP Gradient test on multi-GPU with tensor parallelism"
+        ).parse_args()
         self.args.coordinator_address = self.coordinator_address
         self.args.num_processes = self.num_processes
         self.args.process_id = self.process_id
@@ -262,7 +268,9 @@ class TestCollectiveDenseGradientWithDP(unittest.TestCase):
     def setUp(self):
         """Set up test environment for pytest execution."""
         # Create args object with distributed parameters from pytest fixtures
-        self.args = cgemm_parser("Collective LayerNorm MLP Gradient test on multi-GPU with tensor parallelism").parse_args()
+        self.args = cgemm_parser(
+            "Collective LayerNorm MLP Gradient test on multi-GPU with tensor parallelism"
+        ).parse_args()
         self.args.coordinator_address = self.coordinator_address
         self.args.num_processes = self.num_processes
         self.args.process_id = self.process_id
@@ -305,6 +313,8 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    args = cgemm_parser("Collective LayerNorm MLP Gradient test on multi-GPU with tensor parallelism").parse_args()
+    args = cgemm_parser(
+        "Collective LayerNorm MLP Gradient test on multi-GPU with tensor parallelism"
+    ).parse_args()
     _initialize_distributed(args)
     run_layernorm_mlp_grad_tests(args, mesh=None)

@@ -12,6 +12,7 @@
 #include <tuple>
 
 #include "../extensions.h"
+#include "cgemm_helper.h"
 #include "common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/string.h"
@@ -20,7 +21,6 @@
 #include "nccl.h"
 #include "transformer_engine/swizzle.h"
 #include "xla/ffi/api/c_api.h"
-#include "cgemm_helper.h"
 
 #define MXFP8_BLOCK_SIZE 32
 
@@ -71,7 +71,6 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
 
   return std::make_tuple(std::move(input), input_shape);
 }
-
 
 Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                                  Buffer_Type rhs_scale_inv, Buffer_Type bias,
@@ -198,8 +197,9 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
 
   // Launch TE/common kernel with swapped LHS/RHS for cuBLAS column-major order
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
-  std::cout << "=== GemmFFI: About to execute GEMM, collective_op=" << static_cast<int>(collective_op) << std::endl;
-  
+  std::cout << "=== GemmFFI: About to execute GEMM, collective_op="
+            << static_cast<int>(collective_op) << std::endl;
+
   if (collective_op == JAXX_Collective_Op::NONE) {
     std::cout << "=== GemmFFI: Taking regular GEMM path (no collective)" << std::endl;
     auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
@@ -228,7 +228,7 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
       buffer_shape[1] = out_shape[1];
       out_shape[0] = out_shape[0] / comm_handler.tp_size;
     }
-    std::cout << "=== GemmFFI: Getting collective executor, buffer_shape=[" << buffer_shape[0] 
+    std::cout << "=== GemmFFI: Getting collective executor, buffer_shape=[" << buffer_shape[0]
               << "," << buffer_shape[1] << "]" << std::endl;
     auto executor = CollectiveGemmPlanRegistry::getInstance().get_executor(
         buffer_shape, buffer_dtype, collective_op);
