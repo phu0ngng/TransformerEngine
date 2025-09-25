@@ -761,7 +761,7 @@ void nvte_cublas_gemm_v2(int transa, int transb, float *alpha, const NVTETensor 
   // Data tensors
   const Tensor *A_tensor = convertNVTETensorCheck(A);
   const Tensor *B_tensor = convertNVTETensorCheck(B);
-  const Tensor *C_tensor = convertNVTETensor(C);
+  const Tensor *C_tensor = convertNVTETensorCheck(C);
   Tensor *D_tensor = convertNVTETensorCheck(D);
   Tensor *workspace_tensor = convertNVTETensor(workspace);
   NVTE_CHECK(C_tensor == D_tensor,
