@@ -284,7 +284,7 @@ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublas
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
-                 void *alpha, void *beta, bool use_split_accumulator, int math_sm_count,
+                 const void *alpha, const void *beta, bool use_split_accumulator, int math_sm_count,
                  int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
                  cudaStream_t stream) {
   // Tensor dims in row-major order
@@ -333,7 +333,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                workspaceSize, " bytes.");
     workspaceSize = (workspaceSize / 4) * 4 - 4;  // Align to 4 bytes and remove last 4 bytes
     uint8_t *workspace_ptr = reinterpret_cast<uint8_t *>(workspace);
-    float *alpha_ptr = reinterpret_cast<float *>(alpha);
+    float provided_alpha = *reinterpret_cast<const float *>(alpha);
     float *D_tensor_scale_inv_ptr = reinterpret_cast<float *>(&workspace_ptr[workspaceSize]);
     TensorWrapper D_tensor_scale_inv(D_tensor_scale_inv_ptr, std::vector<size_t>{1},
                                      DType::kFloat32);
@@ -341,11 +341,11 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     // 2. Multiply the tensor scale inv with the provided alpha
     // 3. Write the result back to the D_tensor_scale_inv_ptr
     nvte_nvfp4_compute_per_tensor_scale(inputA->nvte_tensor, transa, inputB->nvte_tensor, !transb,
-                                        *alpha_ptr, D_tensor_scale_inv.data(), stream);
+                                        provided_alpha, D_tensor_scale_inv.data(), stream);
     // Use this D_tensor_scale_inv_ptr as the alpha in the MatMul
     alpha = D_tensor_scale_inv_ptr;
 
-    float beta_val = *reinterpret_cast<float *>(beta);
+    float beta_val = *reinterpret_cast<const float *>(beta);
     if (beta_val == 0) {
       beta = GetScalarZero();
     } else if (beta_val == 1) {
@@ -737,8 +737,8 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
   Tensor *wspace = convertNVTETensor(workspace);
 
   // Scales
-  float alpha = 1;
-  float beta = accumulate ? 1 : 0;
+  const float alpha = 1;
+  const float beta = accumulate ? 1 : 0;
 
   // Check for NVFP4
   // TODO Remove once alpha scale logic is moved into cublas_gemm function
@@ -752,8 +752,8 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
               &alpha, &beta, use_split_accumulator, math_sm_count, 0, 0, false, nullptr, stream);
 }
 
-void nvte_cublas_gemm_v2(int transa, int transb, float *alpha, const NVTETensor A,
-                         const NVTETensor B, float *beta, const NVTETensor C, NVTETensor D,
+void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTETensor A,
+                         const NVTETensor B, const float *beta, const NVTETensor C, NVTETensor D,
                          NVTETensor workspace, NVTEMatmulConfig config, cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_gemm_v2);
   using namespace transformer_engine;
@@ -918,8 +918,8 @@ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETens
     config.sm_count = math_sm_count;
 
     // Launch GEMM
-    float alpha = 1.f;
-    float beta = accumulate ? 1.f : 0.f;
+    const float alpha = 1.f;
+    const float beta = accumulate ? 1.f : 0.f;
     nvte_cublas_gemm_v2(transa, transb, &alpha, A[i], B[i], &beta, D[i], D[i],
                         workspace[i % num_streams], &config,
                         detail::get_compute_stream(i % num_streams));
