@@ -221,12 +221,12 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
     parser.add_argument(
         "--tensor-parallel-size", type=int, default=None, help="Tensor parallel size"
     )
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for testing")
+    parser.add_argument("--batch-size", type=int, default=4, help="Batch size for testing")
     # parser.add_argument("--seq-len", type=int, default=4096, help="Sequence length for testing")
     parser.add_argument("--seq-len", type=int, default=8192, help="Sequence length for testing")
     parser.add_argument("--hidden-in", type=int, default=8192, help="Input hidden dimension")
     # parser.add_argument("--hidden-out", type=int, default=14336, help="Output hidden dimension")
-    parser.add_argument("--hidden-out", type=int, default=32768, help="Output hidden dimension")
+    parser.add_argument("--hidden-out", type=int, default=16384, help="Output hidden dimension")
     parser.add_argument(
         "--collective-type",
         type=str,

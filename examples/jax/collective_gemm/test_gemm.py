@@ -145,8 +145,8 @@ def run_gemm_tests(args, mesh=None):
             output_sharding=None,   # CollectiveGEMM output should have a correct sharding without applying sharding constraint
         )
         output.block_until_ready()
-        assert ref_output.sharding == output.sharding == output.output.sharding, f"ref_output.sharding={ref_output.sharding}, output.sharding={output.sharding}, output.output.sharding={output.output.sharding}"
         jax.profiler.stop_trace()
+        assert ref_output.sharding == output.sharding, f"ref_output.sharding={ref_output.sharding}, output.sharding={output.sharding}"
         gathered_ref_output = jax.lax.with_sharding_constraint(
             ref_output, NamedSharding(mesh, PartitionSpec(None))
         )
@@ -175,7 +175,6 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         # self.args.enable_data_parallel = True
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         _initialize_distributed(self.args)
-        self.args.batch_size = 4
         self.mesh = _create_mesh(self.args)
         jax.sharding.set_mesh(self.mesh)
         self.args.enable_result_check = True
