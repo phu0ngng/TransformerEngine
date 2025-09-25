@@ -284,7 +284,7 @@ using cublasHandleManager = detail::HandleManager<cublasLtHandle_t, CreateCublas
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
-                 const void *alpha, const void *beta, bool use_split_accumulator, int math_sm_count,
+                 void *alpha, void *beta, bool use_split_accumulator, int math_sm_count,
                  int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
                  cudaStream_t stream) {
   // Tensor dims in row-major order
@@ -324,6 +324,36 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const bool gelu = pre_gelu_out != nullptr;
   const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
   const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
+
+  // Tensor scaling factors for NVFP4
+  if (use_fp4 && inputA->amax.dptr && inputB->amax.dptr) {
+    // Include tensor scales in alpha for NVFP4 GEMMs is amax-s are provided
+    // Note: Store alpha in user-provided workspace and store beta in the device constant memory.
+    NVTE_CHECK(workspaceSize >= 4, "NVFP4 GEMM requires at least 4 byte workspace, but got ",
+               workspaceSize, " bytes.");
+    workspaceSize = (workspaceSize / 4) * 4 - 4;  // Align to 4 bytes and remove last 4 bytes
+    uint8_t *workspace_ptr = reinterpret_cast<uint8_t *>(workspace);
+    float *alpha_ptr = reinterpret_cast<float *>(alpha);
+    float *D_tensor_scale_inv_ptr = reinterpret_cast<float *>(&workspace_ptr[workspaceSize]);
+    TensorWrapper D_tensor_scale_inv(D_tensor_scale_inv_ptr, std::vector<size_t>{1},
+                                     DType::kFloat32);
+    // 1. Calculate tensor scale inv for D from the input A.amax and B.amax
+    // 2. Multiply the tensor scale inv with provided alpha
+    // 3. Write the result back to the D_tensor_scale_inv_ptr
+    nvte_nvfp4_compute_per_tensor_scale(inputA->nvte_tensor, transa, inputB->nvte_tensor, !transb,
+                                        *alpha_ptr, D_tensor_scale_inv.data(), stream);
+    // Use this D_tensor_scale_inv_ptr as the alpha in the MatMul
+    alpha = D_tensor_scale_inv_ptr;
+
+    float beta_val = *reinterpret_cast<float *>(beta);
+    if (beta_val == 0) {
+      beta = GetScalarZero();
+    } else if (beta_val == 1) {
+      beta = GetScalarOne();
+    } else {
+      NVTE_ERROR("NVFP4 GEMM requires beta=0 or beta=1, but got beta=", beta_val, ".");
+    }
+  }
 
   const cudaDataType_t A_type = get_cuda_dtype(param.Atype);
   const cudaDataType_t B_type = get_cuda_dtype(param.Btype);
@@ -707,8 +737,8 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
   Tensor *wspace = convertNVTETensor(workspace);
 
   // Scales
-  const float alpha = 1;
-  const float beta = accumulate ? 1 : 0;
+  float alpha = 1;
+  float beta = accumulate ? 1 : 0;
 
   // Check for NVFP4
   // TODO Remove once alpha scale logic is moved into cublas_gemm function
@@ -722,8 +752,8 @@ void nvte_cublas_gemm(const NVTETensor A, const NVTETensor B, NVTETensor D, cons
               &alpha, &beta, use_split_accumulator, math_sm_count, 0, 0, false, nullptr, stream);
 }
 
-void nvte_cublas_gemm_v2(int transa, int transb, float alpha, const NVTETensor A,
-                         const NVTETensor B, float beta, const NVTETensor C, NVTETensor D,
+void nvte_cublas_gemm_v2(int transa, int transb, float *alpha, const NVTETensor A,
+                         const NVTETensor B, float *beta, const NVTETensor C, NVTETensor D,
                          NVTETensor workspace, NVTEMatmulConfig config, cudaStream_t stream) {
   NVTE_API_CALL(nvte_cublas_gemm_v2);
   using namespace transformer_engine;
@@ -733,23 +763,9 @@ void nvte_cublas_gemm_v2(int transa, int transb, float alpha, const NVTETensor A
   const Tensor *B_tensor = convertNVTETensorCheck(B);
   const Tensor *C_tensor = convertNVTETensor(C);
   Tensor *D_tensor = convertNVTETensorCheck(D);
-  if (beta == 0 && C_tensor == nullptr) {
-    C_tensor = D_tensor;
-  }
-  NVTE_CHECK(C_tensor != nullptr, "Called nvte_cublas_gemm_v2 with beta=", beta,
-             ", but no C tensor was provided.");
+  Tensor *workspace_tensor = convertNVTETensor(workspace);
   NVTE_CHECK(C_tensor == D_tensor,
              "Currently nvte_cublas_gemm_v2 does not support different C and D tensors.");
-
-  // Workspace
-  uint8_t *workspace_ptr = nullptr;
-  size_t workspace_size = 0;
-  Tensor *workspace_tensor = convertNVTETensor(workspace);
-  if (workspace_tensor != nullptr) {
-    workspace_ptr = reinterpret_cast<uint8_t *>(workspace_tensor->data.dptr);
-    workspace_size =
-        get_buffer_size_bytes(workspace_tensor->data.numel(), workspace_tensor->data.dtype);
-  }
 
   // Additional config
   MatmulConfig config_;
@@ -781,33 +797,13 @@ void nvte_cublas_gemm_v2(int transa, int transb, float alpha, const NVTETensor A
     epilogue_aux_tensor = convertNVTETensor(config_.epilogue_aux_tensor);
   }
 
-  // Scaling factors
-  float *alpha_ptr = &alpha;
-  float *beta_ptr = &beta;
-  if (is_nvfp_scaling(A_tensor->scaling_mode) || is_nvfp_scaling(B_tensor->scaling_mode)) {
-    // Include tensor scales in alpha for NVFP4 GEMMs
-    // Note: Store alpha in user-provided workspace and store beta in
-    // device constant memory.
-    // TODO Move into cublas_gemm
-    NVTE_CHECK(workspace_size >= 4, "NVFP4 GEMM requires at least 4 byte workspace, but got ",
-               workspace_size, " bytes.");
-    workspace_size = (workspace_size / 4) * 4 - 4;  // Align to 4 bytes and remove last 4 bytes
-    alpha_ptr = reinterpret_cast<float *>(&workspace_ptr[workspace_size]);
-    TensorWrapper alpha_tensor(alpha_ptr, std::vector<size_t>{1}, DType::kFloat32);
-    nvte_nvfp4_compute_per_tensor_scale(A, transa, B, !transb, alpha, alpha_tensor.data(), stream);
-    if (beta == 0) {
-      beta_ptr = GetScalarZero();
-    } else if (beta == 1) {
-      beta_ptr = GetScalarOne();
-    } else {
-      NVTE_ERROR("NVFP4 GEMM requires beta=0 or beta=1, but got beta=", beta, ".");
-    }
-  }
+  size_t workspace_size_bytes =
+      get_buffer_size_bytes(workspace_tensor->data.numel(), workspace_tensor->data.dtype);
 
   // Launch GEMM
   cublas_gemm(A_tensor, B_tensor, D_tensor, epilogue_bias_tensor, epilogue_aux_tensor,
               transa ? CUBLAS_OP_T : CUBLAS_OP_N, transb ? CUBLAS_OP_T : CUBLAS_OP_N,
-              with_grad_epilogue, workspace_ptr, workspace_size, alpha_ptr, beta_ptr,
+              with_grad_epilogue, workspace_tensor->data.dptr, workspace_size_bytes, alpha, beta,
               config_.use_split_accumulator, config_.sm_count, 0, 0, false, nullptr, stream);
 }
 
@@ -922,7 +918,9 @@ void multi_stream_cublas_gemm(const NVTETensor *A, const NVTETensor *B, NVTETens
     config.sm_count = math_sm_count;
 
     // Launch GEMM
-    nvte_cublas_gemm_v2(transa, transb, 1.f, A[i], B[i], accumulate ? 1.f : 0.f, D[i], D[i],
+    float alpha = 1.f;
+    float beta = accumulate ? 1.f : 0.f;
+    nvte_cublas_gemm_v2(transa, transb, &alpha, A[i], B[i], &beta, D[i], D[i],
                         workspace[i % num_streams], &config,
                         detail::get_compute_stream(i % num_streams));
   }
