@@ -327,7 +327,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
   // Tensor scaling factors for NVFP4
   if (use_fp4 && inputA->amax.dptr && inputB->amax.dptr) {
-    // Include tensor scales in alpha for NVFP4 GEMMs is amax-s are provided
+    // Include tensor scales in alpha for NVFP4 GEMMs when amaxs are provided
     // Note: Store alpha in user-provided workspace and store beta in the device constant memory.
     NVTE_CHECK(workspaceSize >= 4, "NVFP4 GEMM requires at least 4 byte workspace, but got ",
                workspaceSize, " bytes.");
@@ -338,7 +338,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     TensorWrapper D_tensor_scale_inv(D_tensor_scale_inv_ptr, std::vector<size_t>{1},
                                      DType::kFloat32);
     // 1. Calculate tensor scale inv for D from the input A.amax and B.amax
-    // 2. Multiply the tensor scale inv with provided alpha
+    // 2. Multiply the tensor scale inv with the provided alpha
     // 3. Write the result back to the D_tensor_scale_inv_ptr
     nvte_nvfp4_compute_per_tensor_scale(inputA->nvte_tensor, transa, inputB->nvte_tensor, !transb,
                                         *alpha_ptr, D_tensor_scale_inv.data(), stream);
