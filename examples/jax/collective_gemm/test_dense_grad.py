@@ -115,6 +115,7 @@ def run_dense_grad_tests(args, mesh=None):
             bias_sharded = jax.device_put(bias, bias_sharding)
 
             input_axes, weight_axes, _, output_axes = _get_logical_axes(collective_op)
+            jax.profiler.start_trace(f"trace/dense_{args.collective_type}_{args.process_id}")
             ref_output, ref_grads = _value_and_grad_dense(
                 x_sharded,
                 weight_sharded,
@@ -124,6 +125,9 @@ def run_dense_grad_tests(args, mesh=None):
                 output_axes,
                 noop_collective_op_set,
             )
+            ref_output.block_until_ready()
+            jax.profiler.stop_trace()
+            jax.profiler.start_trace(f"trace/dense_cgemm_{args.collective_type}_{args.process_id}")
             output, sharded_grads = _value_and_grad_dense(
                 x_sharded,
                 weight_sharded,
@@ -133,6 +137,8 @@ def run_dense_grad_tests(args, mesh=None):
                 output_axes,
                 collective_op_set,
             )
+            output.block_until_ready()
+            jax.profiler.stop_trace()
         jax.block_until_ready(ref_output)
         jax.block_until_ready(output)
         gathered_grads = []
@@ -165,7 +171,7 @@ class TestCollectiveDenseGradient(unittest.TestCase):
         self.args.process_id = self.process_id
         self.args.local_device_ids = self.local_device_ids
         self.args.num_devices_per_process = self.num_devices_per_process
-        self.args.enable_data_parallel = True
+        # self.args.enable_data_parallel = True
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         self.args.batch_size = 4
         _initialize_distributed(self.args)

@@ -171,6 +171,7 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
             bias_2_sharded = jax.device_put(bias_2, bias_2_sharding)
 
             input_1_axes, weight_1_axes, _, input_2_axes, weight_2_axes, _ = _get_logical_axes()
+            jax.profiler.start_trace(f"trace/mlp_{args.process_id}")
             ref_output, ref_grads = _value_and_grad_layernorm_mlp(
                 x_sharded,
                 weight_1_sharded,
@@ -184,6 +185,9 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
                 weight_2_axes,
                 noop_collective_op_sets,
             )
+            ref_output.block_until_ready()
+            jax.profiler.stop_trace()
+            jax.profiler.start_trace(f"trace/mlp_cgemm_{args.process_id}")
             output, sharded_grads = _value_and_grad_layernorm_mlp(
                 x_sharded,
                 weight_1_sharded,
@@ -197,6 +201,8 @@ def run_layernorm_mlp_grad_tests(args, mesh=None):
                 weight_2_axes,
                 collective_op_sets,
             )
+            output.block_until_ready()
+            jax.profiler.stop_trace()
         jax.block_until_ready(ref_output)
         jax.block_until_ready(output)
         gathered_grads = []
@@ -229,7 +235,7 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
         self.args.process_id = self.process_id
         self.args.local_device_ids = self.local_device_ids
         self.args.num_devices_per_process = self.num_devices_per_process
-        self.args.enable_data_parallel = True
+        # self.args.enable_data_parallel = True
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         _initialize_distributed(self.args)
         # Create mesh once for all tests

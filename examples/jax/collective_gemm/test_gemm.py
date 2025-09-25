@@ -118,6 +118,7 @@ def run_gemm_tests(args, mesh=None):
         weight_sharded = jax.device_put(weight, weight_sharding)
         bias_sharded = jax.device_put(bias, bias_sharding)
 
+        jax.profiler.start_trace(f"trace/gemm_{args.collective_type}_{args.process_id}")
         ref_output = _jitted_cgemm(
             x_sharded,
             weight_sharded,
@@ -125,6 +126,10 @@ def run_gemm_tests(args, mesh=None):
             contracting_dims=((2,), (0,)),
             collective_op=CollectiveOp.NONE,
         )
+        ref_output.block_until_ready()
+        jax.profiler.stop_trace()
+
+        jax.profiler.start_trace(f"trace/cgemm_{args.collective_type}_{args.process_id}")
         output = _jitted_cgemm(
             x_sharded,
             weight_sharded,
@@ -132,6 +137,8 @@ def run_gemm_tests(args, mesh=None):
             contracting_dims=((2,), (0,)),
             collective_op=collective_op,
         )
+        output.block_until_ready()
+        jax.profiler.stop_trace()
         gathered_ref_output = jax.lax.with_sharding_constraint(
             ref_output, NamedSharding(mesh, PartitionSpec(None))
         )
@@ -157,7 +164,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         self.args.process_id = self.process_id
         self.args.local_device_ids = self.local_device_ids
         self.args.num_devices_per_process = self.num_devices_per_process
-        self.args.enable_data_parallel = True
+        # self.args.enable_data_parallel = True
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         _initialize_distributed(self.args)
         self.args.batch_size = 4
