@@ -56,6 +56,11 @@ inline float *GetScalarZero() {
   return dev_ptr;
 }
 
+__global__ __launch_bounds__(1)
+void set_float_kernel(float *ptr, float val) {
+  *ptr = val;
+}
+
 uint32_t _getAlignment(uintptr_t address) {
   // alignment are in bytes
   uint32_t alignment = 256;
@@ -325,33 +330,42 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
   const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
 
-  // Tensor scaling factors for NVFP4
+  // Update scaling factors with NVFP4 tensor scales
   if (use_fp4 && inputA->amax.dptr && inputB->amax.dptr) {
-    // Include tensor scales in alpha for NVFP4 GEMMs when amaxs are provided
-    // Note: Store alpha in user-provided workspace and store beta in the device constant memory.
-    NVTE_CHECK(workspaceSize >= 4, "NVFP4 GEMM requires at least 4 byte workspace, but got ",
-               workspaceSize, " bytes.");
-    workspaceSize = (workspaceSize / 4) * 4 - 4;  // Align to 4 bytes and remove last 4 bytes
+    // Reserve some workspace for alpha scale
+    NVTE_CHECK(workspaceSize >= 4,
+               "NVFP4 GEMM requires at least 4 byte workspace for alpha scale, but only has ",
+               workspaceSize, " bytes remaining.");
+    workspaceSize = (workspaceSize / 4) * 4 - 4;  // Remove last 4 aligned bytes
     uint8_t *workspace_ptr = reinterpret_cast<uint8_t *>(workspace);
-    float provided_alpha = *reinterpret_cast<const float *>(alpha);
-    float *D_tensor_scale_inv_ptr = reinterpret_cast<float *>(&workspace_ptr[workspaceSize]);
-    TensorWrapper D_tensor_scale_inv(D_tensor_scale_inv_ptr, std::vector<size_t>{1},
-                                     DType::kFloat32);
-    // 1. Calculate tensor scale inv for D from the input A.amax and B.amax
-    // 2. Multiply the tensor scale inv with the provided alpha
-    // 3. Write the result back to the D_tensor_scale_inv_ptr
-    nvte_nvfp4_compute_per_tensor_scale(inputA->nvte_tensor, transa, inputB->nvte_tensor, !transb,
-                                        provided_alpha, D_tensor_scale_inv.data(), stream);
-    // Use this D_tensor_scale_inv_ptr as the alpha in the MatMul
-    alpha = D_tensor_scale_inv_ptr;
+    float *new_alpha_ptr = reinterpret_cast<float *>(&workspace_ptr[workspaceSize]);
 
-    float beta_val = *reinterpret_cast<const float *>(beta);
-    if (beta_val == 0) {
-      beta = GetScalarZero();
-    } else if (beta_val == 1) {
-      beta = GetScalarOne();
+    // Update alpha scale on device
+    // Note: Compute NVFP4 tensor scales based on amaxes and then
+    // divide from alpha scale. This way we only need to apply NVFP4
+    // tensor scales in matmul output, instead of in matmul inputs.
+    float old_alpha = *reinterpret_cast<const float *>(alpha);  // Assumed to be on CPU
+    TensorWrapper new_alpha_tensor(new_alpha_ptr, std::vector<size_t>{1}, DType::kFloat32);
+    nvte_nvfp4_compute_per_tensor_scale(inputA->nvte_tensor, transa, inputB->nvte_tensor, !transb,
+                                        old_alpha, new_alpha_tensor.data(), stream);
+    alpha = new_alpha_ptr;
+
+    // Make sure beta scale is on device
+    float old_beta = *reinterpret_cast<const float *>(beta);  // Assumed to be on CPU
+    if (old_beta == 0) {
+      beta = GetScalarZero();  // Device constant memory
+    } else if (old_beta == 1) {
+      beta = GetScalarOne();  // Device constant memory
     } else {
-      NVTE_ERROR("NVFP4 GEMM requires beta=0 or beta=1, but got beta=", beta_val, ".");
+      // Move beta to workspace
+      NVTE_CHECK(workspaceSize >= 4,
+                 "NVFP4 GEMM requires at least 4 byte workspace for beta scale, but only has ",
+                 workspaceSize, " bytes remaining.");
+      workspaceSize = (workspaceSize / 4) * 4 - 4;  // Remove last 4 aligned bytes
+      float *new_beta_ptr = reinterpret_cast<float *>(&workspace_ptr[workspaceSize]);
+      set_float_kernel<<<1, 1, 0, stream>>>(new_beta_ptr, old_beta);
+      NVTE_CHECK_CUDA(cudaGetLastError());
+      beta = new_beta_ptr;
     }
   }
 
