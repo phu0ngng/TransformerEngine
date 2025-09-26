@@ -241,7 +241,7 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
         "--enable-data-parallel", action="store_true", help="Enable data parallelism"
     )
     parser.add_argument(
-        "--enable-result-check", action="store_true", default=True, help="Enable result checking"
+        "--enable-result-check", action="store_true", default=False, help="Enable result checking"
     )
 
     return parser

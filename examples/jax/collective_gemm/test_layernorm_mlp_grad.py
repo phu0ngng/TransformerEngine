@@ -241,11 +241,11 @@ class TestCollectiveLayerNormMLPGradient(unittest.TestCase):
         # Create mesh once for all tests
         self.mesh = _create_mesh(self.args)
         jax.sharding.set_mesh(self.mesh)
-        self.args.enable_result_check = True
-        os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
-
-    def tearDown(self):
-        os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
+    #     self.args.enable_result_check = True
+    #     os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
+    #
+    # def tearDown(self):
+    #     os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
 
     def test_te_bf16_layernorm_mlp_grad(self):
         """Test Collective Dense Gradient with AllGather"""

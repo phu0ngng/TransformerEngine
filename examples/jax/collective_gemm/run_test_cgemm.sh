@@ -22,8 +22,8 @@ fi
 # Define the test files to run
 TEST_FILES=(
 "test_gemm.py"
-# "test_dense_grad.py"
-# "test_layernorm_mlp_grad.py"
+"test_dense_grad.py"
+"test_layernorm_mlp_grad.py"
 )
 
 echo
@@ -68,7 +68,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
     if [ $i -eq 0 ]; then
       # For process 0: show live output AND save to log file using tee
       echo "=== Live output from process 0 ==="
-      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
+      XLA_FLAGS="--xla_gpu_graph_min_graph_size=1 $XLA_FLAGS" pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
         -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
         --num-processes=$NUM_GPUS \
         --process-id=$i 2>&1 | tee "$LOG_FILE" &
@@ -76,7 +76,7 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
       PIDS+=($PID)
     else
       # For other processes: redirect to log files only
-      pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
+      XLA_FLAGS="--xla_gpu_graph_min_graph_size=1 $XLA_FLAGS" pytest -s -c "$TE_PATH/tests/jax/pytest.ini" \
         -vs "$TE_PATH/examples/jax/collective_gemm/$TEST_FILE" \
         --num-processes=$NUM_GPUS \
         --process-id=$i > "$LOG_FILE" 2>&1 &
