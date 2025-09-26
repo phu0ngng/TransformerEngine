@@ -331,7 +331,10 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
 
   // Update scaling factors with NVFP4 tensor scales
-  if (use_fp4 && inputA->amax.dptr && inputB->amax.dptr) {
+  // TODO: Check whether scales are on CPU/GPU or add API to control.
+  // Currently scales are assumed to be on CPU when amax is provided
+  // and on GPU when not provided, but this is brittle.
+  if (use_fp4 && (inputA->amax.dptr != nullptr || inputB->amax.dptr != nullptr)) {
     // Reserve some workspace for alpha scale
     NVTE_CHECK(workspaceSize >= 4,
                "NVFP4 GEMM requires at least 4 byte workspace for alpha scale, but only has ",
@@ -777,9 +780,18 @@ void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTET
   const Tensor *B_tensor = convertNVTETensorCheck(B);
   const Tensor *C_tensor = convertNVTETensorCheck(C);
   Tensor *D_tensor = convertNVTETensorCheck(D);
-  Tensor *workspace_tensor = convertNVTETensor(workspace);
   NVTE_CHECK(C_tensor == D_tensor,
              "Currently nvte_cublas_gemm_v2 does not support different C and D tensors.");
+
+  // Workspace
+  void *workspace_ptr = nullptr;
+  size_t workspace_size = 0;
+  Tensor *workspace_tensor = convertNVTETensor(workspace);
+  if (workspace_tensor != nullptr) {
+    workspace_ptr = workspace_tensor->data.dptr;
+    workspace_size =
+        get_buffer_size_bytes(workspace_tensor->data.numel(), workspace_tensor->data.dtype);
+  }
 
   // Additional config
   MatmulConfig config_;
@@ -811,13 +823,10 @@ void nvte_cublas_gemm_v2(int transa, int transb, const float *alpha, const NVTET
     epilogue_aux_tensor = convertNVTETensor(config_.epilogue_aux_tensor);
   }
 
-  size_t workspace_size_bytes =
-      get_buffer_size_bytes(workspace_tensor->data.numel(), workspace_tensor->data.dtype);
-
   // Launch GEMM
   cublas_gemm(A_tensor, B_tensor, D_tensor, epilogue_bias_tensor, epilogue_aux_tensor,
               transa ? CUBLAS_OP_T : CUBLAS_OP_N, transb ? CUBLAS_OP_T : CUBLAS_OP_N,
-              with_grad_epilogue, workspace_tensor->data.dptr, workspace_size_bytes, alpha, beta,
+              with_grad_epilogue, workspace_ptr, workspace_size, alpha, beta,
               config_.use_split_accumulator, config_.sm_count, 0, 0, false, nullptr, stream);
 }
 
