@@ -543,6 +543,18 @@ class AmaxScope(Enum):
     TPSP = 2
     FSDP = 3
 
+    @staticmethod
+    def all_reduce_amax_along_TPSP_and_FSDP(self, amax, data_spec, batch_sequence_transpose, mesh):
+        gmesh = global_mesh_resource()
+        sequence_dim = 0 if batch_sequence_transpose else 1
+        # Run AR across TPSP only when tensor-sequence is detected in the input spec
+        if self is AmaxScope.TPSP and data_spec[sequence_dim] == gmesh.tpsp_resource:
+            return lax_paral_op(amax, jax.lax.pmax, gmesh.tpsp_resource, mesh)
+        # Run AR across FSDP
+        if self is AmaxScope.FSDP:
+            return lax_paral_op(amax, jax.lax.pmax, gmesh.fsdp_resource, mesh)
+        return amax
+
 
 class AmaxCalculationPrimitive(BasePrimitive):
     """
@@ -633,14 +645,7 @@ class AmaxCalculationPrimitive(BasePrimitive):
                 amax_scope=amax_scope,
                 batch_sequence_transpose=batch_sequence_transpose,
             )
-            gmesh = global_mesh_resource()
-            sequence_dim = 0 if batch_sequence_transpose else 1
-            # Run AR across TPSP only when tensor-sequence is detected in the input spec
-            if amax_scope is AmaxScope.TPSP and x_spec[sequence_dim] == gmesh.tpsp_resource:
-                amax = lax_paral_op(amax, jax.lax.pmax, gmesh.tpsp_resource, mesh)
-            # Run AR across FSDP
-            if amax_scope is AmaxScope.FSDP:
-                amax = lax_paral_op(amax, jax.lax.pmax, gmesh.fsdp_resource, mesh)
+            amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(amax, x_spec, batch_sequence_transpose, mesh)
 
             return amax
 

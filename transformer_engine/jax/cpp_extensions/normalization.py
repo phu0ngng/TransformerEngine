@@ -92,7 +92,7 @@ class NormFwdPrimitive(BasePrimitive):
 
     name = "te_norm_forward_ffi"
     multiple_results = True
-    impl_static_args = (4, 5, 6, 7, 8, 9, 10, 11)
+    impl_static_args = (5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
     inner_primitive = None
     outer_primitive = None
 
@@ -100,6 +100,7 @@ class NormFwdPrimitive(BasePrimitive):
     def abstract(
         x_aval,
         scale_aval,
+        amax_aval,
         gamma_aval,
         beta_aval,
         *,
@@ -110,6 +111,8 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        amax_scope,
+        batch_sequence_transpose,
         is_outer,
     ):
         """
@@ -119,6 +122,7 @@ class NormFwdPrimitive(BasePrimitive):
 
         assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
+        assert amax_aval is None or amax_aval.dtype == jnp.float32
 
         assert (
             scaling_mode != ScalingMode.MXFP8_1D_SCALING.value
@@ -220,6 +224,7 @@ class NormFwdPrimitive(BasePrimitive):
         ctx,
         x,
         scale,
+        amax,
         gamma,
         beta,
         *,
@@ -230,16 +235,19 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        amax_scope,
+        batch_sequence_transpose,
         is_outer,
     ):
         """
         LayerNorm fwd lowering rules
         """
         del out_dtype, scale_dtype, is_outer
-        x_aval, scale_aval, gamma_aval, beta_aval = ctx.avals_in
+        x_aval, scale_aval, amax_aval, gamma_aval, beta_aval = ctx.avals_in
 
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
+        assert amax_aval is None or amax_aval.dtype == jnp.float32
 
         g_type = ir.RankedTensorType(gamma.type)
         g_shape = g_type.shape
@@ -251,10 +259,14 @@ class NormFwdPrimitive(BasePrimitive):
             assert g_shape == b_shape
 
         sm_margin = get_forward_sm_margin()
-        return ffi.ffi_lowering(NormFwdPrimitive.name)(
+        return ffi.ffi_lowering(
+            NormFwdPrimitive.name,
+            operand_output_aliases={2: 4}, # amax <-> updated_amax
+        )(
             ctx,
             x,
             scale,
+            amax,
             gamma,
             beta,
             norm_type=norm_type.value,
@@ -269,6 +281,7 @@ class NormFwdPrimitive(BasePrimitive):
     def impl(
         x,
         scale,
+        amax,
         gamma,
         beta,
         norm_type,
@@ -278,6 +291,8 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        amax_scope,
+        batch_sequence_transpose,
         is_outer,
     ):
         """
@@ -297,6 +312,7 @@ class NormFwdPrimitive(BasePrimitive):
         ) = NormFwdPrimitive.inner_primitive.bind(
             x,
             scale,
+            amax,
             gamma,
             beta,
             norm_type=norm_type,
@@ -306,6 +322,8 @@ class NormFwdPrimitive(BasePrimitive):
             scaling_mode=scaling_mode,
             is_2x=is_2x,
             scale_dtype=scale_dtype,
+            amax_scope=amax_scope,
+            batch_sequence_transpose=batch_sequence_transpose,
             is_outer=False,
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
@@ -341,6 +359,8 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        amax_scope,
+        batch_sequence_transpose,
         is_outer,
     ):
         """
@@ -349,7 +369,7 @@ class NormFwdPrimitive(BasePrimitive):
         del is_outer
         check_valid_batch_dims(batch_dims)
         assert NormFwdPrimitive.outer_primitive is not None
-        x, scale, gamma, beta = batched_args
+        x, scale, amax, gamma, beta = batched_args
         x_bdim, scale_bdim, _, _ = batch_dims
 
         out_bdims = (
@@ -363,8 +383,9 @@ class NormFwdPrimitive(BasePrimitive):
         )
         return (
             NormFwdPrimitive.outer_primitive.bind(
-                scale,
                 x,
+                scale,
+                amax,
                 gamma,
                 beta,
                 norm_type=norm_type,
@@ -374,6 +395,9 @@ class NormFwdPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
+                amax_scope=amax_scope,
+                batch_sequence_transpose=batch_sequence_transpose,
+                is_outer=False,
             ),
             out_bdims,
         )
@@ -387,13 +411,15 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        amax_scope,
+        batch_sequence_transpose,
         is_outer,
         mesh,
         arg_infos,
         result_infos,
     ):
         del zero_centered_gamma, epsilon, out_dtype, result_infos
-        del scale_dtype, is_outer
+        del scale_dtype, is_outer, amax_scope, batch_sequence_transpose
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
         out_spec = (*x_spec[:-1], None)
@@ -445,6 +471,8 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        amax_scope,
+        batch_sequence_transpose,
         is_outer,
         mesh,
         arg_infos,
@@ -516,19 +544,20 @@ class NormFwdPrimitive(BasePrimitive):
             rsigma_sharding,
         )
 
-        def sharded_impl(x, scale, gamma, beta):
+        def sharded_impl(x, scale, amax, gamma, beta):
             # expect tp and dp giving same shape, or tp being same shape as global
             (
                 local_x,
                 local_colwise_x,
                 local_scale_inv,
                 local_colwise_scale_inv,
-                local_amax,
+                local_updated_amax,
                 local_mu,
                 local_rsigma,
             ) = NormFwdPrimitive.impl(
                 x,
                 scale,
+                amax,
                 gamma,
                 beta,
                 norm_type=norm_type,
@@ -538,12 +567,16 @@ class NormFwdPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
-                is_outer=True,
+                amax_scope=amax_scope,
+                batch_sequence_transpose=batch_sequence_transpose,
+                is_outer=True, # TODO: why?
             )
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-                global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_amax, mesh)
+                global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax, mesh)
+            elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING.value:
+                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(local_updated_amax, x_spec, batch_sequence_transpose, mesh)
             else:
-                global_updated_amax = local_amax
+                global_updated_amax = local_updated_amax
 
             return (
                 local_x,
@@ -566,6 +599,8 @@ class NormFwdPrimitive(BasePrimitive):
         scaling_mode,
         is_2x,
         scale_dtype,
+        amax_scope,
+        batch_sequence_transpose,
         is_outer,
         mesh,
         value_types,
@@ -576,6 +611,8 @@ class NormFwdPrimitive(BasePrimitive):
             epsilon,
             out_dtype,
             scale_dtype,
+            amax_scope,
+            batch_sequence_transpose,
             is_outer,
             mesh,
             result_types,
@@ -594,7 +631,7 @@ class NormFwdPrimitive(BasePrimitive):
         amax = (prefix + "amax",)
 
         return SdyShardingRule(
-            (x_axes, ("…1",), ("…2",), ("…3",)),
+            (x_axes, ("…1",), amax, ("…2",), ("…3",)),
             (
                 out,
                 colwise_out,
@@ -881,7 +918,8 @@ def layernorm_fwd(
     zero_centered_gamma: bool,
     epsilon: float,
     quantizer: Optional[Quantizer],
-    amax_scope: AmaxScope = AmaxScope.LOCAL,
+    amax_scope: AmaxScope = AmaxScope.TPSP,
+    batch_sequence_transpose: bool = False,
 ) -> tuple[Union[jnp.ndarray, ScaledTensor], jnp.ndarray, jnp.ndarray]:
     """Layer normalization forward pass with optional quantization.
 
@@ -896,6 +934,7 @@ def layernorm_fwd(
         epsilon: Small constant for numerical stability.
         quantizer: Optional quantizer for FP8 quantization of the output.
         amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
+        batch_sequence_transpose: Indicate the sequence dimension. This only works when using current-scaling. Default is False.
 
     Returns:
         A tuple containing:
@@ -918,10 +957,12 @@ def layernorm_fwd(
         if isinstance(quantizer, DelayedScaleQuantizer)
         else jnp.ones((1,), dtype=jnp.float32)
     )
+    amax = jnp.zeros((1,), dtype=jnp.float32)
     if quantizer is None:
-        output, _, _, _, _, mu, rsigma = NormFwdPrimitive.outer_primitive.bind(
+        output, _, _, _, updated_amax, mu, rsigma = NormFwdPrimitive.outer_primitive.bind(
             x,
             scale,
+            amax,
             gamma,
             beta,
             norm_type=NVTE_Norm_Type.LayerNorm,
@@ -931,18 +972,24 @@ def layernorm_fwd(
             scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
+            amax_scope=amax_scope,
+            batch_sequence_transpose=False,
             is_outer=True,
         )
-        return NoScaleTensor(data=output, amax=None), mu, rsigma
+        # cuDNN does not support amax output for non quantized output
+        if is_norm_fwd_cudnn_enabled(ScalingMode.NO_SCALING):
+            return NoScaleTensor(data=output, amax=None), mu, rsigma
+        else:
+            return NoScaleTensor(data=output, amax=updated_amax), mu, rsigma
 
     if (
         quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
         and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
     ):
         out, mu, rsigma = layernorm_fwd(
-            x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None
+            x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None, amax_scope=amax_scope, batch_sequence_transpose=batch_sequence_transpose
         )
-        out, _ = _quantize_dbias_impl(out, quantizer)
+        out, _ = _quantize_dbias_impl(out, quantizer, amax_scope=amax_scope, batch_sequence_transpose=batch_sequence_transpose)
         return out, mu, rsigma
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
@@ -954,6 +1001,8 @@ def layernorm_fwd(
             zero_centered_gamma=zero_centered_gamma,
             epsilon=epsilon,
             quantizer=None,
+            amax_scope=amax_scope,
+            batch_sequence_transpose=batch_sequence_transpose,
         )
         out, _ = _quantize_dbias_impl(
             out,
@@ -961,6 +1010,7 @@ def layernorm_fwd(
             quantizer=quantizer,
             dq_dtype=x.dtype,
             amax_scope=amax_scope,
+            batch_sequence_transpose=batch_sequence_transpose,
         )
         return out, mu, rsigma
 
@@ -979,6 +1029,7 @@ def layernorm_fwd(
     ) = NormFwdPrimitive.outer_primitive.bind(
         x,
         scale,
+        amax,
         gamma,
         beta,
         norm_type=NVTE_Norm_Type.LayerNorm,
@@ -988,6 +1039,8 @@ def layernorm_fwd(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=is_2x2x,
         scale_dtype=quantizer.get_scale_dtype(),
+        amax_scope=amax_scope,
+        batch_sequence_transpose=batch_sequence_transpose,
         is_outer=True,
     )
     quantizer.update(updated_amax)
@@ -1091,7 +1144,8 @@ def rmsnorm_fwd(
     zero_centered_gamma: bool,
     epsilon: float,
     quantizer: Optional[Quantizer],
-    amax_scope: AmaxScope = AmaxScope.LOCAL,
+    amax_scope: AmaxScope = AmaxScope.TPSP,
+    batch_sequence_transpose: bool = False,
 ) -> tuple[Union[jnp.ndarray, ScaledTensor], jnp.ndarray]:
     """Root mean square normalization forward pass with optional quantization.
 
@@ -1104,6 +1158,7 @@ def rmsnorm_fwd(
         epsilon: Small constant for numerical stability.
         quantizer: Optional quantizer for FP8 quantization of the output.
         amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
+        batch_sequence_transpose: Indicate the sequence dimension. This only works when using current-scaling. Default is False.
 
     Returns:
         A tuple containing:
@@ -1127,10 +1182,11 @@ def rmsnorm_fwd(
         if isinstance(quantizer, DelayedScaleQuantizer)
         else jnp.ones((1,), dtype=jnp.float32)
     )
+    amax = jnp.zeros((1,), dtype=jnp.float32)
     beta = jnp.ones((1,), dtype=jnp.float32)
 
     if quantizer is None:
-        output, _, _, _, _, _, rsigma = NormFwdPrimitive.outer_primitive.bind(
+        output, _, _, _, updated_amax, _, rsigma = NormFwdPrimitive.outer_primitive.bind(
             x,
             scale,
             gamma,
@@ -1144,14 +1200,18 @@ def rmsnorm_fwd(
             scale_dtype=jnp.float32,
             is_outer=True,
         )
-        return NoScaleTensor(data=output, amax=None), rsigma
+        # cuDNN does not support amax output for non quantized output
+        if is_norm_fwd_cudnn_enabled(ScalingMode.NO_SCALING):
+            return NoScaleTensor(data=output, amax=None), rsigma
+        else:
+            return NoScaleTensor(data=output, amax=updated_amax), rsigma
 
     if (
         quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
         and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
     ):
-        out, rsigma = rmsnorm_fwd(x, gamma, zero_centered_gamma, epsilon, quantizer=None)
-        out, _ = _quantize_dbias_impl(out.data, quantizer)
+        out, rsigma = rmsnorm_fwd(x, gamma, zero_centered_gamma, epsilon, quantizer=None, amax_scope=amax_scope, batch_sequence_transpose=batch_sequence_transpose)
+        out, _ = _quantize_dbias_impl(out.data, quantizer, amax_scope=amax_scope, batch_sequence_transpose=batch_sequence_transpose)
         return out, rsigma
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
@@ -1162,6 +1222,8 @@ def rmsnorm_fwd(
             zero_centered_gamma=zero_centered_gamma,
             epsilon=epsilon,
             quantizer=None,
+            amax_scope=amax_scope,
+            batch_sequence_transpose=batch_sequence_transpose,
         )
         out, _ = _quantize_dbias_impl(
             out.data,
@@ -1169,6 +1231,7 @@ def rmsnorm_fwd(
             quantizer=quantizer,
             dq_dtype=x.dtype,
             amax_scope=amax_scope,
+            batch_sequence_transpose=batch_sequence_transpose,
         )
         return out, rsigma
 
@@ -1187,6 +1250,7 @@ def rmsnorm_fwd(
     ) = NormFwdPrimitive.outer_primitive.bind(
         x,
         scale,
+        amax,
         gamma,
         beta,
         norm_type=NVTE_Norm_Type.RMSNorm,
@@ -1196,6 +1260,8 @@ def rmsnorm_fwd(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=is_2x2x,
         scale_dtype=quantizer.get_scale_dtype(),
+        amax_scope=amax_scope,
+        batch_sequence_transpose=batch_sequence_transpose,
         is_outer=True,
     )
     quantizer.update(updated_amax)
@@ -1294,6 +1360,7 @@ def normalization_fwd(
     norm_type: str,
     quantizer: Optional[Quantizer],
     amax_scope: AmaxScope = AmaxScope.LOCAL,
+    batch_sequence_transpose: bool = False,
 ):
     """Common wrapper for normalization forward pass.
 
@@ -1311,6 +1378,7 @@ def normalization_fwd(
             - 'rmsnorm': Root mean square normalization
         quantizer: Optional quantizer for FP8 quantization of the output.
         amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
+        batch_sequence_transpose: Indicate the sequence dimension. This only works when using current-scaling. Default is False.
 
     Returns:
         A tuple containing:
@@ -1336,6 +1404,7 @@ def normalization_fwd(
             epsilon,
             quantizer,
             amax_scope=amax_scope,
+            batch_sequence_transpose=batch_sequence_transpose,
         )
     elif norm_type == "rmsnorm":
         assert (
@@ -1348,6 +1417,7 @@ def normalization_fwd(
             epsilon,
             quantizer,
             amax_scope=amax_scope,
+            batch_sequence_transpose=batch_sequence_transpose,
         )
         mu = None
     else:

@@ -297,11 +297,12 @@ def _layernorm_mlp_fwd_rule(
         norm_type,
         quantizer=ffn1_quantizer_set.x,
         amax_scope=AmaxScope.TPSP,
+        batch_sequence_transpose=batch_sequence_transpose,
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
 
     casted_kernel_1 = tex.quantize(
-        kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel, amax_scope=AmaxScope.FSDP
+        kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel, amax_scope=AmaxScope.FSDP, batch_sequence_transpose=batch_sequence_transpose
     )
 
     # NN GEMM
@@ -335,6 +336,8 @@ def _layernorm_mlp_fwd_rule(
         dot_1_output,
         activation_type,
         quantizer=ffn2_quantizer_set.x,
+        amax_scope=AmaxScope.TPSP,
+        batch_sequence_transpose=batch_sequence_transpose,
     )
 
     casted_act_out = with_sharding_constraint_by_logical_axes(casted_act_out, dot_2_input_axes)
@@ -343,6 +346,7 @@ def _layernorm_mlp_fwd_rule(
         kernel_2,
         quantizer=ffn2_quantizer_set.kernel,
         amax_scope=AmaxScope.FSDP,
+        batch_sequence_transpose=batch_sequence_transpose,
     )
 
     # NN GEMM
@@ -454,6 +458,7 @@ def _layernorm_mlp_bwd_rule(
         is_dbias=use_bias_2,
         quantizer=ffn1_quantizer_set.dgrad,
         amax_scope=AmaxScope.TPSP,
+        batch_sequence_transpose=batch_sequence_transpose,
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
@@ -497,6 +502,8 @@ def _layernorm_mlp_bwd_rule(
         activation_type=activation_type,
         is_dbias=use_bias_1,
         quantizer=ffn2_quantizer_set.dgrad,
+        amax_scope=AmaxScope.TPSP,
+        batch_sequence_transpose=batch_sequence_transpose,
     )
 
     # k_non_contracting_dims calibrated with the shape difference of grad.ndim vs kernel_1.ndim
