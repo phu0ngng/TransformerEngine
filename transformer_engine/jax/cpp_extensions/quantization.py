@@ -645,7 +645,9 @@ class AmaxCalculationPrimitive(BasePrimitive):
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
             )
-            amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(amax, x_spec, transpose_batch_sequence, mesh)
+            amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(
+                amax, x_spec, transpose_batch_sequence, mesh
+            )
 
             return amax
 

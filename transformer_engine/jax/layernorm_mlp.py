@@ -302,7 +302,11 @@ def _layernorm_mlp_fwd_rule(
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_1_input_axes)
 
     casted_kernel_1 = tex.quantize(
-        kernel_1, flatten_axis=-2, quantizer=ffn1_quantizer_set.kernel, amax_scope=AmaxScope.FSDP, transpose_batch_sequence=transpose_batch_sequence
+        kernel_1,
+        flatten_axis=-2,
+        quantizer=ffn1_quantizer_set.kernel,
+        amax_scope=AmaxScope.FSDP,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
 
     # NN GEMM

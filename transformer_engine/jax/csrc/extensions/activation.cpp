@@ -15,8 +15,7 @@ namespace transformer_engine {
 namespace jax {
 
 Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scale_buf,
-  Buffer_Type amax_buf,
-                    Result_Type output_buf, Result_Type colwise_output_buf,
+                    Buffer_Type amax_buf, Result_Type output_buf, Result_Type colwise_output_buf,
                     Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
                     Result_Type updated_amax_buf, int64_t act_enum, JAXX_Scaling_Mode scaling_mode,
                     bool is_2x_int) {
@@ -238,12 +237,13 @@ pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hid
 }
 
 Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
-                                  Buffer_Type act_input_buf, Buffer_Type scale_buf, Buffer_Type amax_buf,
-                                  Result_Type output_buf, Result_Type colwise_output_buf,
-                                  Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
-                                  Result_Type updated_amax_buf, Result_Type dbias_buf,
-                                  Result_Type workspace_buf, JAXX_Scaling_Mode scaling_mode,
-                                  int64_t act_enum, bool is_2x, bool is_dbias) {
+                                  Buffer_Type act_input_buf, Buffer_Type scale_buf,
+                                  Buffer_Type amax_buf, Result_Type output_buf,
+                                  Result_Type colwise_output_buf, Result_Type scale_inv_buf,
+                                  Result_Type colwise_scale_inv_buf, Result_Type updated_amax_buf,
+                                  Result_Type dbias_buf, Result_Type workspace_buf,
+                                  JAXX_Scaling_Mode scaling_mode, int64_t act_enum, bool is_2x,
+                                  bool is_dbias) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto workspace_dtype = convert_ffi_datatype_to_te_dtype(workspace_buf->element_type());

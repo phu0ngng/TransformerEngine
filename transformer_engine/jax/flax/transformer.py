@@ -2104,7 +2104,6 @@ class TransformerLayer(nn.Module):  # pylint: disable=too-few-public-methods
                 bias_axes=(W_NO_SHARD_AXES,),
                 dtype=self.dtype,
                 name="output_layernorm",
-                
             )(z)
         assert z.dtype == input_dtype, f"output_dtype={z.dtype}, input_dtype={input_dtype}"
         return z

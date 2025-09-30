@@ -60,13 +60,13 @@ pybind11::tuple GetNormForwardWorkspaceSizes(size_t batch_size, size_t hidden_si
 }
 
 Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type scale_buf,
-                          Buffer_Type amax_buf,
-                          Buffer_Type gamma_buf, Buffer_Type beta_buf, Result_Type output_buf,
-                          Result_Type colwise_output_buf, Result_Type scale_inv_buf,
-                          Result_Type colwise_scale_inv_buf, Result_Type updated_amax_buf,
-                          Result_Type mu_buf, Result_Type rsigma_buf, Result_Type wkspace_buf,
-                          int norm_type, bool zero_centered_gamma, double epsilon,
-                          int64_t sm_margin, JAXX_Scaling_Mode scaling_mode, bool is_2x) {
+                          Buffer_Type amax_buf, Buffer_Type gamma_buf, Buffer_Type beta_buf,
+                          Result_Type output_buf, Result_Type colwise_output_buf,
+                          Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
+                          Result_Type updated_amax_buf, Result_Type mu_buf, Result_Type rsigma_buf,
+                          Result_Type wkspace_buf, int norm_type, bool zero_centered_gamma,
+                          double epsilon, int64_t sm_margin, JAXX_Scaling_Mode scaling_mode,
+                          bool is_2x) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());

@@ -171,9 +171,7 @@ class ActLuPrimitive(BasePrimitive):
         out = ffi.ffi_lowering(
             ActLuPrimitive.name,
             operand_output_aliases={2: 4},  # donate amax buffer to updated_amax
-        )(
-            ctx, x, scale, amax, act_enum=act_enum, scaling_mode=scaling_mode.value, is_2x=is_2x
-        )
+        )(ctx, x, scale, amax, act_enum=act_enum, scaling_mode=scaling_mode.value, is_2x=is_2x)
         return out
 
     @staticmethod
@@ -396,25 +394,33 @@ class ActLuPrimitive(BasePrimitive):
         )
 
         def sharded_impl(x, scale, amax):
-            local_x, local_colwise_x, local_scale_inv, local_colwise_scale_inv, local_updated_amax = (
-                ActLuPrimitive.impl(
-                    x,
-                    scale,
-                    amax,
-                    out_dtype=out_dtype,
-                    act_enum=act_enum,
-                    act_len=act_len,
-                    scaling_mode=scaling_mode,
-                    is_2x=is_2x,
-                    scale_dtype=scale_dtype,
-                    is_outer=True,
-                )
+            (
+                local_x,
+                local_colwise_x,
+                local_scale_inv,
+                local_colwise_scale_inv,
+                local_updated_amax,
+            ) = ActLuPrimitive.impl(
+                x,
+                scale,
+                amax,
+                out_dtype=out_dtype,
+                act_enum=act_enum,
+                act_len=act_len,
+                scaling_mode=scaling_mode,
+                is_2x=is_2x,
+                scale_dtype=scale_dtype,
+                is_outer=True,
             )
 
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-                global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax, mesh)
+                global_updated_amax = all_reduce_max_along_all_axes_except_PP(
+                    local_updated_amax, mesh
+                )
             elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING.value:
-                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(local_updated_amax, out_spec, transpose_batch_sequence, mesh)
+                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(
+                    local_updated_amax, out_spec, transpose_batch_sequence, mesh
+                )
             else:
                 global_updated_amax = local_updated_amax
 
@@ -924,9 +930,13 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
                 global_dbias = local_dbias
 
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-                global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax, mesh)
+                global_updated_amax = all_reduce_max_along_all_axes_except_PP(
+                    local_updated_amax, mesh
+                )
             elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING.value:
-                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(local_updated_amax, x_spec, transpose_batch_sequence, mesh)
+                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(
+                    local_updated_amax, x_spec, transpose_batch_sequence, mesh
+                )
             else:
                 global_updated_amax = local_updated_amax
 
@@ -950,7 +960,17 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
-        del out_dtype, scale_dtype, act_enum, act_len, is_outer, mesh, result_types, amax_scope, transpose_batch_sequence
+        del (
+            out_dtype,
+            scale_dtype,
+            act_enum,
+            act_len,
+            is_outer,
+            mesh,
+            result_types,
+            amax_scope,
+            transpose_batch_sequence,
+        )
         prefix = "DActLuDBias_"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
             value_types[1].shape, unique_var=prefix + "x", flatten_axis=-2
@@ -1085,7 +1105,10 @@ def act_lu(
 
     # TE/common does not support 2x quantization for DelayedScaling yet
     war_output = try_apply_delayed_scaling_2x_war(
-        f=act_lu, x=x, activation_type=activation_type, quantizer=quantizer,
+        f=act_lu,
+        x=x,
+        activation_type=activation_type,
+        quantizer=quantizer,
         amax_scope=amax_scope,
         transpose_batch_sequence=transpose_batch_sequence,
     )
@@ -1094,7 +1117,7 @@ def act_lu(
 
     scale = jnp.empty((1,), jnp.float32)
     output_shape = (*x.shape[:-2], x.shape[-1])
-    amax = jnp.zeros((1,), jnp.float32) # need to init with zero and shape=(1,)
+    amax = jnp.zeros((1,), jnp.float32)  # need to init with zero and shape=(1,)
 
     if quantizer is None:
         out, _, _, _, updated_amax = ActLuPrimitive.outer_primitive.bind(
@@ -1208,7 +1231,7 @@ def quantize_dact_dbias(
     )
 
     scale = jnp.empty((), jnp.float32)
-    amax = jnp.zeros((1,), jnp.float32) # need to init with zero and shape=(1,)
+    amax = jnp.zeros((1,), jnp.float32)  # need to init with zero and shape=(1,)
     act_type_id = ActivationEnum[activation_type]
     PrimitiveClass = DActLuDBiasQuantizePrimitive if is_dbias else DActLuQuantizePrimitive
     if not PrimitiveClass.enabled() or (
@@ -1250,12 +1273,19 @@ def quantize_dact_dbias(
     # TE/common does not support 1x dact_dbias_quantize on arch < 100 yet
     if should_apply_1x_fused_dbias_war_for_arch_l_100(is_dbias=is_dbias, quantizer=quantizer):
         out = dact_lu(
-            dz.astype(jnp.float32), x.astype(jnp.float32), activation_type, quantizer=None,
+            dz.astype(jnp.float32),
+            x.astype(jnp.float32),
+            activation_type,
+            quantizer=None,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
         )
         return _quantize_dbias_impl(
-            out.data, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2,
+            out.data,
+            quantizer,
+            is_dbias=True,
+            dq_dtype=x.dtype,
+            flatten_axis=-2,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
         )
@@ -1288,7 +1318,11 @@ def quantize_dact_dbias(
             transpose_batch_sequence=transpose_batch_sequence,
         )
         out, dbias = _quantize_dbias_impl(
-            out.data, is_dbias=is_dbias, quantizer=quantizer, dq_dtype=x.dtype, flatten_axis=-2,
+            out.data,
+            is_dbias=is_dbias,
+            quantizer=quantizer,
+            dq_dtype=x.dtype,
+            flatten_axis=-2,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
         )
@@ -1300,12 +1334,18 @@ def quantize_dact_dbias(
     # TE/common dact_dbias_quantize does not support gated act yet
     if is_dbias and is_gated:
         dgated = dact_lu(
-            dz.astype(jnp.float32), x.astype(jnp.float32), activation_type=activation_type,
+            dz.astype(jnp.float32),
+            x.astype(jnp.float32),
+            activation_type=activation_type,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
         )
         out, dbias = _quantize_dbias_impl(
-            dgated, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2,
+            dgated,
+            quantizer,
+            is_dbias=True,
+            dq_dtype=x.dtype,
+            flatten_axis=-2,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
         )

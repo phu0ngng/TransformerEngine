@@ -261,7 +261,7 @@ class NormFwdPrimitive(BasePrimitive):
         sm_margin = get_forward_sm_margin()
         return ffi.ffi_lowering(
             NormFwdPrimitive.name,
-            operand_output_aliases={2: 4}, # amax <-> updated_amax
+            operand_output_aliases={2: 4},  # amax <-> updated_amax
         )(
             ctx,
             x,
@@ -569,12 +569,16 @@ class NormFwdPrimitive(BasePrimitive):
                 scale_dtype=scale_dtype,
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
-                is_outer=True, # TODO: why?
+                is_outer=True,  # TODO: why?
             )
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-                global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax, mesh)
+                global_updated_amax = all_reduce_max_along_all_axes_except_PP(
+                    local_updated_amax, mesh
+                )
             elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING.value:
-                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(local_updated_amax, x_spec, transpose_batch_sequence, mesh)
+                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(
+                    local_updated_amax, x_spec, transpose_batch_sequence, mesh
+                )
             else:
                 global_updated_amax = local_updated_amax
 
@@ -987,9 +991,18 @@ def layernorm_fwd(
         and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
     ):
         out, mu, rsigma = layernorm_fwd(
-            x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None, amax_scope=amax_scope, transpose_batch_sequence=transpose_batch_sequence
+            x,
+            gamma,
+            beta,
+            zero_centered_gamma,
+            epsilon,
+            quantizer=None,
+            amax_scope=amax_scope,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
-        out, _ = _quantize_dbias_impl(out, quantizer, amax_scope=amax_scope, transpose_batch_sequence=transpose_batch_sequence)
+        out, _ = _quantize_dbias_impl(
+            out, quantizer, amax_scope=amax_scope, transpose_batch_sequence=transpose_batch_sequence
+        )
         return out, mu, rsigma
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
@@ -1213,8 +1226,21 @@ def rmsnorm_fwd(
         quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
         and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
     ):
-        out, rsigma = rmsnorm_fwd(x, gamma, zero_centered_gamma, epsilon, quantizer=None, amax_scope=amax_scope, transpose_batch_sequence=transpose_batch_sequence)
-        out, _ = _quantize_dbias_impl(out.data, quantizer, amax_scope=amax_scope, transpose_batch_sequence=transpose_batch_sequence)
+        out, rsigma = rmsnorm_fwd(
+            x,
+            gamma,
+            zero_centered_gamma,
+            epsilon,
+            quantizer=None,
+            amax_scope=amax_scope,
+            transpose_batch_sequence=transpose_batch_sequence,
+        )
+        out, _ = _quantize_dbias_impl(
+            out.data,
+            quantizer,
+            amax_scope=amax_scope,
+            transpose_batch_sequence=transpose_batch_sequence,
+        )
         return out, rsigma
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
