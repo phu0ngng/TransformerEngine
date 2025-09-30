@@ -66,7 +66,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
                           Result_Type updated_amax_buf, Result_Type mu_buf, Result_Type rsigma_buf,
                           Result_Type wkspace_buf, int norm_type, bool zero_centered_gamma,
                           double epsilon, int64_t sm_margin, JAXX_Scaling_Mode scaling_mode,
-                          bool is_2x) {
+                          bool is_2x, bool output_amax_when_no_scaling) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(x_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto w_dtype = convert_ffi_datatype_to_te_dtype(gamma_buf.element_type());
@@ -111,7 +111,9 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
 
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), input_shape);
-  output_tensor.set_amax(updated_amax, DType::kFloat32, std::vector<size_t>{1});
+  if (scaling_mode != JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING || (scaling_mode == JAXX_Scaling_Mode::NO_SCALING && output_amax_when_no_scaling)) {
+    output_tensor.set_amax(updated_amax, DType::kFloat32, std::vector<size_t>{1});
+  }
 
   NVTE_CHECK(
       scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
@@ -182,7 +184,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardHandler, NormForwardFFI,
                                   .Attr<double>("epsilon")
                                   .Attr<int64_t>("sm_margin")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_2x"),
+                                  .Attr<bool>("is_2x")
+                                  .Attr<bool>("output_amax_when_no_scaling"),
                               FFI_CudaGraph_Traits);
 
 Error_Type NormForwardInitializeFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type scale_buf,

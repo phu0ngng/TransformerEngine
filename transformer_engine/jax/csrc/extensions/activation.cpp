@@ -18,7 +18,7 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
                     Buffer_Type amax_buf, Result_Type output_buf, Result_Type colwise_output_buf,
                     Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
                     Result_Type updated_amax_buf, int64_t act_enum, JAXX_Scaling_Mode scaling_mode,
-                    bool is_2x_int) {
+                    bool is_2x_int, bool output_amax_when_no_scaling) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
 
@@ -44,8 +44,11 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   auto output_trans_shape = std::vector<size_t>{static_cast<size_t>(n), m};
   auto input_tensor = TensorWrapper(input, input_shape, static_cast<DType>(in_dtype));
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
+  
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), output_shape);
-  output_tensor.set_amax(updated_amax, DType::kFloat32, std::vector<size_t>{1});
+  if (scaling_mode != JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING || (scaling_mode == JAXX_Scaling_Mode::NO_SCALING && output_amax_when_no_scaling)) {
+    output_tensor.set_amax(updated_amax, DType::kFloat32, std::vector<size_t>{1});
+  }
 
   NVTE_CHECK(
       scaling_mode != JAXX_Scaling_Mode::CURRENT_TENSOR_SCALING,
@@ -146,7 +149,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ActLuHandler, ActLuFFI,
                                   .Ret<Buffer_Type>()      // updated_amax
                                   .Attr<int64_t>("act_enum")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_2x"),
+                                  .Attr<bool>("is_2x")
+                                  .Attr<bool>("output_amax_when_no_scaling"),
                               FFI_CudaGraph_Traits);
 
 Error_Type ActLuInitializeFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scale_buf,
@@ -201,7 +205,6 @@ pybind11::tuple GetDActDBiasQuantizeWorkspaceSizes(size_t batch_size, size_t hid
   auto dbias_tensor = TensorWrapper(reinterpret_cast<void *>(&temp), dbias_shape, in_dtype);
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(reinterpret_cast<void *>(&temp), out_dtype, output_shape);
-  output_tensor.set_amax(reinterpret_cast<void *>(&temp), DType::kFloat32, std::vector<size_t>{1});
   // Only the pointers will be checked for scale_inv, thus the shapes do not matter
   if (is_fp8_dtype(out_dtype)) {
     output_tensor.set_rowwise_scale_inv(reinterpret_cast<void *>(&temp), DType::kFloat32,
@@ -243,7 +246,7 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
                                   Result_Type colwise_scale_inv_buf, Result_Type updated_amax_buf,
                                   Result_Type dbias_buf, Result_Type workspace_buf,
                                   JAXX_Scaling_Mode scaling_mode, int64_t act_enum, bool is_2x,
-                                  bool is_dbias) {
+                                  bool is_dbias, bool output_amax_when_no_scaling) {
   auto in_dtype = convert_ffi_datatype_to_te_dtype(input_buf.element_type());
   auto out_dtype = convert_ffi_datatype_to_te_dtype(output_buf->element_type());
   auto workspace_dtype = convert_ffi_datatype_to_te_dtype(workspace_buf->element_type());
@@ -296,7 +299,9 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
 
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(output, out_dtype, output_shape);
-  output_tensor.set_amax(updated_amax, DType::kFloat32, std::vector<size_t>{1});
+  if (scaling_mode != JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING || (scaling_mode == JAXX_Scaling_Mode::NO_SCALING && output_amax_when_no_scaling)) {
+    output_tensor.set_amax(updated_amax, DType::kFloat32, std::vector<size_t>{1});
+  }
   if (is_fp8_dtype(out_dtype)) {
     if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {
       NVTE_CHECK(scale != nullptr, "scale must be provided for delayed tensor scaling");
@@ -436,7 +441,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(DActLuDBiasQuantizeHandler, DActLuDBiasQuantizeFFI
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<int64_t>("act_enum")
                                   .Attr<bool>("is_2x")
-                                  .Attr<bool>("is_dbias"),
+                                  .Attr<bool>("is_dbias")
+                                  .Attr<bool>("output_amax_when_no_scaling"),
                               FFI_CudaGraph_Traits);
 
 Error_Type DActLuDBiasQuantizeInitializeFFI(cudaStream_t stream, Buffer_Type input_buf,
