@@ -112,7 +112,7 @@ class NormFwdPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
     ):
         """
@@ -236,7 +236,7 @@ class NormFwdPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
     ):
         """
@@ -292,7 +292,7 @@ class NormFwdPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
     ):
         """
@@ -323,7 +323,7 @@ class NormFwdPrimitive(BasePrimitive):
             is_2x=is_2x,
             scale_dtype=scale_dtype,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
             is_outer=False,
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
@@ -360,7 +360,7 @@ class NormFwdPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
     ):
         """
@@ -396,7 +396,7 @@ class NormFwdPrimitive(BasePrimitive):
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
                 amax_scope=amax_scope,
-                batch_sequence_transpose=batch_sequence_transpose,
+                transpose_batch_sequence=transpose_batch_sequence,
                 is_outer=False,
             ),
             out_bdims,
@@ -412,14 +412,14 @@ class NormFwdPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
         mesh,
         arg_infos,
         result_infos,
     ):
         del zero_centered_gamma, epsilon, out_dtype, result_infos
-        del scale_dtype, is_outer, amax_scope, batch_sequence_transpose
+        del scale_dtype, is_outer, amax_scope, transpose_batch_sequence
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
         out_spec = (*x_spec[:-1], None)
@@ -472,7 +472,7 @@ class NormFwdPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
         mesh,
         arg_infos,
@@ -568,13 +568,13 @@ class NormFwdPrimitive(BasePrimitive):
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
                 amax_scope=amax_scope,
-                batch_sequence_transpose=batch_sequence_transpose,
+                transpose_batch_sequence=transpose_batch_sequence,
                 is_outer=True, # TODO: why?
             )
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax, mesh)
             elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING.value:
-                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(local_updated_amax, x_spec, batch_sequence_transpose, mesh)
+                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(local_updated_amax, x_spec, transpose_batch_sequence, mesh)
             else:
                 global_updated_amax = local_updated_amax
 
@@ -600,7 +600,7 @@ class NormFwdPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
         mesh,
         value_types,
@@ -612,7 +612,7 @@ class NormFwdPrimitive(BasePrimitive):
             out_dtype,
             scale_dtype,
             amax_scope,
-            batch_sequence_transpose,
+            transpose_batch_sequence,
             is_outer,
             mesh,
             result_types,
@@ -919,7 +919,7 @@ def layernorm_fwd(
     epsilon: float,
     quantizer: Optional[Quantizer],
     amax_scope: AmaxScope = AmaxScope.TPSP,
-    batch_sequence_transpose: bool = False,
+    transpose_batch_sequence: bool = False,
 ) -> tuple[Union[jnp.ndarray, ScaledTensor], jnp.ndarray, jnp.ndarray]:
     """Layer normalization forward pass with optional quantization.
 
@@ -934,7 +934,7 @@ def layernorm_fwd(
         epsilon: Small constant for numerical stability.
         quantizer: Optional quantizer for FP8 quantization of the output.
         amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
-        batch_sequence_transpose: Indicate the sequence dimension. This only works when using current-scaling. Default is False.
+        transpose_batch_sequence: Indicate the sequence dimension. This only works when using current-scaling. Default is False.
 
     Returns:
         A tuple containing:
@@ -973,7 +973,7 @@ def layernorm_fwd(
             is_2x=False,
             scale_dtype=jnp.float32,
             amax_scope=amax_scope,
-            batch_sequence_transpose=False,
+            transpose_batch_sequence=False,
             is_outer=True,
         )
         # cuDNN does not support amax output for non quantized output
@@ -987,9 +987,9 @@ def layernorm_fwd(
         and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
     ):
         out, mu, rsigma = layernorm_fwd(
-            x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None, amax_scope=amax_scope, batch_sequence_transpose=batch_sequence_transpose
+            x, gamma, beta, zero_centered_gamma, epsilon, quantizer=None, amax_scope=amax_scope, transpose_batch_sequence=transpose_batch_sequence
         )
-        out, _ = _quantize_dbias_impl(out, quantizer, amax_scope=amax_scope, batch_sequence_transpose=batch_sequence_transpose)
+        out, _ = _quantize_dbias_impl(out, quantizer, amax_scope=amax_scope, transpose_batch_sequence=transpose_batch_sequence)
         return out, mu, rsigma
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
@@ -1002,7 +1002,7 @@ def layernorm_fwd(
             epsilon=epsilon,
             quantizer=None,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         out, _ = _quantize_dbias_impl(
             out,
@@ -1010,7 +1010,7 @@ def layernorm_fwd(
             quantizer=quantizer,
             dq_dtype=x.dtype,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         return out, mu, rsigma
 
@@ -1040,7 +1040,7 @@ def layernorm_fwd(
         is_2x=is_2x2x,
         scale_dtype=quantizer.get_scale_dtype(),
         amax_scope=amax_scope,
-        batch_sequence_transpose=batch_sequence_transpose,
+        transpose_batch_sequence=transpose_batch_sequence,
         is_outer=True,
     )
     quantizer.update(updated_amax)
@@ -1145,7 +1145,7 @@ def rmsnorm_fwd(
     epsilon: float,
     quantizer: Optional[Quantizer],
     amax_scope: AmaxScope = AmaxScope.TPSP,
-    batch_sequence_transpose: bool = False,
+    transpose_batch_sequence: bool = False,
 ) -> tuple[Union[jnp.ndarray, ScaledTensor], jnp.ndarray]:
     """Root mean square normalization forward pass with optional quantization.
 
@@ -1158,7 +1158,7 @@ def rmsnorm_fwd(
         epsilon: Small constant for numerical stability.
         quantizer: Optional quantizer for FP8 quantization of the output.
         amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
-        batch_sequence_transpose: Indicate the sequence dimension. This only works when using current-scaling. Default is False.
+        transpose_batch_sequence: Indicate the sequence dimension. This only works when using current-scaling. Default is False.
 
     Returns:
         A tuple containing:
@@ -1210,8 +1210,8 @@ def rmsnorm_fwd(
         quantizer.scaling_mode == ScalingMode.MXFP8_1D_SCALING
         and get_cudnn_version() < FUSED_MXFP8_NORM_CUDNN_MIN_VERSION
     ):
-        out, rsigma = rmsnorm_fwd(x, gamma, zero_centered_gamma, epsilon, quantizer=None, amax_scope=amax_scope, batch_sequence_transpose=batch_sequence_transpose)
-        out, _ = _quantize_dbias_impl(out.data, quantizer, amax_scope=amax_scope, batch_sequence_transpose=batch_sequence_transpose)
+        out, rsigma = rmsnorm_fwd(x, gamma, zero_centered_gamma, epsilon, quantizer=None, amax_scope=amax_scope, transpose_batch_sequence=transpose_batch_sequence)
+        out, _ = _quantize_dbias_impl(out.data, quantizer, amax_scope=amax_scope, transpose_batch_sequence=transpose_batch_sequence)
         return out, rsigma
 
     if quantizer.scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING:
@@ -1223,7 +1223,7 @@ def rmsnorm_fwd(
             epsilon=epsilon,
             quantizer=None,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         out, _ = _quantize_dbias_impl(
             out.data,
@@ -1231,7 +1231,7 @@ def rmsnorm_fwd(
             quantizer=quantizer,
             dq_dtype=x.dtype,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         return out, rsigma
 
@@ -1261,7 +1261,7 @@ def rmsnorm_fwd(
         is_2x=is_2x2x,
         scale_dtype=quantizer.get_scale_dtype(),
         amax_scope=amax_scope,
-        batch_sequence_transpose=batch_sequence_transpose,
+        transpose_batch_sequence=transpose_batch_sequence,
         is_outer=True,
     )
     quantizer.update(updated_amax)
@@ -1360,7 +1360,7 @@ def normalization_fwd(
     norm_type: str,
     quantizer: Optional[Quantizer],
     amax_scope: AmaxScope = AmaxScope.LOCAL,
-    batch_sequence_transpose: bool = False,
+    transpose_batch_sequence: bool = False,
 ):
     """Common wrapper for normalization forward pass.
 
@@ -1378,7 +1378,7 @@ def normalization_fwd(
             - 'rmsnorm': Root mean square normalization
         quantizer: Optional quantizer for FP8 quantization of the output.
         amax_scope: Indicate the scope to run amax calculation. This only works when using current-scaling. Default is AmaxScope.LOCAL.
-        batch_sequence_transpose: Indicate the sequence dimension. This only works when using current-scaling. Default is False.
+        transpose_batch_sequence: Indicate the sequence dimension. This only works when using current-scaling. Default is False.
 
     Returns:
         A tuple containing:
@@ -1404,7 +1404,7 @@ def normalization_fwd(
             epsilon,
             quantizer,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
     elif norm_type == "rmsnorm":
         assert (
@@ -1417,7 +1417,7 @@ def normalization_fwd(
             epsilon,
             quantizer,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         mu = None
     else:

@@ -86,7 +86,7 @@ class ActLuPrimitive(BasePrimitive):
         9,
         10,
         11,
-    )  # out_dtype, act_enum, act_len, scaling_mode, is_2x, scale_dtype, amax_scope, batch_sequence_transpose, is_outer
+    )  # out_dtype, act_enum, act_len, scaling_mode, is_2x, scale_dtype, amax_scope, transpose_batch_sequence, is_outer
     inner_primitive = None
     outer_primitive = None
 
@@ -103,13 +103,13 @@ class ActLuPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
     ):
         """
         te_act_lu_p abstract
         """
-        del act_enum, amax_scope, batch_sequence_transpose
+        del act_enum, amax_scope, transpose_batch_sequence
         dtype = dtypes.canonicalize_dtype(x_aval.dtype)
         assert dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert scale_aval is None or scale_aval.dtype == jnp.float32
@@ -156,7 +156,7 @@ class ActLuPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
     ):
         """
@@ -188,7 +188,7 @@ class ActLuPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
     ):
         """
@@ -209,7 +209,7 @@ class ActLuPrimitive(BasePrimitive):
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
                 amax_scope=amax_scope,
-                batch_sequence_transpose=batch_sequence_transpose,
+                transpose_batch_sequence=transpose_batch_sequence,
                 is_outer=False,
             )
         )
@@ -239,13 +239,13 @@ class ActLuPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
     ):
         """
         to describe batch rules for vmap
         """
-        del act_len, is_outer, amax_scope, batch_sequence_transpose
+        del act_len, is_outer, amax_scope, transpose_batch_sequence
         check_valid_batch_dims(batch_dims)
         assert ActLuPrimitive.outer_primitive is not None
         x, scale, amax = batched_args
@@ -264,7 +264,7 @@ class ActLuPrimitive(BasePrimitive):
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
                 amax_scope=amax_scope,
-                batch_sequence_transpose=batch_sequence_transpose,
+                transpose_batch_sequence=transpose_batch_sequence,
             ),
             out_bdims,
         )
@@ -278,7 +278,7 @@ class ActLuPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
         mesh,
         arg_infos,
@@ -292,7 +292,7 @@ class ActLuPrimitive(BasePrimitive):
             act_len,
             is_outer,
             amax_scope,
-            batch_sequence_transpose,
+            transpose_batch_sequence,
         )  # Unused.
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
@@ -345,7 +345,7 @@ class ActLuPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
         mesh,
         arg_infos,
@@ -414,7 +414,7 @@ class ActLuPrimitive(BasePrimitive):
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax, mesh)
             elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING.value:
-                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(local_updated_amax, out_spec, batch_sequence_transpose, mesh)
+                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(local_updated_amax, out_spec, transpose_batch_sequence, mesh)
             else:
                 global_updated_amax = local_updated_amax
 
@@ -437,7 +437,7 @@ class ActLuPrimitive(BasePrimitive):
         is_2x,
         scale_dtype,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
         mesh,
         value_types,
@@ -510,7 +510,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         act_enum,
         act_len,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
     ):
         """
@@ -614,13 +614,13 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         act_enum,
         act_len,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
     ):
         """
         te_dact_dbias_quantize_p lowering rules
         """
-        del out_dtype, scale_dtype, act_len, is_outer, amax_scope, batch_sequence_transpose
+        del out_dtype, scale_dtype, act_len, is_outer, amax_scope, transpose_batch_sequence
         dz_aval, x_aval, scale_aval, amax_aval = ctx.avals_in
         assert dz_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
         assert x_aval.dtype == dz_aval.dtype
@@ -654,7 +654,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         act_enum,
         act_len,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
     ):
         """
@@ -676,7 +676,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
                 act_enum=act_enum,
                 act_len=act_len,
                 amax_scope=amax_scope,
-                batch_sequence_transpose=batch_sequence_transpose,
+                transpose_batch_sequence=transpose_batch_sequence,
                 is_outer=False,
             )
         )
@@ -706,7 +706,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         act_enum,
         act_len,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
     ):
         """
@@ -740,7 +740,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
                 act_enum=act_enum,
                 act_len=act_len,
                 amax_scope=amax_scope,
-                batch_sequence_transpose=batch_sequence_transpose,
+                transpose_batch_sequence=transpose_batch_sequence,
                 is_outer=False,
             ),
             out_bdims,
@@ -756,14 +756,14 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         act_enum,
         act_len,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
         mesh,
         arg_infos,
         result_infos,
     ):
         del out_dtype, result_infos, act_enum
-        del scale_dtype, act_len, is_outer, amax_scope, batch_sequence_transpose    
+        del scale_dtype, act_len, is_outer, amax_scope, transpose_batch_sequence    
         x_spec = get_padded_spec(arg_infos[1])
         scale_spec = get_padded_spec(arg_infos[2])
 
@@ -833,7 +833,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         act_enum,
         act_len,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
         mesh,
         arg_infos,
@@ -926,7 +926,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 global_updated_amax = all_reduce_max_along_all_axes_except_PP(local_updated_amax, mesh)
             elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING.value:
-                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(local_updated_amax, x_spec, batch_sequence_transpose, mesh)
+                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(local_updated_amax, x_spec, transpose_batch_sequence, mesh)
             else:
                 global_updated_amax = local_updated_amax
 
@@ -944,13 +944,13 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         act_enum,
         act_len,
         amax_scope,
-        batch_sequence_transpose,
+        transpose_batch_sequence,
         is_outer,
         mesh,
         value_types,
         result_types,
     ):
-        del out_dtype, scale_dtype, act_enum, act_len, is_outer, mesh, result_types, amax_scope, batch_sequence_transpose
+        del out_dtype, scale_dtype, act_enum, act_len, is_outer, mesh, result_types, amax_scope, transpose_batch_sequence
         prefix = "DActLuDBias_"
         scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
             value_types[1].shape, unique_var=prefix + "x", flatten_axis=-2
@@ -1052,7 +1052,7 @@ def act_lu(
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
     amax_scope: AmaxScope = AmaxScope.LOCAL,
-    batch_sequence_transpose: bool = False,
+    transpose_batch_sequence: bool = False,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """Activation with optional quantization.
 
@@ -1087,7 +1087,7 @@ def act_lu(
     war_output = try_apply_delayed_scaling_2x_war(
         f=act_lu, x=x, activation_type=activation_type, quantizer=quantizer,
         amax_scope=amax_scope,
-        batch_sequence_transpose=batch_sequence_transpose,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
     if war_output is not None:
         return war_output
@@ -1109,7 +1109,7 @@ def act_lu(
             scale_dtype=jnp.float32,
             is_outer=True,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         out = out.reshape(output_shape)
         # TODO(Phuong): ScaledTensorFactory to create NoScaledTensor 
@@ -1126,7 +1126,7 @@ def act_lu(
             activation_type=activation_type,
             quantizer=None,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         out, _ = _quantize_dbias_impl(
             out,
@@ -1134,7 +1134,7 @@ def act_lu(
             quantizer=quantizer,
             dq_dtype=x.dtype,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         return out
 
@@ -1159,7 +1159,7 @@ def act_lu(
         scale_dtype=quantizer.get_scale_dtype(),
         is_outer=True,
         amax_scope=amax_scope,
-        batch_sequence_transpose=batch_sequence_transpose,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
 
     quantizer.update(updated_amax)
@@ -1183,7 +1183,7 @@ def quantize_dact_dbias(
     is_dbias: bool = True,
     quantizer: Optional[Quantizer] = None,
     amax_scope: AmaxScope = AmaxScope.TPSP,
-    batch_sequence_transpose: bool = False,
+    transpose_batch_sequence: bool = False,
 ) -> Tuple[ScaledTensor, jnp.ndarray]:
     """Compute gradients of activation and bias with optional quantization.
 
@@ -1234,7 +1234,7 @@ def quantize_dact_dbias(
             act_len=act_len,
             is_outer=True,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         output = output.astype(x.dtype)
         dbias = None
@@ -1252,12 +1252,12 @@ def quantize_dact_dbias(
         out = dact_lu(
             dz.astype(jnp.float32), x.astype(jnp.float32), activation_type, quantizer=None,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         return _quantize_dbias_impl(
             out.data, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
 
     is_gated = act_len == 2
@@ -1271,9 +1271,9 @@ def quantize_dact_dbias(
             is_dbias=is_dbias,
             quantizer=quantizer,
             flatten_axis=-2,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         if war_output is not None:
             return war_output
@@ -1286,12 +1286,12 @@ def quantize_dact_dbias(
             activation_type=activation_type,
             quantizer=None,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         out, dbias = _quantize_dbias_impl(
             out.data, is_dbias=is_dbias, quantizer=quantizer, dq_dtype=x.dtype, flatten_axis=-2, 
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         return out, dbias
 
@@ -1303,12 +1303,12 @@ def quantize_dact_dbias(
         dgated = dact_lu(
             dz.astype(jnp.float32), x.astype(jnp.float32), activation_type=activation_type,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         out, dbias = _quantize_dbias_impl(
             dgated, quantizer, is_dbias=True, dq_dtype=x.dtype, flatten_axis=-2,
             amax_scope=amax_scope,
-            batch_sequence_transpose=batch_sequence_transpose,
+            transpose_batch_sequence=transpose_batch_sequence,
         )
         return out, dbias
 
@@ -1333,7 +1333,7 @@ def quantize_dact_dbias(
         act_len=act_len,
         is_outer=True,
         amax_scope=amax_scope,
-        batch_sequence_transpose=batch_sequence_transpose,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
 
     # For DelayedScaling transpose, the scale buffer is shared for both rowwise and colwise
@@ -1363,7 +1363,7 @@ def dact_lu(
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
     amax_scope: AmaxScope = AmaxScope.TPSP,
-    batch_sequence_transpose: bool = False,
+    transpose_batch_sequence: bool = False,
 ) -> Union[jnp.ndarray, ScaledTensor]:
     """
     Backward pass for activation with optional quantization.
@@ -1384,6 +1384,6 @@ def dact_lu(
         is_dbias=False,
         quantizer=quantizer,
         amax_scope=amax_scope,
-        batch_sequence_transpose=batch_sequence_transpose,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
     return output
