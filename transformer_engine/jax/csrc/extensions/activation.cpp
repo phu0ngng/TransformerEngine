@@ -28,7 +28,7 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
 
   auto *output = output_buf->untyped_data();
   auto *colwise_output = colwise_output_buf->untyped_data();
-  float *amax = reinterpret_cast<float *>(amax_buf->untyped_data());
+  float *amax = reinterpret_cast<float *>(amax_buf.untyped_data());
   auto *updated_amax = reinterpret_cast<float *>(updated_amax_buf->untyped_data());
   NVTE_CHECK(amax == updated_amax && amax != nullptr, "amax and updated_amax should be aliased");
 
@@ -251,7 +251,7 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
   auto *input = input_buf.untyped_data();
   auto *act_input = act_input_buf.untyped_data();
   float *scale = reinterpret_cast<float *>(scale_buf.untyped_data());
-  float *amax = reinterpret_cast<float *>(amax_buf->untyped_data());
+  float *amax = reinterpret_cast<float *>(amax_buf.untyped_data());
   auto *updated_amax = reinterpret_cast<float *>(updated_amax_buf->untyped_data());
   NVTE_CHECK(amax == updated_amax && amax != nullptr, "amax and updated_amax should be aliased");
 

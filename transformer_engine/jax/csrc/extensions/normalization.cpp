@@ -79,10 +79,9 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
   auto *output = output_buf->untyped_data();
   auto *rsigma = rsigma_buf->untyped_data();
   auto *mu = mu_buf->untyped_data();
-  auto *amax = reinterpret_cast<float *>(amax_buf->untyped_data());
   auto *workspace = wkspace_buf->untyped_data();
 
-  auto *amax = reinterpret_cast<float *>(amax_buf->untyped_data());
+  auto *amax = reinterpret_cast<float *>(amax_buf.untyped_data());
   auto *updated_amax = reinterpret_cast<float *>(updated_amax_buf->untyped_data());
   NVTE_CHECK(amax == updated_amax && amax != nullptr, "amax and updated_amax should be aliased");
 

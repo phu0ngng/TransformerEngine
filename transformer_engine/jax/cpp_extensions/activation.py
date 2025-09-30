@@ -763,7 +763,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         result_infos,
     ):
         del out_dtype, result_infos, act_enum
-        del scale_dtype, act_len, is_outer, amax_scope, transpose_batch_sequence    
+        del scale_dtype, act_len, is_outer, amax_scope, transpose_batch_sequence
         x_spec = get_padded_spec(arg_infos[1])
         scale_spec = get_padded_spec(arg_infos[2])
 
@@ -1097,7 +1097,7 @@ def act_lu(
     amax = jnp.zeros((1,), jnp.float32) # need to init with zero and shape=(1,)
 
     if quantizer is None:
-        out, _, _, _, _, updated_amax = ActLuPrimitive.outer_primitive.bind(
+        out, _, _, _, updated_amax = ActLuPrimitive.outer_primitive.bind(
             x,
             scale,
             amax,
@@ -1107,12 +1107,12 @@ def act_lu(
             scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
-            is_outer=True,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
+            is_outer=True,
         )
         out = out.reshape(output_shape)
-        # TODO(Phuong): ScaledTensorFactory to create NoScaledTensor 
+        # TODO(Phuong): ScaledTensorFactory to create NoScaledTensor
         out = NoScaleTensor(
             data=out,
             amax=updated_amax,
@@ -1217,13 +1217,13 @@ def quantize_dact_dbias(
         return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
 
     if quantizer is None:
-        output, _, _, _, _, _, updated_amax = PrimitiveClass.outer_primitive.bind(
+        output, _, _, _, _, updated_amax = PrimitiveClass.outer_primitive.bind(
             dz,
             x,
             scale,
             amax,
             # outputs float32 for dbias accumulation
-            # TODO: remove this upcast 
+            # TODO: remove this upcast
             out_dtype=(jnp.float32 if is_dbias else x.dtype),
             # default value for no scaling, TE/common ignore this value when scale is unset
             scaling_mode=ScalingMode.NO_SCALING.value,
@@ -1271,7 +1271,6 @@ def quantize_dact_dbias(
             is_dbias=is_dbias,
             quantizer=quantizer,
             flatten_axis=-2,
-            transpose_batch_sequence=transpose_batch_sequence,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
         )
@@ -1289,7 +1288,7 @@ def quantize_dact_dbias(
             transpose_batch_sequence=transpose_batch_sequence,
         )
         out, dbias = _quantize_dbias_impl(
-            out.data, is_dbias=is_dbias, quantizer=quantizer, dq_dtype=x.dtype, flatten_axis=-2, 
+            out.data, is_dbias=is_dbias, quantizer=quantizer, dq_dtype=x.dtype, flatten_axis=-2,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
         )

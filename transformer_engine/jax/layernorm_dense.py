@@ -202,10 +202,9 @@ def _layernorm_dense_fwd_rule(
         zero_centered_gamma,
         epsilon,
         norm_type,
-        transpose_batch_sequence=transpose_batch_sequence,
-        amax_scope=AmaxScope.TPSP,
-        batch_sequence_transpose=transpose_batch_sequence,
         quantizer=quantizer_set.x,
+        amax_scope=AmaxScope.TPSP,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
     casted_ln_out = with_sharding_constraint_by_logical_axes(casted_ln_out, dot_input_axes)
 
@@ -216,7 +215,7 @@ def _layernorm_dense_fwd_rule(
         flatten_axis=flatten_axis,
         quantizer=quantizer_set.kernel,
         amax_scope=AmaxScope.FSDP,
-        batch_sequence_transpose=transpose_batch_sequence,
+        transpose_batch_sequence=transpose_batch_sequence,
     )
     casted_kernel = with_sharding_constraint_by_logical_axes(casted_kernel, kernel_axes)
 

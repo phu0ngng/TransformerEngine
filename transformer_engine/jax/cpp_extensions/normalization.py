@@ -1189,6 +1189,7 @@ def rmsnorm_fwd(
         output, _, _, _, updated_amax, _, rsigma = NormFwdPrimitive.outer_primitive.bind(
             x,
             scale,
+            amax,
             gamma,
             beta,
             norm_type=NVTE_Norm_Type.RMSNorm,
@@ -1198,6 +1199,8 @@ def rmsnorm_fwd(
             scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
+            amax_scope=amax_scope,
+            transpose_batch_sequence=transpose_batch_sequence,
             is_outer=True,
         )
         # cuDNN does not support amax output for non quantized output
