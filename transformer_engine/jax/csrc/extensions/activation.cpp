@@ -48,7 +48,7 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), output_shape);
   if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
       (scaling_mode == JAXX_Scaling_Mode::NO_SCALING && output_amax_when_no_scaling)) {
-    output_tensor.set_amax(updated_amax, DType::kFloat32, std::vector<size_t>{1});
+    output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
   }
 
   NVTE_CHECK(
@@ -306,7 +306,7 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
   output_tensor.set_rowwise_data(output, out_dtype, output_shape);
   if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
       (scaling_mode == JAXX_Scaling_Mode::NO_SCALING && output_amax_when_no_scaling)) {
-    output_tensor.set_amax(updated_amax, DType::kFloat32, std::vector<size_t>{1});
+    output_tensor.set_amax(amax, DType::kFloat32, std::vector<size_t>{1});
   }
   if (is_fp8_dtype(out_dtype)) {
     if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING) {

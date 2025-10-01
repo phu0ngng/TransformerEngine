@@ -1264,7 +1264,7 @@ def quantize_dact_dbias(
     activation_type: Sequence[Union[str, Callable]] = ("gelu",),
     is_dbias: bool = True,
     quantizer: Optional[Quantizer] = None,
-    amax_scope: AmaxScope = AmaxScope.TPSP,
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
     transpose_batch_sequence: bool = False,
     output_amax_when_no_scaling: bool = False,
 ) -> Tuple[ScaledTensor, jnp.ndarray]:
@@ -1467,7 +1467,7 @@ def dact_lu(
     x: jnp.ndarray,
     activation_type: Sequence[Union[str, Callable]],
     quantizer: Optional[Quantizer] = None,
-    amax_scope: AmaxScope = AmaxScope.TPSP,
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
     transpose_batch_sequence: bool = False,
     output_amax_when_no_scaling: bool = False,
 ) -> Union[jnp.ndarray, ScaledTensor]:

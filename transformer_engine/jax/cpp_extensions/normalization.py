@@ -936,7 +936,7 @@ def layernorm_fwd(
     zero_centered_gamma: bool,
     epsilon: float,
     quantizer: Optional[Quantizer],
-    amax_scope: AmaxScope = AmaxScope.TPSP,
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
     transpose_batch_sequence: bool = False,
     output_amax_when_no_scaling: bool = False,
 ) -> tuple[Union[jnp.ndarray, ScaledTensor], jnp.ndarray, jnp.ndarray]:
