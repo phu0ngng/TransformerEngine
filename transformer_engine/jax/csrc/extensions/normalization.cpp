@@ -111,7 +111,7 @@ Error_Type NormForwardFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type sc
 
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), input_shape);
-  if (scaling_mode != JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
+  if (scaling_mode == JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
       (scaling_mode == JAXX_Scaling_Mode::NO_SCALING && output_amax_when_no_scaling)) {
     output_tensor.set_amax(updated_amax, DType::kFloat32, std::vector<size_t>{1});
   }
