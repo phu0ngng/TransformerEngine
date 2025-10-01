@@ -996,7 +996,11 @@ def layernorm_fwd(
             is_outer=True,
         )
         # cuDNN does not support amax output for non quantized output
-        updated_amax = updated_amax if output_amax_when_no_scaling and not is_norm_fwd_cudnn_enabled(ScalingMode.NO_SCALING) else None
+        updated_amax = (
+            updated_amax
+            if output_amax_when_no_scaling and not is_norm_fwd_cudnn_enabled(ScalingMode.NO_SCALING)
+            else None
+        )
         return NoScaleTensor(data=output, amax=updated_amax), mu, rsigma
 
     if (
@@ -1235,7 +1239,11 @@ def rmsnorm_fwd(
             is_outer=True,
         )
         # cuDNN does not support amax output for non quantized output
-        updated_amax = updated_amax if output_amax_when_no_scaling and not is_norm_fwd_cudnn_enabled(ScalingMode.NO_SCALING) else None
+        updated_amax = (
+            updated_amax
+            if output_amax_when_no_scaling and not is_norm_fwd_cudnn_enabled(ScalingMode.NO_SCALING)
+            else None
+        )
         return NoScaleTensor(data=output, amax=updated_amax), rsigma
 
     if (

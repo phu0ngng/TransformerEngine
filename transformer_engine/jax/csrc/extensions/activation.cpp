@@ -44,9 +44,10 @@ Error_Type ActLuFFI(cudaStream_t stream, Buffer_Type input_buf, Buffer_Type scal
   auto output_trans_shape = std::vector<size_t>{static_cast<size_t>(n), m};
   auto input_tensor = TensorWrapper(input, input_shape, static_cast<DType>(in_dtype));
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
-  
+
   output_tensor.set_rowwise_data(output, static_cast<DType>(out_dtype), output_shape);
-  if (scaling_mode != JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING || (scaling_mode == JAXX_Scaling_Mode::NO_SCALING && output_amax_when_no_scaling)) {
+  if (scaling_mode != JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
+      (scaling_mode == JAXX_Scaling_Mode::NO_SCALING && output_amax_when_no_scaling)) {
     output_tensor.set_amax(updated_amax, DType::kFloat32, std::vector<size_t>{1});
   }
 
@@ -299,7 +300,8 @@ Error_Type DActLuDBiasQuantizeFFI(cudaStream_t stream, Buffer_Type input_buf,
 
   auto output_tensor = TensorWrapper(get_nvte_scaling_mode(scaling_mode));
   output_tensor.set_rowwise_data(output, out_dtype, output_shape);
-  if (scaling_mode != JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING || (scaling_mode == JAXX_Scaling_Mode::NO_SCALING && output_amax_when_no_scaling)) {
+  if (scaling_mode != JAXX_Scaling_Mode::DELAYED_TENSOR_SCALING ||
+      (scaling_mode == JAXX_Scaling_Mode::NO_SCALING && output_amax_when_no_scaling)) {
     output_tensor.set_amax(updated_amax, DType::kFloat32, std::vector<size_t>{1});
   }
   if (is_fp8_dtype(out_dtype)) {
