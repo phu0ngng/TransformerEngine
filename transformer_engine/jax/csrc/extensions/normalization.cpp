@@ -190,17 +190,19 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardHandler, NormForwardFFI,
                               FFI_CudaGraph_Traits);
 
 Error_Type NormForwardInitializeFFI(cudaStream_t stream, Buffer_Type x_buf, Buffer_Type scale_buf,
-                                    Buffer_Type gamma_buf, Buffer_Type beta_buf,
-                                    Result_Type output_buf, Result_Type colwise_output_buf,
-                                    Result_Type scale_inv_buf, Result_Type colwise_scale_inv_buf,
-                                    Result_Type amax_buf, Result_Type mu_buf,
-                                    Result_Type rsigma_buf, Result_Type wkspace_buf, int norm_type,
+                                    Buffer_Type amax_buf, Buffer_Type gamma_buf,
+                                    Buffer_Type beta_buf, Result_Type output_buf,
+                                    Result_Type colwise_output_buf, Result_Type scale_inv_buf,
+                                    Result_Type colwise_scale_inv_buf, Result_Type updated_amax_buf,
+                                    Result_Type mu_buf, Result_Type rsigma_buf,
+                                    Result_Type wkspace_buf, int norm_type,
                                     bool zero_centered_gamma, double epsilon, int64_t sm_margin,
                                     JAXX_Scaling_Mode scaling_mode, bool is_2x) {
-  return wrapInStreamCapture(
-      std::function(NormForwardFFI), stream, x_buf, scale_buf, gamma_buf, beta_buf, output_buf,
-      colwise_output_buf, scale_inv_buf, colwise_scale_inv_buf, amax_buf, mu_buf, rsigma_buf,
-      wkspace_buf, norm_type, zero_centered_gamma, epsilon, sm_margin, scaling_mode, is_2x);
+  return wrapInStreamCapture(std::function(NormForwardFFI), stream, x_buf, scale_buf, amax_buf,
+                             gamma_buf, beta_buf, output_buf, colwise_output_buf, scale_inv_buf,
+                             colwise_scale_inv_buf, updated_amax_buf, mu_buf, rsigma_buf,
+                             wkspace_buf, norm_type, zero_centered_gamma, epsilon, sm_margin,
+                             scaling_mode, is_2x);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardInitializeHandler, NormForwardInitializeFFI,
@@ -208,13 +210,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardInitializeHandler, NormForwardInitializ
                                   .Ctx<FFI_Stream_Type>()  // stream
                                   .Arg<Buffer_Type>()      // x
                                   .Arg<Buffer_Type>()      // scale
+                                  .Arg<Buffer_Type>()      // amax
                                   .Arg<Buffer_Type>()      // gamma
                                   .Arg<Buffer_Type>()      // beta
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // colwise_output
                                   .Ret<Buffer_Type>()      // scale_inv
                                   .Ret<Buffer_Type>()      // colwise_scale_inv
-                                  .Ret<Buffer_Type>()      // amax
+                                  .Ret<Buffer_Type>()      // updated_amax
                                   .Ret<Buffer_Type>()      // mu
                                   .Ret<Buffer_Type>()      // rsigma
                                   .Ret<Buffer_Type>()      // wkspace
