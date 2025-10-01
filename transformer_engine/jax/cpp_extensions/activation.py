@@ -1206,7 +1206,8 @@ def act_lu(
             quantizer=None,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
-            output_amax_when_no_scaling=True,
+            # output_amax_when_no_scaling=True,
+            output_amax_when_no_scaling=False,
         )
         out, _ = _quantize_dbias_impl(
             out,
@@ -1378,7 +1379,8 @@ def quantize_dact_dbias(
             quantizer=None,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
-            output_amax_when_no_scaling=True,
+            # output_amax_when_no_scaling=True,
+            output_amax_when_no_scaling=False,
         )
         out, dbias = _quantize_dbias_impl(
             out.data,

@@ -303,6 +303,7 @@ class NormFwdPrimitive(BasePrimitive):
         """
         to describe implementation
         """
+        del is_outer
         assert NormFwdPrimitive.inner_primitive is not None
         (
             out,
@@ -329,7 +330,7 @@ class NormFwdPrimitive(BasePrimitive):
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
-            is_outer=is_outer,
+            is_outer=False,
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
@@ -429,6 +430,7 @@ class NormFwdPrimitive(BasePrimitive):
         del scale_dtype, is_outer, amax_scope, transpose_batch_sequence, output_amax_when_no_scaling
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
+        amax_spec = get_padded_spec(arg_infos[2])
         out_spec = (*x_spec[:-1], None)
         if x_spec[-1] is not None:
             warnings.warn(
@@ -448,9 +450,9 @@ class NormFwdPrimitive(BasePrimitive):
         mu_spec = x_spec[:-1] if norm_type == NVTE_Norm_Type.LayerNorm else (None,)
         mu_sharding = NamedSharding(mesh, PartitionSpec(*mu_spec), desc="NormFwdPrimitive.mu")
 
-        scale_inv_spec = amax_spec = (None,)
+        scale_inv_spec = (None,)
         if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-            scale_inv_spec = amax_spec = scale_spec
+            scale_inv_spec = scale_spec
         elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
             scale_inv_spec = out_spec
 
@@ -489,8 +491,9 @@ class NormFwdPrimitive(BasePrimitive):
         del result_infos, is_outer
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
-        g_spec = get_padded_spec(arg_infos[2])
-        b_spec = get_padded_spec(arg_infos[3])
+        amax_spec = get_padded_spec(arg_infos[2])
+        g_spec = get_padded_spec(arg_infos[3])
+        b_spec = get_padded_spec(arg_infos[4])
         out_spec = (*x_spec[:-1], None)
 
         if x_spec[-1] is not None:
@@ -521,9 +524,9 @@ class NormFwdPrimitive(BasePrimitive):
         mu_spec = x_spec[:-1] if norm_type == NVTE_Norm_Type.LayerNorm else (None,)
         mu_sharding = NamedSharding(mesh, PartitionSpec(*mu_spec), desc="NormFwdPrimitive.mu")
 
-        scale_inv_spec = amax_spec = (None,)
+        scale_inv_spec = (None,)
         if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
-            scale_inv_spec = amax_spec = scale_spec
+            scale_inv_spec = scale_spec
         elif scaling_mode == ScalingMode.MXFP8_1D_SCALING.value:
             scale_inv_spec = out_spec
 
@@ -535,10 +538,10 @@ class NormFwdPrimitive(BasePrimitive):
         arg_shardings = list(arg_i.sharding for arg_i in arg_infos)
         # Enforce no sharding of hidden dim for x, gamma and beta
         arg_shardings[0] = NamedSharding(mesh, PartitionSpec(*out_spec), desc="NormFwdPrimitive.x")
-        arg_shardings[2] = NamedSharding(
+        arg_shardings[3] = NamedSharding(
             mesh, PartitionSpec(*g_spec[:-1], None), desc="NormFwdPrimitive.gamma"
         )
-        arg_shardings[3] = NamedSharding(
+        arg_shardings[4] = NamedSharding(
             mesh, PartitionSpec(*b_spec[:-1], None), desc="NormFwdPrimitive.beta"
         )
         arg_shardings = tuple(arg_shardings)
@@ -578,13 +581,13 @@ class NormFwdPrimitive(BasePrimitive):
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
                 output_amax_when_no_scaling=output_amax_when_no_scaling,
-                is_outer=False,
+                is_outer=True,
             )
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 global_updated_amax = all_reduce_max_along_all_axes_except_PP(
                     local_updated_amax, mesh
                 )
-            elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING.value:
+            elif scaling_mode == ScalingMode.NO_SCALING and output_amax_when_no_scaling:
                 global_updated_amax = amax_scope.all_reduce_amax_along_TPSP_and_FSDP(
                     local_updated_amax, x_spec, transpose_batch_sequence, mesh
                 )
@@ -1032,7 +1035,8 @@ def layernorm_fwd(
             quantizer=None,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
-            output_amax_when_no_scaling=True,
+            # output_amax_when_no_scaling=True,
+            output_amax_when_no_scaling=False,
         )
         out, _ = _quantize_dbias_impl(
             out,
@@ -1276,7 +1280,8 @@ def rmsnorm_fwd(
             quantizer=None,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
-            output_amax_when_no_scaling=True,
+            # output_amax_when_no_scaling=True,
+            output_amax_when_no_scaling=False,
         )
         out, _ = _quantize_dbias_impl(
             out.data,
