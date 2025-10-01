@@ -543,7 +543,6 @@ class AmaxScope(Enum):
     TPSP = 2
     FSDP = 3
 
-    @staticmethod
     def all_reduce_amax_along_TPSP_and_FSDP(self, amax, data_spec, transpose_batch_sequence, mesh):
         gmesh = global_mesh_resource()
         sequence_dim = 0 if transpose_batch_sequence else 1
@@ -645,7 +644,7 @@ class AmaxCalculationPrimitive(BasePrimitive):
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
             )
-            amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(
+            amax = amax_scope.all_reduce_amax_along_TPSP_and_FSDP(
                 amax, x_spec, transpose_batch_sequence, mesh
             )
 

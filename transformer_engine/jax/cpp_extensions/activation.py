@@ -430,6 +430,8 @@ class ActLuPrimitive(BasePrimitive):
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
+                amax_scope=amax_scope,
+                transpose_batch_sequence=transpose_batch_sequence,
                 output_amax_when_no_scaling=output_amax_when_no_scaling,
                 is_outer=True,
             )
@@ -439,7 +441,7 @@ class ActLuPrimitive(BasePrimitive):
                     local_updated_amax, mesh
                 )
             elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING.value:
-                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(
+                global_updated_amax = amax_scope.all_reduce_amax_along_TPSP_and_FSDP(
                     local_updated_amax, out_spec, transpose_batch_sequence, mesh
                 )
             else:
@@ -983,7 +985,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
                     local_updated_amax, mesh
                 )
             elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING.value:
-                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(
+                global_updated_amax = amax_scope.all_reduce_amax_along_TPSP_and_FSDP(
                     local_updated_amax, x_spec, transpose_batch_sequence, mesh
                 )
             else:

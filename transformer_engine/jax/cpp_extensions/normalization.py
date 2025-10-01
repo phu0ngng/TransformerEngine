@@ -486,7 +486,7 @@ class NormFwdPrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-        del result_infos, is_outer, output_amax_when_no_scaling
+        del result_infos, is_outer
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
         g_spec = get_padded_spec(arg_infos[2])
@@ -585,7 +585,7 @@ class NormFwdPrimitive(BasePrimitive):
                     local_updated_amax, mesh
                 )
             elif scaling_mode == ScalingMode.CURRENT_TENSOR_SCALING.value:
-                global_updated_amax = AmaxScope.all_reduce_amax_along_TPSP_and_FSDP(
+                global_updated_amax = amax_scope.all_reduce_amax_along_TPSP_and_FSDP(
                     local_updated_amax, x_spec, transpose_batch_sequence, mesh
                 )
             else:
