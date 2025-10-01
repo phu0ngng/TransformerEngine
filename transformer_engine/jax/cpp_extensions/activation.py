@@ -258,7 +258,6 @@ class ActLuPrimitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
-        del act_len, is_outer, amax_scope, transpose_batch_sequence, output_amax_when_no_scaling
         check_valid_batch_dims(batch_dims)
         assert ActLuPrimitive.outer_primitive is not None
         x, scale, amax = batched_args
@@ -273,12 +272,14 @@ class ActLuPrimitive(BasePrimitive):
                 amax,
                 out_dtype=out_dtype,
                 act_enum=act_enum,
+                act_len=act_len,
                 scaling_mode=scaling_mode,
                 is_2x=is_2x,
                 scale_dtype=scale_dtype,
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
                 output_amax_when_no_scaling=output_amax_when_no_scaling,
+                is_outer=is_outer,
             ),
             out_bdims,
         )
@@ -368,7 +369,7 @@ class ActLuPrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-        del result_infos, is_outer, output_amax_when_no_scaling  # Unused.
+        del result_infos, is_outer
         x_spec = get_padded_spec(arg_infos[0])
         scale_spec = get_padded_spec(arg_infos[1])
 
@@ -527,7 +528,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
     name = "te_dact_dbias_quantize_ffi"
     multiple_results = True
     # out_dtype, scaling_mode, is_2x, scale_dtype, is_dbias, act_enum, act_len, amax_scope, transpose_batch_sequence, output_amax_when_no_scaling, is_outer
-    impl_static_args = (4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+    impl_static_args = (4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
     inner_primitive = None
     outer_primitive = None
 
@@ -652,6 +653,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         act_len,
         amax_scope,
         transpose_batch_sequence,
+        output_amax_when_no_scaling,
         is_outer,
     ):
         """
@@ -664,7 +666,6 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
             is_outer,
             amax_scope,
             transpose_batch_sequence,
-            output_amax_when_no_scaling,
         )
         dz_aval, x_aval, scale_aval, amax_aval = ctx.avals_in
         assert dz_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -761,7 +762,6 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
-        del is_outer, output_amax_when_no_scaling
         check_valid_batch_dims(batch_dims)
         assert BaseDActLuDBiasQuantizePrimitive.outer_primitive is not None
         dz, x, scale, amax = batched_args
@@ -791,7 +791,7 @@ class BaseDActLuDBiasQuantizePrimitive(BasePrimitive):
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
                 output_amax_when_no_scaling=output_amax_when_no_scaling,
-                is_outer=False,
+                is_outer=is_outer,
             ),
             out_bdims,
         )
@@ -1173,7 +1173,7 @@ def act_lu(
     amax = jnp.zeros((1,), jnp.float32)  # need to init with zero and shape=(1,)
 
     if quantizer is None:
-        out, _, _, _, _, updated_amax = ActLuPrimitive.outer_primitive.bind(
+        out, _, _, _, updated_amax = ActLuPrimitive.outer_primitive.bind(
             x,
             scale,
             amax,
@@ -1183,7 +1183,6 @@ def act_lu(
             scaling_mode=ScalingMode.NO_SCALING.value,
             is_2x=False,
             scale_dtype=jnp.float32,
-            is_outer=True,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
@@ -1236,7 +1235,6 @@ def act_lu(
         scaling_mode=quantizer.scaling_mode.value,
         is_2x=quantizer.is_2x2x(),
         scale_dtype=quantizer.get_scale_dtype(),
-        is_outer=True,
         amax_scope=amax_scope,
         transpose_batch_sequence=transpose_batch_sequence,
         output_amax_when_no_scaling=output_amax_when_no_scaling,
@@ -1299,7 +1297,7 @@ def quantize_dact_dbias(
         return _jax_quantize_dact_dbias(dz, x, activation_type, is_dbias, quantizer)
 
     if quantizer is None:
-        output, _, _, _, _, _, updated_amax = PrimitiveClass.outer_primitive.bind(
+        output, _, _, _, _, updated_amax = PrimitiveClass.outer_primitive.bind(
             dz,
             x,
             scale,
@@ -1314,7 +1312,6 @@ def quantize_dact_dbias(
             is_dbias=False,
             act_enum=act_type_id,
             act_len=act_len,
-            is_outer=True,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
@@ -1350,7 +1347,6 @@ def quantize_dact_dbias(
             flatten_axis=-2,
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
-            output_amax_when_no_scaling=output_amax_when_no_scaling,
         )
 
     is_gated = act_len == 2

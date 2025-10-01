@@ -92,7 +92,7 @@ class NormFwdPrimitive(BasePrimitive):
 
     name = "te_norm_forward_ffi"
     multiple_results = True
-    impl_static_args = (5, 6, 7, 8, 9, 10, 11, 12, 13, 14)
+    impl_static_args = (5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
     inner_primitive = None
     outer_primitive = None
 
@@ -119,7 +119,7 @@ class NormFwdPrimitive(BasePrimitive):
         """
         LayerNorm fwd inner primitive abstract
         """
-        del output_amax_when_no_scaling
+        del amax_scope, transpose_batch_sequence, output_amax_when_no_scaling
         x_dtype = dtypes.canonicalize_dtype(x_aval.dtype)
 
         assert x_dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -245,7 +245,7 @@ class NormFwdPrimitive(BasePrimitive):
         """
         LayerNorm fwd lowering rules
         """
-        del out_dtype, scale_dtype, is_outer
+        del out_dtype, scale_dtype, is_outer, amax_scope, transpose_batch_sequence
         x_aval, scale_aval, amax_aval, gamma_aval, beta_aval = ctx.avals_in
 
         assert x_aval.dtype in [jnp.float32, jnp.float16, jnp.bfloat16]
@@ -303,7 +303,6 @@ class NormFwdPrimitive(BasePrimitive):
         """
         to describe implementation
         """
-        del is_outer
         assert NormFwdPrimitive.inner_primitive is not None
         (
             out,
@@ -330,7 +329,7 @@ class NormFwdPrimitive(BasePrimitive):
             amax_scope=amax_scope,
             transpose_batch_sequence=transpose_batch_sequence,
             output_amax_when_no_scaling=output_amax_when_no_scaling,
-            is_outer=False,
+            is_outer=is_outer,
         )
         rowwise_scale_inv_shape, colwise_scale_inv_shape = ScalingMode(
             scaling_mode
@@ -373,7 +372,6 @@ class NormFwdPrimitive(BasePrimitive):
         """
         to describe batch rules for vmap
         """
-        del is_outer
         check_valid_batch_dims(batch_dims)
         assert NormFwdPrimitive.outer_primitive is not None
         x, scale, amax, gamma, beta = batched_args
@@ -405,7 +403,7 @@ class NormFwdPrimitive(BasePrimitive):
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
                 output_amax_when_no_scaling=output_amax_when_no_scaling,
-                is_outer=False,
+                is_outer=is_outer,
             ),
             out_bdims,
         )
@@ -580,7 +578,7 @@ class NormFwdPrimitive(BasePrimitive):
                 amax_scope=amax_scope,
                 transpose_batch_sequence=transpose_batch_sequence,
                 output_amax_when_no_scaling=output_amax_when_no_scaling,
-                is_outer=True,  # TODO: why?
+                is_outer=False,
             )
             if scaling_mode == ScalingMode.DELAYED_TENSOR_SCALING.value:
                 global_updated_amax = all_reduce_max_along_all_axes_except_PP(

@@ -197,12 +197,12 @@ Error_Type NormForwardInitializeFFI(cudaStream_t stream, Buffer_Type x_buf, Buff
                                     Result_Type mu_buf, Result_Type rsigma_buf,
                                     Result_Type wkspace_buf, int norm_type,
                                     bool zero_centered_gamma, double epsilon, int64_t sm_margin,
-                                    JAXX_Scaling_Mode scaling_mode, bool is_2x) {
+                                    JAXX_Scaling_Mode scaling_mode, bool is_2x, bool output_amax_when_no_scaling) {
   return wrapInStreamCapture(std::function(NormForwardFFI), stream, x_buf, scale_buf, amax_buf,
                              gamma_buf, beta_buf, output_buf, colwise_output_buf, scale_inv_buf,
                              colwise_scale_inv_buf, updated_amax_buf, mu_buf, rsigma_buf,
                              wkspace_buf, norm_type, zero_centered_gamma, epsilon, sm_margin,
-                             scaling_mode, is_2x);
+                             scaling_mode, is_2x, output_amax_when_no_scaling);
 }
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardInitializeHandler, NormForwardInitializeFFI,
@@ -226,7 +226,9 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(NormForwardInitializeHandler, NormForwardInitializ
                                   .Attr<double>("epsilon")
                                   .Attr<int64_t>("sm_margin")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_2x"));
+                                  .Attr<bool>("is_2x")
+                                  .Attr<bool>("output_amax_when_no_scaling")
+                                  );
 
 pybind11::tuple GetNormBackwardWorkspaceSizes(size_t batch_size, size_t hidden_size, DType in_dtype,
                                               DType w_dtype, NVTE_Norm_Type norm_type,
