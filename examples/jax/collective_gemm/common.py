@@ -96,39 +96,38 @@ def _initialize_distributed(args):
     if _distributed_initialized:
         return
 
-    if args.coordinator_address is None or args.num_processes is None or args.process_id is None:
-        raise ValueError(
-            "All distributed initialization arguments are required: "
-            "--coordinator-address, --num-processes, --process-id"
+    if not args.single_process_multiple_devices:
+        if args.coordinator_address is None or args.num_processes is None or args.process_id is None:
+            raise ValueError(
+                "All distributed initialization arguments are required: "
+                "--coordinator-address, --num-processes, --process-id"
+            )
+        if args.local_device_ids is None:
+            assert (
+                args.num_devices_per_process is not None
+            ), "Either local_device_ids or num_devices_per_process must be provided"
+            # Calculate device range for this process
+            # Single process single device: each process gets one unique device
+            # Single process multiple devices: each process gets a unique range of devices
+            start_device = args.process_id * args.num_devices_per_process
+            device_range = range(start_device, start_device + args.num_devices_per_process)
+            global_device_ids_for_this_process = ",".join(map(str, device_range))
+        else:
+            # Use explicitly provided global device IDs
+            global_device_ids_for_this_process = args.local_device_ids
+            args.num_devices_per_process = len(args.local_device_ids.split(","))
+
+        print(
+            f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
+            f"num_processes={args.num_processes}, process_id={args.process_id}"
         )
-    if args.local_device_ids is None:
-        assert (
-            args.num_devices_per_process is not None
-        ), "Either local_device_ids or num_devices_per_process must be provided"
-        # Calculate device range for this process
-        # Single process single device: each process gets one unique device
-        # Single process multiple devices: each process gets a unique range of devices
-        start_device = args.process_id * args.num_devices_per_process
-        device_range = range(start_device, start_device + args.num_devices_per_process)
-        global_device_ids_for_this_process = ",".join(map(str, device_range))
-    else:
-        # Use explicitly provided global device IDs
-        global_device_ids_for_this_process = args.local_device_ids
-        args.num_devices_per_process = len(args.local_device_ids.split(","))
-
-    assert args.num_devices_per_process == 1, "Only single process single GPU is supported!"
-
-    print(
-        f"Initializing JAX distributed with coordinator={args.coordinator_address}, "
-        f"num_processes={args.num_processes}, process_id={args.process_id}"
-    )
-    # Note: "local_device_ids" is a JAX term meaning "global CUDA devices managed by this process"
-    jax.distributed.initialize(
-        coordinator_address=args.coordinator_address,
-        num_processes=args.num_processes,
-        process_id=args.process_id,
-        local_device_ids=global_device_ids_for_this_process,
-    )
+        # Note: "local_device_ids" is a JAX term meaning "global CUDA devices managed by this process"
+        jax.distributed.initialize(
+            coordinator_address=args.coordinator_address,
+            num_processes=args.num_processes,
+            process_id=args.process_id,
+            local_device_ids=global_device_ids_for_this_process,
+        )
 
     _distributed_initialized = True
     jax.clear_caches()
@@ -136,13 +135,13 @@ def _initialize_distributed(args):
         "jax_use_shardy_partitioner", False
     )  # CollectiveGEMM does not work with Shardy yet
 
-    assert jax.local_device_count() == 1, (
+    devices_per_process = jax.local_device_count() 
+    assert devices_per_process == 1 or args.single_process_multiple_devices, (
         f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found"
         f" {jax.local_device_count()}"
     )
 
-    devices_per_process = 1
-    num_total_devices = args.num_processes
+    num_total_devices = args.num_processes * devices_per_process
 
     print(
         f"Initializing CGEMM communicator with num_total_devices={num_total_devices},"
@@ -201,11 +200,11 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
     parser.add_argument(
         "--num-processes",
         type=int,
-        default=None,
+        default=1,
         help="Number of processes for distributed initialization",
     )
     parser.add_argument(
-        "--process-id", type=int, default=None, help="Process ID for distributed initialization"
+        "--process-id", type=int, default=0, help="Process ID for distributed initialization"
     )
     parser.add_argument(
         "--local-device-ids",
@@ -214,7 +213,7 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
         help="Local device IDs for distributed initialization (comma-separated)",
     )
     parser.add_argument(
-        "--num-devices-per-process", type=int, default=1, help="Number of devices per process"
+        "--num-devices-per-process", type=int, default=None, help="Number of devices per process"
     )
 
     # Test configuration arguments
@@ -237,6 +236,9 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
     )
     parser.add_argument(
         "--enable-data-parallel", action="store_true", help="Enable data parallelism"
+    )
+    parser.add_argument(
+        "--single-process-multiple-devices", action="store_true", help="Enable single process multiple devices"
     )
     parser.add_argument(
         "--enable-result-check", action="store_true", default=True, help="Enable result checking"
