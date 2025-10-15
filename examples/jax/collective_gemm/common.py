@@ -135,7 +135,7 @@ def _initialize_distributed(args):
         "jax_use_shardy_partitioner", False
     )  # CollectiveGEMM does not work with Shardy yet
 
-    devices_per_process = jax.local_device_count() 
+    devices_per_process = jax.local_device_count()
     assert devices_per_process == 1 or args.single_process_multiple_devices, (
         f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found"
         f" {jax.local_device_count()}"
@@ -157,6 +157,8 @@ def _initialize_distributed(args):
 
 
 def _get_dp_and_tp_sizes(args):
+    if args.num_devices_per_process is None:
+        args.num_devices_per_process = jax.local_device_count()
     num_gpu = args.num_processes * args.num_devices_per_process
     if args.tensor_parallel_size is None:
         num_gpu_dp = 2 if args.enable_data_parallel else 1
@@ -238,7 +240,7 @@ def cgemm_parser(description="Collective GEMM test on multi-GPU with tensor para
         "--enable-data-parallel", action="store_true", help="Enable data parallelism"
     )
     parser.add_argument(
-        "--single-process-multiple-devices", action="store_true", help="Enable single process multiple devices"
+        "--single-process-multiple-devices", default=True, help="Enable single process multiple devices"
     )
     parser.add_argument(
         "--enable-result-check", action="store_true", default=True, help="Enable result checking"

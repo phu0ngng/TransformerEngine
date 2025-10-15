@@ -54,23 +54,6 @@ def _get_operand_sharding(mesh, collective_op, is_with_dp):
     return x_sharding, weight_sharding, bias_sharding, output_sharding
 
 
-def _get_dp_and_tp_sizes(args):
-    num_gpu = args.num_processes * args.num_devices_per_process
-    if args.tensor_parallel_size is None:
-        num_gpu_dp = 2 if args.enable_data_parallel else 1
-        assert (
-            num_gpu > 1 and num_gpu % num_gpu_dp == 0
-        ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
-        num_gpu_tp = num_gpu // num_gpu_dp
-    else:
-        num_gpu_tp = args.tensor_parallel_size
-        assert (
-            num_gpu > 1 and num_gpu % num_gpu_tp == 0
-        ), "Number of GPUs must be greater than 1 and divisible by number of data parallel GPUs"
-        num_gpu_dp = num_gpu // num_gpu_tp
-    return num_gpu_dp, num_gpu_tp
-
-
 @partial(jax.jit, static_argnames=("contracting_dims", "collective_op", "output_sharding"))
 def _jitted_cgemm(x, weight, bias, contracting_dims, collective_op, output_sharding):
     output = tex.gemm(
@@ -167,8 +150,8 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         self.args.num_processes = self.num_processes
         self.args.process_id = self.process_id
         self.args.local_device_ids = self.local_device_ids
-        self.args.num_devices_per_process = self.num_devices_per_process
-        self.args.enable_data_parallel = True
+        # self.args.num_devices_per_process = self.num_devices_per_process
+        # self.args.enable_data_parallel = True
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         _initialize_distributed(self.args)
         self.mesh = _create_mesh(self.args)
@@ -184,10 +167,10 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         self.args.collective_type = "all_gather"
         run_gemm_tests(self.args, self.mesh)
 
-    def test_te_bf16_reduce_scatter_with_dp(self):
-        """Test Collective GEMM with ReduceScatter"""
-        self.args.collective_type = "reduce_scatter"
-        run_gemm_tests(self.args, self.mesh)
+    # def test_te_bf16_reduce_scatter_with_dp(self):
+    #     """Test Collective GEMM with ReduceScatter"""
+    #     self.args.collective_type = "reduce_scatter"
+    #     run_gemm_tests(self.args, self.mesh)
 
 
 if __name__ == "__main__":

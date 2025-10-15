@@ -22,8 +22,8 @@ def distributed_args(request):
         request.cls.num_processes = int(request.config.getoption("--num-processes"))
         request.cls.process_id = int(request.config.getoption("--process-id"))
         request.cls.local_device_ids = request.config.getoption("--local-device-ids")
-        request.cls.num_devices_per_process = (
-            1
-            if request.cls.local_device_ids is None
-            else len(request.cls.local_device_ids.split(","))
-        )
+        # request.cls.num_devices_per_process = (
+        #     1
+        #     if request.cls.local_device_ids is None
+        #     else len(request.cls.local_device_ids.split(","))
+        # )

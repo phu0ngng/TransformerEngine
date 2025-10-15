@@ -276,14 +276,12 @@ def collective_gemm_bootstrap(
         this function with its own unique process_id.
     """
 
-    assert (
-        num_devices_per_process == 1 and jax.local_device_count() == 1
-    ), "Only single device per process is supported at the moment!"
     assert num_total_devices % num_devices_per_process == 0, (
         f"Invalid num_total_devices={num_total_devices},"
         f" num_devices_per_process={num_devices_per_process}"
     )
     assert 0 <= process_id < num_total_devices, f"Invalid process_id={process_id}"
+    assert num_devices_per_process == 1 or num_devices_per_process == tensor_parallel_size, f"Only support num_devices_per_process equals to 1 or tensor_parallel_size, got num_devices_per_process={num_devices_per_process}, tp_size={tensor_parallel_size}"
     initialize_cgemm_communicator(
         num_total_devices,
         num_devices_per_process,
