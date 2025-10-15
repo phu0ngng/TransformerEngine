@@ -233,6 +233,17 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   if (!transformer_engine::getenv<bool>("UB_SKIPMC") &&
       transformer_engine::cuda::supports_multicast() && (*comm)->ar2_nvsize > 1) {
     // multicast init only for TP ops (____2 operations)
+    
+    // DEBUG: Check device context and rank information
+    int current_device;
+    cudaGetDevice(&current_device);
+    printf("[DEBUG] Multicast Init: Process entering multicast initialization\n");
+    printf("[DEBUG] Current CUDA device: %d\n", current_device);
+    printf("[DEBUG] Rank info: ar2_nvrank=%d, ar2_nvsize=%d, nvsize=%d, ar_nvsize=%d\n",
+           (*comm)->ar2_nvrank, (*comm)->ar2_nvsize, (*comm)->nvsize, (*comm)->ar_nvsize);
+    printf("[DEBUG] ar2_firstgpu=%d, mnnvl_fabric=%s\n", 
+           (*comm)->ar2_firstgpu, mnnvl_fabric ? "true" : "false");
+    fflush(stdout);
     size_t mc_maxsize = MULTICAST_GB_TOTAL * (1ull << 30);
     (*comm)->mc_offset = 0;
     (*comm)->use_mc = 1;
