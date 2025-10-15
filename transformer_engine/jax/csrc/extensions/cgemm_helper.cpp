@@ -64,9 +64,6 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &i
 void CommunicatorHandler::init(int num_total_devices, int num_devices_per_process, int process_id,
                                int tp_size) {
   // Validate inputs
-  NVTE_CHECK(num_devices_per_process == 1,
-             "num_devices_per_process must be == 1, got num_devices_per_process=",
-             num_devices_per_process);
   NVTE_CHECK(num_total_devices >= 1,
              "num_total_devices must be >= 1, got num_total_devices=", num_total_devices);
   NVTE_CHECK(
@@ -79,6 +76,9 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   NVTE_CHECK(num_total_devices % tp_size == 0,
              "num_total_devices must be divisible by tp_size, got num_total_devices=",
              num_total_devices, ", tp_size=", tp_size);
+  NVTE_CHECK(num_devices_per_process == 1 || num_devices_per_process == tp_size,
+             "num_devices_per_process must be 1 or tp_size, got num_devices_per_process=",
+             num_devices_per_process, ", tp_size=", tp_size);
 
   auto &handler = get(false);
   handler.num_total_devices = num_total_devices;
