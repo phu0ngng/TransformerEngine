@@ -6,59 +6,84 @@
 
 #include "cgemm_helper.h"
 
+#include <mutex>
 #include "common/util/system.h"
 #include "nccl.h"
 
 namespace transformer_engine {
 namespace jax {
 
+// Define static member for compilation
+std::string CommunicatorHandler::_nccl_id_file_path;
+
 ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &id_type) {
-  ncclUniqueId unique_id;
+  // Static variables inside the handler method for better encapsulation
+  static std::once_flag unique_id_flag;
+  static ncclUniqueId unique_id;
+  
+  // this function is called once per process
+  std::call_once(unique_id_flag, [this, &id_type]() { 
+    ncclUniqueId new_unique_id;
 
-  int tp_domain_id = get_tp_domain_id();
-  bool is_tp_leader = (get_local_device_id_within_tp_domain() == 0);
+    int tp_domain_id = get_tp_domain_id();
+    bool is_tp_leader = (get_local_device_id_within_tp_domain() == 0);
 
-  pid_t pgid = getpgid(0);
+    pid_t pgid = getpgid(0);
 
-  std::string base_path = getenv<std::string>("NVTE_JAX_NCCL_FILE_PATH", "/tmp");
-  std::string id_file = base_path + "/nccl_" + id_type + "_unique_id_pgid_" + std::to_string(pgid) +
-                        "_" + std::to_string(num_total_devices) + "_" + std::to_string(tp_size) +
-                        "_domain_" + std::to_string(tp_domain_id) + ".bin";
+    std::string base_path = getenv<std::string>("NVTE_JAX_NCCL_FILE_PATH", "/tmp");
+    std::string id_file = base_path + "/nccl_" + id_type + "_unique_id_pgid_" + std::to_string(pgid) +
+                          "_" + std::to_string(num_total_devices) + "_" + std::to_string(tp_size) +
+                          "_domain_" + std::to_string(tp_domain_id) + ".bin";
 
-  if (is_tp_leader) {
-    NVTE_CHECK_NCCL(ncclGetUniqueId(&unique_id));
+    if (is_tp_leader) {
+      NVTE_CHECK_NCCL(ncclGetUniqueId(&new_unique_id));
 
-    // Write the ID to a temporary file
-    std::ofstream file(id_file, std::ios::binary);
-    NVTE_CHECK(file.is_open(), "Failed to create NCCL unique ID file: ", id_file);
-    file.write(reinterpret_cast<const char *>(&unique_id), sizeof(ncclUniqueId));
-    file.close();
-  } else {
-    // Wait for the ID file to be created and read it
-    int attempts = 0;
-    const int max_attempts = 100;
-    while (attempts < max_attempts) {
-      std::ifstream file(id_file, std::ios::binary);
-      if (file.is_open()) {
-        file.read(reinterpret_cast<char *>(&unique_id), sizeof(ncclUniqueId));
-        if (file.gcount() == sizeof(ncclUniqueId)) {
+      // Write the ID to a temporary file
+      std::ofstream file(id_file, std::ios::binary);
+      NVTE_CHECK(file.is_open(), "Failed to create NCCL unique ID file: ", id_file);
+      file.write(reinterpret_cast<const char *>(&new_unique_id), sizeof(ncclUniqueId));
+      file.close();
+    } else {
+      // Wait for the ID file to be created and read it
+      int attempts = 0;
+      const int max_attempts = 100;
+      while (attempts < max_attempts) {
+        std::ifstream file(id_file, std::ios::binary);
+        if (file.is_open()) {
+          file.read(reinterpret_cast<char *>(&unique_id), sizeof(ncclUniqueId));
+          if (file.gcount() == sizeof(ncclUniqueId)) {
+            file.close();
+            break;
+          }
           file.close();
-          break;
         }
-        file.close();
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        attempts++;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
-      attempts++;
+      NVTE_CHECK(attempts < max_attempts,
+                 "Timeout waiting for " + id_type + " NCCL unique ID file from leader: ", id_file);
     }
-    NVTE_CHECK(attempts < max_attempts,
-               "Timeout waiting for " + id_type + " NCCL unique ID file from leader: ", id_file);
-  }
 
-  if (is_tp_leader) {
-    _nccl_id_file_name.push_back(id_file);
-  }
+    if (is_tp_leader) {
+      // Store file path in static member for cleanup
+      _nccl_id_file_path = id_file;
+    }
 
+    // Store the unique ID in the static variable
+    unique_id = new_unique_id;
+  });
+  
   return unique_id;
+}
+
+// Static cleanup function for NCCL unique ID files
+void CommunicatorHandler::cleanup_nccl_files() {
+  static std::once_flag cleanup_flag;
+  std::call_once(cleanup_flag, []() {
+    if (!_nccl_id_file_path.empty()) {
+      std::remove(_nccl_id_file_path.c_str());
+    }
+  });
 }
 
 void CommunicatorHandler::init(int num_total_devices, int num_devices_per_process, int process_id,
@@ -260,9 +285,8 @@ CommunicatorHandler::~CommunicatorHandler() {
   }
   _device_barriers.clear();
 
-  for (const auto &file_path : _nccl_id_file_name) {
-    std::remove(file_path.c_str());
-  }
+  // Clean up static files (thread-safe)
+  cleanup_nccl_files();
 }
 
 }  // namespace jax

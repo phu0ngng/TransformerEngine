@@ -128,6 +128,7 @@ class CommunicatorHandler {
   int get_tp_num_domains() const { return tp_num_domains; }
 
   static void init(int num_total_devices, int num_devices_per_process, int process_id, int tp_size);
+  static void cleanup_nccl_files();
 
  private:
   ncclUniqueId coordinate_nccl_unique_id(const std::string &id_type);
@@ -153,7 +154,9 @@ class CommunicatorHandler {
 
   bool _initialize = false;
   std::vector<int*> _device_barriers;
-  std::vector<std::string> _nccl_id_file_name;
+  
+  // Static member for cleanup file path
+  static std::string _static_cleanup_file_path;
 };
 
 // Plan registry for caching collective GEMM executors
