@@ -136,8 +136,9 @@ def _initialize_distributed(args):
     )  # CollectiveGEMM does not work with Shardy yet
 
     devices_per_process = jax.local_device_count()
-    assert devices_per_process == 1 or args.single_process_multiple_devices, (
-        f"[{args.process_id}|{args.num_devices_per_process}] Expected 1 GPU per process, found"
+    # Support both single and multiple devices per process
+    assert devices_per_process >= 1, (
+        f"[{args.process_id}|{args.num_devices_per_process}] Expected at least 1 GPU per process, found"
         f" {jax.local_device_count()}"
     )
 

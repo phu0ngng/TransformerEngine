@@ -152,7 +152,7 @@ class CommunicatorHandler {
   ~CommunicatorHandler();
 
   bool _initialize = false;
-  int *_device_barrier = nullptr;
+  std::vector<int*> _device_barriers;
   std::vector<std::string> _nccl_id_file_name;
 };
 

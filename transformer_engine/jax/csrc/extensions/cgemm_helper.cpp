@@ -76,6 +76,9 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   NVTE_CHECK(num_total_devices % tp_size == 0,
              "num_total_devices must be divisible by tp_size, got num_total_devices=",
              num_total_devices, ", tp_size=", tp_size);
+  NVTE_CHECK(num_devices_per_process >= 1,
+             "num_devices_per_process must be >= 1, got num_devices_per_process=",
+             num_devices_per_process);
   NVTE_CHECK(num_devices_per_process == 1 || num_devices_per_process == tp_size,
              "num_devices_per_process must be 1 or tp_size, got num_devices_per_process=",
              num_devices_per_process, ", tp_size=", tp_size);
@@ -101,11 +104,10 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
 
   // Initialize local devices and calculate their global device IDs and TP topology
   for (int local_idx = 0; local_idx < num_devices_per_process; local_idx++) {
-    // Use the device that JAX has already assigned to this process
-    int current_device;
-    NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-    handler.local_device_ids_within_process[local_idx] = current_device;
-    handler.global_device_ids[local_idx] = process_id * num_devices_per_process + local_idx;
+    // Calculate the actual device ID for this process and local index
+    int device_id = process_id * num_devices_per_process + local_idx;
+    handler.local_device_ids_within_process[local_idx] = device_id;
+    handler.global_device_ids[local_idx] = device_id;
 
     // Calculate TP-related values for this device
     int global_device_id = handler.global_device_ids[local_idx];
@@ -131,8 +133,12 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   }
   NVTE_CHECK_NCCL(ncclGroupEnd());
 
-  // Allocate device memory for barrier operations
-  NVTE_CHECK_CUDA(cudaMalloc(&handler._device_barrier, sizeof(int)));
+  // Allocate device memory for barrier operations on each device
+  handler._device_barriers.resize(num_devices_per_process);
+  for (int local_idx = 0; local_idx < num_devices_per_process; local_idx++) {
+    NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids_within_process[local_idx]));
+    NVTE_CHECK_CUDA(cudaMalloc(&handler._device_barriers[local_idx], sizeof(int)));
+  }
 
   handler._initialize = true;
 
@@ -213,7 +219,7 @@ void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
   ncclComm_t tp_comm = tp_comms[device_idx];
 
   NVTE_CHECK_NCCL(
-      ncclAllReduce(_device_barrier, _device_barrier, 1, ncclInt, ncclSum, tp_comm, nullptr));
+      ncclAllReduce(_device_barriers[device_idx], _device_barriers[device_idx], 1, ncclInt, ncclSum, tp_comm, nullptr));
   cudaDeviceSynchronize();
 }
 
@@ -232,7 +238,7 @@ void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_by
   cudaDeviceSynchronize();
 }
 
-CommunicatorHandler::CommunicatorHandler() : _device_barrier(nullptr) {
+CommunicatorHandler::CommunicatorHandler() {
   allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf,
                           size_t input_bytes, ExtComm comm) {
     this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
@@ -248,7 +254,11 @@ CommunicatorHandler::~CommunicatorHandler() {
       }
     }
   }
-  if (_device_barrier) cudaFree(_device_barrier);
+  // Clean up multiple device barriers
+  for (int* barrier : _device_barriers) {
+    if (barrier) cudaFree(barrier);
+  }
+  _device_barriers.clear();
 
   for (const auto &file_path : _nccl_id_file_name) {
     std::remove(file_path.c_str());
