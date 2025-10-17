@@ -154,9 +154,9 @@ class CommunicatorHandler {
 
   bool _initialize = false;
   std::vector<int*> _device_barriers;
-  
+
   // Static member for cleanup file path
-  static std::string _static_cleanup_file_path;
+  static std::string _nccl_id_file_path;
 };
 
 // Plan registry for caching collective GEMM executors
