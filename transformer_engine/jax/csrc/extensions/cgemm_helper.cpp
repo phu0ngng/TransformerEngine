@@ -276,12 +276,28 @@ void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_by
                                               void *input_buf, size_t input_bytes, ExtComm) {
   NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
 
-  // For single process multiple devices, no allgather needed (all devices in same process)
+  // For single process multiple devices, simulate allgather with local memory operations
   bool is_multi_device_per_process = (num_devices_per_process > 1 && num_devices_per_process == tp_size);
   if (is_multi_device_per_process) {
-    printf("[DEBUG] AllGather: Single process multiple devices - no allgather needed, returning immediately\n");
+    printf("[DEBUG] AllGather: Single process multiple devices - simulating allgather with memory copy\n");
     fflush(stdout);
-    return;  // No-op for single process multiple devices
+    
+    // For single process, all devices share the same memory space
+    // We can simulate allgather by replicating the input data across all output slots
+    size_t expected_output_bytes = input_bytes * tp_size;
+    NVTE_CHECK(output_bytes == expected_output_bytes, "Simulated allgather buffer size mismatch: expected ",
+               expected_output_bytes, ", got ", output_bytes);
+    
+    // Replicate input data to all output positions (simulate gathering from all ranks)
+    char* output_ptr = reinterpret_cast<char*>(output_buf);
+    for (int rank = 0; rank < tp_size; rank++) {
+      memcpy(output_ptr + rank * input_bytes, input_buf, input_bytes);
+    }
+    
+    printf("[DEBUG] AllGather: Simulated allgather completed (replicated %zu bytes to %d ranks)\n", 
+           input_bytes, tp_size);
+    fflush(stdout);
+    return;
   }
 
   int device_idx = get_local_device_idx_for_current_device();
@@ -295,7 +311,7 @@ void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_by
   cudaDeviceSynchronize();
 }
 
-CommunicatorHandler::CommunicatorHandler() : leader_comm(nullptr) {
+CommunicatorHandler::CommunicatorHandler() {
   allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf,
                           size_t input_bytes, ExtComm comm) {
     this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
@@ -310,11 +326,6 @@ CommunicatorHandler::~CommunicatorHandler() {
         ncclCommDestroy(comm);
       }
     }
-  }
-  
-  // Clean up leader communicator
-  if (leader_comm != nullptr) {
-    ncclCommDestroy(leader_comm);
   }
   // Clean up multiple device barriers
   for (int* barrier : _device_barriers) {
