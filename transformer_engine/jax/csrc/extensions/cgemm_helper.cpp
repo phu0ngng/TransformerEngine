@@ -158,24 +158,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   }
   NVTE_CHECK_NCCL(ncclGroupEnd());
 
-  // For multi-device per process, create a separate leader-only communicator
-  if (num_devices_per_process > 1 && num_devices_per_process == tp_size) {
-    printf("[DEBUG] Creating leader-only communicator for multi-device per process\n");
-    fflush(stdout);
-    
-    // Only TP leader (device 0) participates in the leader communicator
-    if (handler.local_device_ids_within_tp_domain[0] == 0) {  // This process has the TP leader
-      ncclUniqueId leader_id = handler.coordinate_nccl_unique_id("leader");
-      NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids_within_process[0]));  // Set to device 0
-      NVTE_CHECK_NCCL(ncclCommInitRank(&handler.leader_comm, handler.tp_num_domains, leader_id, handler.tp_domain_ids[0]));
-      printf("[DEBUG] Leader communicator initialized for domain %d\n", handler.tp_domain_ids[0]);
-      fflush(stdout);
-    } else {
-      handler.leader_comm = nullptr;  // Non-leader processes don't have leader comm
-    }
-  } else {
-    handler.leader_comm = nullptr;  // Single device per process doesn't need leader comm
-  }
+  // For single process multiple devices, no inter-process communication needed
+  handler.leader_comm = nullptr;  // Not needed since we use no-op barriers/allgathers
 
   // Allocate device memory for barrier operations on each device
   handler._device_barriers.resize(num_devices_per_process);
@@ -272,30 +256,12 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
 void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
   NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using barrier");
 
-  // For multi-device per process, only TP leader should participate in barriers
+  // For single process multiple devices, no barrier needed (all devices in same process)
   bool is_multi_device_per_process = (num_devices_per_process > 1 && num_devices_per_process == tp_size);
   if (is_multi_device_per_process) {
-    int current_device;
-    cudaGetDevice(&current_device);
-    printf("[DEBUG] Barrier: Multi-device per process, current_device=%d, tp_leader=%s\n", 
-           current_device, (get_local_device_id_within_tp_domain() == 0) ? "YES" : "NO");
+    printf("[DEBUG] Barrier: Single process multiple devices - no barrier needed, returning immediately\n");
     fflush(stdout);
-    
-    // Only TP leader (device 0 in TP domain) participates in barriers
-    if (get_local_device_id_within_tp_domain() != 0) {
-      printf("[DEBUG] Non-leader device skipping barrier\n");
-      fflush(stdout);
-      return;  // Skip barrier for non-leader devices
-    }
-    
-    // Use leader communicator for multi-device per process
-    if (leader_comm != nullptr) {
-      printf("[DEBUG] Leader device executing barrier with leader communicator\n");
-      fflush(stdout);
-      NVTE_CHECK_NCCL(ncclAllReduce(_device_barriers[0], _device_barriers[0], 1, ncclInt, ncclSum, leader_comm, nullptr));
-      cudaDeviceSynchronize();
-      return;
-    }
+    return;  // No-op for single process multiple devices
   }
 
   int device_idx = get_local_device_idx_for_current_device();
@@ -310,35 +276,12 @@ void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_by
                                               void *input_buf, size_t input_bytes, ExtComm) {
   NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
 
-  // For multi-device per process, only TP leader should participate in allgather
+  // For single process multiple devices, no allgather needed (all devices in same process)
   bool is_multi_device_per_process = (num_devices_per_process > 1 && num_devices_per_process == tp_size);
   if (is_multi_device_per_process) {
-    int current_device;
-    cudaGetDevice(&current_device);
-    printf("[DEBUG] AllGather: Multi-device per process, current_device=%d, tp_leader=%s\n", 
-           current_device, (get_local_device_id_within_tp_domain() == 0) ? "YES" : "NO");
+    printf("[DEBUG] AllGather: Single process multiple devices - no allgather needed, returning immediately\n");
     fflush(stdout);
-    
-    // Only TP leader (device 0 in TP domain) participates in allgather
-    if (get_local_device_id_within_tp_domain() != 0) {
-      printf("[DEBUG] Non-leader device skipping allgather\n");
-      fflush(stdout);
-      return;  // Skip allgather for non-leader devices
-    }
-    
-    // Use leader communicator for multi-device per process
-    if (leader_comm != nullptr) {
-      printf("[DEBUG] Leader device executing allgather with leader communicator\n");
-      fflush(stdout);
-      
-      size_t expected_output_bytes = input_bytes * tp_num_domains;  // Use tp_num_domains instead of tp_size
-      NVTE_CHECK(output_bytes == expected_output_bytes, "Leader allgather buffer size mismatch: expected ",
-                 expected_output_bytes, ", got ", output_bytes);
-      
-      NVTE_CHECK_NCCL(ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, leader_comm, nullptr));
-      cudaDeviceSynchronize();
-      return;
-    }
+    return;  // No-op for single process multiple devices
   }
 
   int device_idx = get_local_device_idx_for_current_device();
