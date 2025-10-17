@@ -20,9 +20,9 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &i
   // Static variables inside the handler method for better encapsulation
   static std::once_flag unique_id_flag;
   static ncclUniqueId unique_id;
-  
+
   // this function is called once per process
-  std::call_once(unique_id_flag, [this, &id_type]() { 
+  std::call_once(unique_id_flag, [this, &id_type]() {
     ncclUniqueId new_unique_id;
 
     int tp_domain_id = get_tp_domain_id();
@@ -72,7 +72,7 @@ ncclUniqueId CommunicatorHandler::coordinate_nccl_unique_id(const std::string &i
     // Store the unique ID in the static variable
     unique_id = new_unique_id;
   });
-  
+
   return unique_id;
 }
 
@@ -158,9 +158,6 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   }
   NVTE_CHECK_NCCL(ncclGroupEnd());
 
-  // For single process multiple devices, no inter-process communication needed
-  handler.leader_comm = nullptr;  // Not needed since we use no-op barriers/allgathers
-
   // Allocate device memory for barrier operations on each device
   handler._device_barriers.resize(num_devices_per_process);
   for (int local_idx = 0; local_idx < num_devices_per_process; local_idx++) {
@@ -228,7 +225,7 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   // Test barrier before creating executor to check if communicators work
   printf("[DEBUG] Testing barrier before executor creation...\n");
   fflush(stdout);
-  
+
   try {
     comm_handler.barrier_func(nullptr);  // Test the barrier function
     printf("[DEBUG] Barrier test completed successfully\n");
@@ -239,14 +236,14 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   }
 
   std::unique_ptr<CommOverlapCore> executor;
-  // executor = std::make_unique<CommOverlapP2PBase>(
-  //     buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
-  //     comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
-  //     comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size,
-  //     comm_handler.allgather_func, comm_handler.barrier_func, get_nvte_collective_op(collective_op),
-  //     cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
-  //     cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
-  //     cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
+  executor = std::make_unique<CommOverlapP2PBase>(
+      buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
+      comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
+      comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size,
+      comm_handler.allgather_func, comm_handler.barrier_func, get_nvte_collective_op(collective_op),
+      cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
+      cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
+      cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
 
   CommOverlapCore *executor_ptr = executor.get();
   plan_map[plan_id] = std::move(executor);
@@ -281,20 +278,20 @@ void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_by
   if (is_multi_device_per_process) {
     printf("[DEBUG] AllGather: Single process multiple devices - simulating allgather with memory copy\n");
     fflush(stdout);
-    
+
     // For single process, all devices share the same memory space
     // We can simulate allgather by replicating the input data across all output slots
     size_t expected_output_bytes = input_bytes * tp_size;
     NVTE_CHECK(output_bytes == expected_output_bytes, "Simulated allgather buffer size mismatch: expected ",
                expected_output_bytes, ", got ", output_bytes);
-    
+
     // Replicate input data to all output positions (simulate gathering from all ranks)
     char* output_ptr = reinterpret_cast<char*>(output_buf);
     for (int rank = 0; rank < tp_size; rank++) {
       memcpy(output_ptr + rank * input_bytes, input_buf, input_bytes);
     }
-    
-    printf("[DEBUG] AllGather: Simulated allgather completed (replicated %zu bytes to %d ranks)\n", 
+
+    printf("[DEBUG] AllGather: Simulated allgather completed (replicated %zu bytes to %d ranks)\n",
            input_bytes, tp_size);
     fflush(stdout);
     return;
