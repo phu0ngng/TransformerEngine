@@ -234,13 +234,47 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   bool is_multi_device_per_process = ((*comm)->ar2_nvsize > 1 && (*comm)->nvsize == (*comm)->ar2_nvsize);
 
   if (is_multi_device_per_process) {
-    printf("[DEBUG] Multi-device per process detected: ar2_nvsize=%d, nvsize=%d\n",
+    printf("[DEBUG] Multi-device per process detected: ar2_nvsize=%d, nvsize=%d\n", 
            (*comm)->ar2_nvsize, (*comm)->nvsize);
     printf("[DEBUG] Current device: %d, ar2_nvrank: %d\n", cur_dev, (*comm)->ar2_nvrank);
-    printf("[DEBUG] Using TP leader-only strategy for collective operations\n");
+    printf("[DEBUG] Using simplified multicast setup for single process\n");
     fflush(stdout);
+    
+    // For single process multiple devices, only device 0 needs to create the multicast handle
+    // All other devices in the same process can access it directly (shared memory space)
+    if ((*comm)->ar2_nvrank == 0) {
+      printf("[DEBUG] Device 0 creating multicast handle for entire process\n");
+      fflush(stdout);
+      
+      size_t mc_maxsize = MULTICAST_GB_TOTAL * (1ull << 30);
+      (*comm)->mc_offset = 0;
+      (*comm)->use_mc = 1;
+      size_t gran;
+      CUmulticastObjectProp mcProp = {};
+      mcProp.numDevices = (*comm)->ar2_nvsize;
+      mcProp.size = mc_maxsize;
+      mcProp.handleTypes = mnnvl_fabric ? CU_MEM_HANDLE_TYPE_FABRIC : CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+      
+      NVTE_CALL_CHECK_CUDA_DRIVER(
+          cuMulticastGetGranularity, &gran, &mcProp,
+          static_cast<CUmemAllocationGranularity_flags>(CU_MULTICAST_GRANULARITY_RECOMMENDED));
+      mc_maxsize = ((mc_maxsize + gran - 1) / gran) * gran;
+      mcProp.size = mc_maxsize;
+      (*comm)->mc_maxsize = mc_maxsize;
+      
+      NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastCreate, &(*comm)->mc_handle, &mcProp);
+      printf("[DEBUG] Device 0 successfully created multicast handle\n");
+      fflush(stdout);
+    } else {
+      printf("[DEBUG] Device %d using multicast handle created by device 0 (shared process memory)\n", (*comm)->ar2_nvrank);
+      fflush(stdout);
+      // In single process, all devices share the same (*comm) structure, so mc_handle is already accessible
+    }
+    
+    // Skip the complex inter-process coordination and go directly to memory mapping
+    goto setup_multicast_memory;
   }
-
+  
   if (!transformer_engine::getenv<bool>("UB_SKIPMC") &&
       transformer_engine::cuda::supports_multicast() && (*comm)->ar2_nvsize > 1) {
     // multicast init only for TP ops (____2 operations)
@@ -352,6 +386,11 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
       IPCCHECK(ipcSocketClose(&ipcSock));
       close(fd);
     }
+    
+setup_multicast_memory:
+    printf("[DEBUG] Setting up multicast memory mapping for device %d\n", (*comm)->mydev);
+    fflush(stdout);
+    
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastAddDevice, (*comm)->mc_handle,
                                 (CUdeviceptr)(*comm)->mydev);
 
@@ -369,8 +408,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
                                 const_cast<CUmemAccessDesc *>(&accessDesc), (size_t)1);
 
     (*comm)->mc_baseptr = reinterpret_cast<void *>(mc_va);
-    // TODO: This barrier might hang with multi-device per process - temporarily commented out
-    // (*comm)->_barrier((*comm)->comm_world);
+    (*comm)->_barrier((*comm)->comm_world);  // This should now work with our no-op barriers
     if (!(*comm)->myrank) printf("MC initialized succesfully, window size = %ld\n", mc_maxsize);
   } else {
 #endif
