@@ -281,20 +281,41 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     
     // Ensure we're on the correct device for this mapping
     NVTE_CHECK_CUDA(cudaSetDevice((*comm)->mydev));
+    printf("[DEBUG] Set device context to %d\n", (*comm)->mydev);
+    fflush(stdout);
     
+    printf("[DEBUG] Calling cuMulticastAddDevice for device %d...\n", (*comm)->mydev);
+    fflush(stdout);
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastAddDevice, (*comm)->mc_handle, (CUdeviceptr)(*comm)->mydev);
+    printf("[DEBUG] cuMulticastAddDevice completed for device %d\n", (*comm)->mydev);
+    fflush(stdout);
 
+    printf("[DEBUG] Calling cuMemAddressReserve...\n");
+    fflush(stdout);
     CUdeviceptr mc_va;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressReserve, &mc_va, mc_maxsize, (size_t)0, (CUdeviceptr)0U, (uint64_t)0);
+    printf("[DEBUG] cuMemAddressReserve completed, mc_va=%p\n", (void*)mc_va);
+    fflush(stdout);
+    
+    printf("[DEBUG] Calling cuMemMap...\n");
+    fflush(stdout);
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemMap, mc_va, mc_maxsize, (size_t)0, (*comm)->mc_handle, (uint64_t)0);
+    printf("[DEBUG] cuMemMap completed\n");
+    fflush(stdout);
 
+    printf("[DEBUG] Setting up memory access permissions...\n");
+    fflush(stdout);
     CUmemAccessDesc accessDesc = {};
     accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     accessDesc.location.id = (*comm)->mydev;
     accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemSetAccess, mc_va, mc_maxsize, const_cast<CUmemAccessDesc *>(&accessDesc), (size_t)1);
+    printf("[DEBUG] cuMemSetAccess completed\n");
+    fflush(stdout);
 
     (*comm)->mc_baseptr = reinterpret_cast<void *>(mc_va);
+    printf("[DEBUG] mc_baseptr set to %p\n", (*comm)->mc_baseptr);
+    fflush(stdout);
     (*comm)->_barrier((*comm)->comm_world);  // This will be a no-op for single process
     if (!(*comm)->myrank) printf("MC initialized succesfully, window size = %ld\n", mc_maxsize);
     
