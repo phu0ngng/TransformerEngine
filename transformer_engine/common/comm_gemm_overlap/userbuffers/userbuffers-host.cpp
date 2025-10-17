@@ -279,9 +279,10 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
         int root = grp * (*comm)->ar2_nvsize;
 
         // It just needs to be a bcast but reuse existing allgather comm
-        (*comm)->_allgather(
-            reinterpret_cast<void *>(exphndls), (*comm)->nvsize * sizeof(CUmemFabricHandle),
-            reinterpret_cast<void *>(tmphndl), sizeof(CUmemFabricHandle), (*comm)->comm_intra);
+        // TODO: This allgather might hang with multi-device per process - temporarily commented out
+        // (*comm)->_allgather(
+        //     reinterpret_cast<void *>(exphndls), (*comm)->nvsize * sizeof(CUmemFabricHandle),
+        //     reinterpret_cast<void *>(tmphndl), sizeof(CUmemFabricHandle), (*comm)->comm_intra);
 
         //save data if brodcast was from rank 0 in our group
         if ((*comm)->ar2_firstgpu == root)
@@ -305,7 +306,8 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
       uint64_t opId = 0xdeadcafe0000 + (*comm)->my_node;
       ipcSocketResult_t ret = ipcSocketSuccess;
       IPCCHECK(ipcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
-      (*comm)->_barrier((*comm)->comm_world);
+      // TODO: This barrier might hang with multi-device per process - temporarily commented out
+      // (*comm)->_barrier((*comm)->comm_world);
 
       if ((*comm)->ar2_nvrank == 0) {
         NVTE_CALL_CHECK_CUDA_DRIVER(
@@ -314,12 +316,14 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
             (uint64_t)0);
 
         for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
-          (*comm)->_barrier((*comm)->comm_intra);
+          // TODO: This barrier might hang with multi-device per process - temporarily commented out
+          // (*comm)->_barrier((*comm)->comm_intra);
           IPCCHECKGOTO(ipcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
         }
       } else {
         for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
-          (*comm)->_barrier((*comm)->comm_intra);
+          // TODO: This barrier might hang with multi-device per process - temporarily commented out
+          // (*comm)->_barrier((*comm)->comm_intra);
           if ((*comm)->ar2_nvrank == p) IPCCHECKGOTO(ipcSocketRecvFd(&ipcSock, &fd), ret, error);
         }
       }
@@ -350,7 +354,8 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
                                 const_cast<CUmemAccessDesc *>(&accessDesc), (size_t)1);
 
     (*comm)->mc_baseptr = reinterpret_cast<void *>(mc_va);
-    (*comm)->_barrier((*comm)->comm_world);
+    // TODO: This barrier might hang with multi-device per process - temporarily commented out
+    // (*comm)->_barrier((*comm)->comm_world);
     if (!(*comm)->myrank) printf("MC initialized succesfully, window size = %ld\n", mc_maxsize);
   } else {
 #endif
