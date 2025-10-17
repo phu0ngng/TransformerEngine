@@ -232,19 +232,19 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   bool mnnvl_fabric = has_mnnvl_fabric(cur_dev);
   // For single process multiple devices, only initialize multicast once per process
   bool is_multi_device_per_process = ((*comm)->ar2_nvsize > 1 && (*comm)->nvsize == (*comm)->ar2_nvsize);
-  
+
   if (is_multi_device_per_process) {
-    printf("[DEBUG] Multi-device per process detected: ar2_nvsize=%d, nvsize=%d\n", 
+    printf("[DEBUG] Multi-device per process detected: ar2_nvsize=%d, nvsize=%d\n",
            (*comm)->ar2_nvsize, (*comm)->nvsize);
     printf("[DEBUG] Current device: %d, ar2_nvrank: %d\n", cur_dev, (*comm)->ar2_nvrank);
     printf("[DEBUG] Using TP leader-only strategy for collective operations\n");
     fflush(stdout);
   }
-  
+
   if (!transformer_engine::getenv<bool>("UB_SKIPMC") &&
       transformer_engine::cuda::supports_multicast() && (*comm)->ar2_nvsize > 1) {
     // multicast init only for TP ops (____2 operations)
-    
+
     // DEBUG: Check device context and rank information
     int current_device;
     cudaGetDevice(&current_device);
@@ -252,7 +252,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     printf("[DEBUG] Current CUDA device: %d\n", current_device);
     printf("[DEBUG] Rank info: ar2_nvrank=%d, ar2_nvsize=%d, nvsize=%d, ar_nvsize=%d\n",
            (*comm)->ar2_nvrank, (*comm)->ar2_nvsize, (*comm)->nvsize, (*comm)->ar_nvsize);
-    printf("[DEBUG] ar2_firstgpu=%d, mnnvl_fabric=%s\n", 
+    printf("[DEBUG] ar2_firstgpu=%d, mnnvl_fabric=%s\n",
            (*comm)->ar2_firstgpu, mnnvl_fabric ? "true" : "false");
     fflush(stdout);
     size_t mc_maxsize = MULTICAST_GB_TOTAL * (1ull << 30);
@@ -268,12 +268,14 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     NVTE_CALL_CHECK_CUDA_DRIVER(
         cuMulticastGetGranularity, &gran, &mcProp,
         static_cast<CUmemAllocationGranularity_flags>(CU_MULTICAST_GRANULARITY_RECOMMENDED));
+    printf("[DEBUG] After CUmemAllocationGranularity_flags");
     mc_maxsize = ((mc_maxsize + gran - 1) / gran) * gran;
     mcProp.size = mc_maxsize;
     (*comm)->mc_maxsize = mc_maxsize;
     if ((*comm)->ar2_nvrank == 0)
       NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastCreate, &(*comm)->mc_handle, &mcProp);
 
+    printf("[DEBUG] After cuMulticastCreate\n");
     if (mnnvl_fabric) {
       CUmemFabricHandle *exphndl =
           reinterpret_cast<CUmemFabricHandle *>(malloc(sizeof(CUmemFabricHandle)));
@@ -316,22 +318,27 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
       uint64_t opId = 0xdeadcafe0000 + (*comm)->my_node;
       ipcSocketResult_t ret = ipcSocketSuccess;
       IPCCHECK(ipcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
+      printf("[DEBUG] After ipcSocketInit\n");
       (*comm)->_barrier((*comm)->comm_world);
 
+      printf("[DEBUG] After ipcSocketInit + barrier\n");
       if ((*comm)->ar2_nvrank == 0) {
         NVTE_CALL_CHECK_CUDA_DRIVER(
             cuMemExportToShareableHandle, reinterpret_cast<void *>(&fd), (*comm)->mc_handle,
             static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
             (uint64_t)0);
+      printf("[DEBUG] After cuMemExportToShareableHandle\n");
 
         for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
           (*comm)->_barrier((*comm)->comm_intra);
           IPCCHECKGOTO(ipcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
         }
+      printf("[DEBUG] After cuMemExportToShareableHandle + barrier\n");
       } else {
         for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
           (*comm)->_barrier((*comm)->comm_intra);
           if ((*comm)->ar2_nvrank == p) IPCCHECKGOTO(ipcSocketRecvFd(&ipcSock, &fd), ret, error);
+        printf("[DEBUG] After ipcSocketRecvFd\n");
         }
       }
 
@@ -340,6 +347,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
         NVTE_CALL_CHECK_CUDA_DRIVER(
             cuMemImportFromShareableHandle, &(*comm)->mc_handle, reinterpret_cast<void *>(fd),
             static_cast<CUmemAllocationHandleType>(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+        printf("[DEBUG] After cuMemImportFromShareableHandle\n");
       }
       IPCCHECK(ipcSocketClose(&ipcSock));
       close(fd);
