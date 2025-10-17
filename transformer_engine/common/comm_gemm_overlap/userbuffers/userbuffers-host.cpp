@@ -230,8 +230,17 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
 
 #if CUDART_VERSION >= 12010
   bool mnnvl_fabric = has_mnnvl_fabric(cur_dev);
+  // Skip multicast for multi-device per process (not supported yet)
+  bool skip_multicast = ((*comm)->ar2_nvsize > 1 && (*comm)->nvsize == (*comm)->ar2_nvsize);
+  
+  if (skip_multicast) {
+    printf("[DEBUG] Skipping multicast for multi-device per process (ar2_nvsize=%d, nvsize=%d)\n", 
+           (*comm)->ar2_nvsize, (*comm)->nvsize);
+    fflush(stdout);
+  }
+  
   if (!transformer_engine::getenv<bool>("UB_SKIPMC") &&
-      transformer_engine::cuda::supports_multicast() && (*comm)->ar2_nvsize > 1) {
+      transformer_engine::cuda::supports_multicast() && (*comm)->ar2_nvsize > 1 && !skip_multicast) {
     // multicast init only for TP ops (____2 operations)
     
     // DEBUG: Check device context and rank information
