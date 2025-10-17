@@ -240,10 +240,12 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     printf("[DEBUG] Using simplified multicast setup for single process\n");
     fflush(stdout);
     
-    // For single process multiple devices, only device 0 needs to create the multicast handle
-    // All other devices in the same process can access it directly (shared memory space)
-    if ((*comm)->ar2_nvrank == 0) {
-      printf("[DEBUG] Device 0 creating multicast handle for entire process\n");
+    // Thread-safe multicast handle creation for single process multiple devices
+    static std::once_flag multicast_creation_flag;
+    static size_t static_mc_maxsize = 0;
+    
+    std::call_once(multicast_creation_flag, [&]() {
+      printf("[DEBUG] Creating multicast handle once for entire process (called from device %d)\n", cur_dev);
       fflush(stdout);
       
       size_t mc_maxsize = MULTICAST_GB_TOTAL * (1ull << 30);
@@ -255,43 +257,50 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
       mcProp.size = mc_maxsize;
       mcProp.handleTypes = mnnvl_fabric ? CU_MEM_HANDLE_TYPE_FABRIC : CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
       
+      // Use the current device (whichever device calls first) for multicast creation
+      printf("[DEBUG] Creating multicast handle on device %d\n", cur_dev);
+      fflush(stdout);
+      
       NVTE_CALL_CHECK_CUDA_DRIVER(
           cuMulticastGetGranularity, &gran, &mcProp,
           static_cast<CUmemAllocationGranularity_flags>(CU_MULTICAST_GRANULARITY_RECOMMENDED));
       mc_maxsize = ((mc_maxsize + gran - 1) / gran) * gran;
       mcProp.size = mc_maxsize;
       (*comm)->mc_maxsize = mc_maxsize;
+      static_mc_maxsize = mc_maxsize;
       
       NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastCreate, &(*comm)->mc_handle, &mcProp);
-      printf("[DEBUG] Device 0 successfully created multicast handle\n");
+      printf("[DEBUG] Multicast handle created successfully by device %d (mc_maxsize=%zu)\n", cur_dev, mc_maxsize);
       fflush(stdout);
-      } else {
-        printf("[DEBUG] Device %d using multicast handle created by device 0 (shared process memory)\n", (*comm)->ar2_nvrank);
-        fflush(stdout);
-        // In single process, all devices share the same (*comm) structure, so mc_handle is already accessible
-      }
-      
-      // Memory mapping setup for single process multiple devices
-      size_t mc_maxsize = (*comm)->mc_maxsize;  // Use the value set by device 0
-      printf("[DEBUG] Setting up multicast memory mapping for device %d (mc_maxsize=%zu)\n", (*comm)->mydev, mc_maxsize);
-      fflush(stdout);
-      
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastAddDevice, (*comm)->mc_handle, (CUdeviceptr)(*comm)->mydev);
+    });
+    
+    // All devices perform their own memory mapping
+    size_t mc_maxsize = static_mc_maxsize;
+    printf("[DEBUG] Setting up multicast memory mapping for device %d (mc_maxsize=%zu)\n", (*comm)->mydev, mc_maxsize);
+    fflush(stdout);
+    
+    // Ensure we're on the correct device for this mapping
+    NVTE_CHECK_CUDA(cudaSetDevice((*comm)->mydev));
+    
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastAddDevice, (*comm)->mc_handle, (CUdeviceptr)(*comm)->mydev);
 
-      CUdeviceptr mc_va;
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressReserve, &mc_va, mc_maxsize, (size_t)0, (CUdeviceptr)0U, (uint64_t)0);
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemMap, mc_va, mc_maxsize, (size_t)0, (*comm)->mc_handle, (uint64_t)0);
+    CUdeviceptr mc_va;
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressReserve, &mc_va, mc_maxsize, (size_t)0, (CUdeviceptr)0U, (uint64_t)0);
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemMap, mc_va, mc_maxsize, (size_t)0, (*comm)->mc_handle, (uint64_t)0);
 
-      CUmemAccessDesc accessDesc = {};
-      accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-      accessDesc.location.id = (*comm)->mydev;
-      accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemSetAccess, mc_va, mc_maxsize, const_cast<CUmemAccessDesc *>(&accessDesc), (size_t)1);
+    CUmemAccessDesc accessDesc = {};
+    accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    accessDesc.location.id = (*comm)->mydev;
+    accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemSetAccess, mc_va, mc_maxsize, const_cast<CUmemAccessDesc *>(&accessDesc), (size_t)1);
 
-      (*comm)->mc_baseptr = reinterpret_cast<void *>(mc_va);
-      (*comm)->_barrier((*comm)->comm_world);  // This will be a no-op for single process
-      if (!(*comm)->myrank) printf("MC initialized succesfully, window size = %ld\n", mc_maxsize);
-    }
+    (*comm)->mc_baseptr = reinterpret_cast<void *>(mc_va);
+    (*comm)->_barrier((*comm)->comm_world);  // This will be a no-op for single process
+    if (!(*comm)->myrank) printf("MC initialized succesfully, window size = %ld\n", mc_maxsize);
+    
+    printf("[DEBUG] Device %d multicast setup completed successfully\n", (*comm)->mydev);
+    fflush(stdout);
+  }
   
   if (!is_multi_device_per_process && !transformer_engine::getenv<bool>("UB_SKIPMC") &&
       transformer_engine::cuda::supports_multicast() && (*comm)->ar2_nvsize > 1) {
