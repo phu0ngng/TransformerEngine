@@ -158,6 +158,25 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   }
   NVTE_CHECK_NCCL(ncclGroupEnd());
 
+  // For multi-device per process, create a separate leader-only communicator
+  if (num_devices_per_process > 1 && num_devices_per_process == tp_size) {
+    printf("[DEBUG] Creating leader-only communicator for multi-device per process\n");
+    fflush(stdout);
+    
+    // Only TP leader (device 0) participates in the leader communicator
+    if (handler.local_device_ids_within_tp_domain[0] == 0) {  // This process has the TP leader
+      ncclUniqueId leader_id = handler.coordinate_nccl_unique_id("leader");
+      NVTE_CHECK_CUDA(cudaSetDevice(handler.local_device_ids_within_process[0]));  // Set to device 0
+      NVTE_CHECK_NCCL(ncclCommInitRank(&handler.leader_comm, handler.tp_num_domains, leader_id, handler.tp_domain_ids[0]));
+      printf("[DEBUG] Leader communicator initialized for domain %d\n", handler.tp_domain_ids[0]);
+      fflush(stdout);
+    } else {
+      handler.leader_comm = nullptr;  // Non-leader processes don't have leader comm
+    }
+  } else {
+    handler.leader_comm = nullptr;  // Single device per process doesn't need leader comm
+  }
+
   // Allocate device memory for barrier operations on each device
   handler._device_barriers.resize(num_devices_per_process);
   for (int local_idx = 0; local_idx < num_devices_per_process; local_idx++) {
@@ -222,15 +241,28 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
                "(2) num_devices_per_process == 1 (single device per process)");
   }
 
+  // Test barrier before creating executor to check if communicators work
+  printf("[DEBUG] Testing barrier before executor creation...\n");
+  fflush(stdout);
+  
+  try {
+    comm_handler.barrier_func(nullptr);  // Test the barrier function
+    printf("[DEBUG] Barrier test completed successfully\n");
+    fflush(stdout);
+  } catch (const std::exception& e) {
+    printf("[DEBUG] Barrier test failed: %s\n", e.what());
+    fflush(stdout);
+  }
+
   std::unique_ptr<CommOverlapCore> executor;
-  executor = std::make_unique<CommOverlapP2PBase>(
-      buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
-      comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
-      comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size,
-      comm_handler.allgather_func, comm_handler.barrier_func, get_nvte_collective_op(collective_op),
-      cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
-      cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
-      cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
+  // executor = std::make_unique<CommOverlapP2PBase>(
+  //     buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
+  //     comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
+  //     comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size,
+  //     comm_handler.allgather_func, comm_handler.barrier_func, get_nvte_collective_op(collective_op),
+  //     cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
+  //     cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
+  //     cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
 
   CommOverlapCore *executor_ptr = executor.get();
   plan_map[plan_id] = std::move(executor);
@@ -255,8 +287,15 @@ void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
       fflush(stdout);
       return;  // Skip barrier for non-leader devices
     }
-    printf("[DEBUG] Leader device executing barrier\n");
-    fflush(stdout);
+    
+    // Use leader communicator for multi-device per process
+    if (leader_comm != nullptr) {
+      printf("[DEBUG] Leader device executing barrier with leader communicator\n");
+      fflush(stdout);
+      NVTE_CHECK_NCCL(ncclAllReduce(_device_barriers[0], _device_barriers[0], 1, ncclInt, ncclSum, leader_comm, nullptr));
+      cudaDeviceSynchronize();
+      return;
+    }
   }
 
   int device_idx = get_local_device_idx_for_current_device();
@@ -286,8 +325,20 @@ void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_by
       fflush(stdout);
       return;  // Skip allgather for non-leader devices
     }
-    printf("[DEBUG] Leader device executing allgather\n");
-    fflush(stdout);
+    
+    // Use leader communicator for multi-device per process
+    if (leader_comm != nullptr) {
+      printf("[DEBUG] Leader device executing allgather with leader communicator\n");
+      fflush(stdout);
+      
+      size_t expected_output_bytes = input_bytes * tp_num_domains;  // Use tp_num_domains instead of tp_size
+      NVTE_CHECK(output_bytes == expected_output_bytes, "Leader allgather buffer size mismatch: expected ",
+                 expected_output_bytes, ", got ", output_bytes);
+      
+      NVTE_CHECK_NCCL(ncclAllGather(input_buf, output_buf, input_bytes, ncclChar, leader_comm, nullptr));
+      cudaDeviceSynchronize();
+      return;
+    }
   }
 
   int device_idx = get_local_device_idx_for_current_device();
@@ -301,7 +352,7 @@ void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_by
   cudaDeviceSynchronize();
 }
 
-CommunicatorHandler::CommunicatorHandler() {
+CommunicatorHandler::CommunicatorHandler() : leader_comm(nullptr) {
   allgather_func = [this](void *output_buf, size_t output_bytes, void *input_buf,
                           size_t input_bytes, ExtComm comm) {
     this->nccl_allgather_impl(output_buf, output_bytes, input_buf, input_bytes, comm);
@@ -316,6 +367,11 @@ CommunicatorHandler::~CommunicatorHandler() {
         ncclCommDestroy(comm);
       }
     }
+  }
+  
+  // Clean up leader communicator
+  if (leader_comm != nullptr) {
+    ncclCommDestroy(leader_comm);
   }
   // Clean up multiple device barriers
   for (int* barrier : _device_barriers) {

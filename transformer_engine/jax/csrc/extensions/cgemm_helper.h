@@ -85,6 +85,7 @@ class CommunicatorHandler {
   std::vector<int> local_device_ids_within_tp_domain;
   std::vector<int> tp_domain_ids;
   std::vector<ncclComm_t> tp_comms;
+  ncclComm_t leader_comm;  // Communicator for TP leaders only (multi-device per process)
 
   std::vector<int> local_device_ids_within_process;
   std::vector<int> global_device_ids;
@@ -154,7 +155,7 @@ class CommunicatorHandler {
 
   bool _initialize = false;
   std::vector<int*> _device_barriers;
-
+  
   // Static member for cleanup file path
   static std::string _nccl_id_file_path;
 };
