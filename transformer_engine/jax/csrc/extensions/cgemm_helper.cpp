@@ -240,6 +240,25 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
 void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
   NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using barrier");
 
+  // For multi-device per process, only TP leader should participate in barriers
+  bool is_multi_device_per_process = (num_devices_per_process > 1 && num_devices_per_process == tp_size);
+  if (is_multi_device_per_process) {
+    int current_device;
+    cudaGetDevice(&current_device);
+    printf("[DEBUG] Barrier: Multi-device per process, current_device=%d, tp_leader=%s\n", 
+           current_device, (get_local_device_id_within_tp_domain() == 0) ? "YES" : "NO");
+    fflush(stdout);
+    
+    // Only TP leader (device 0 in TP domain) participates in barriers
+    if (get_local_device_id_within_tp_domain() != 0) {
+      printf("[DEBUG] Non-leader device skipping barrier\n");
+      fflush(stdout);
+      return;  // Skip barrier for non-leader devices
+    }
+    printf("[DEBUG] Leader device executing barrier\n");
+    fflush(stdout);
+  }
+
   int device_idx = get_local_device_idx_for_current_device();
   ncclComm_t tp_comm = tp_comms[device_idx];
 
@@ -251,6 +270,25 @@ void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
 void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_bytes,
                                               void *input_buf, size_t input_bytes, ExtComm) {
   NVTE_CHECK(_initialize, "CommunicatorHandler must be initialized before using allgather");
+
+  // For multi-device per process, only TP leader should participate in allgather
+  bool is_multi_device_per_process = (num_devices_per_process > 1 && num_devices_per_process == tp_size);
+  if (is_multi_device_per_process) {
+    int current_device;
+    cudaGetDevice(&current_device);
+    printf("[DEBUG] AllGather: Multi-device per process, current_device=%d, tp_leader=%s\n", 
+           current_device, (get_local_device_id_within_tp_domain() == 0) ? "YES" : "NO");
+    fflush(stdout);
+    
+    // Only TP leader (device 0 in TP domain) participates in allgather
+    if (get_local_device_id_within_tp_domain() != 0) {
+      printf("[DEBUG] Non-leader device skipping allgather\n");
+      fflush(stdout);
+      return;  // Skip allgather for non-leader devices
+    }
+    printf("[DEBUG] Leader device executing allgather\n");
+    fflush(stdout);
+  }
 
   int device_idx = get_local_device_idx_for_current_device();
   ncclComm_t tp_comm = tp_comms[device_idx];

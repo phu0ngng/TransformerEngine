@@ -230,17 +230,19 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
 
 #if CUDART_VERSION >= 12010
   bool mnnvl_fabric = has_mnnvl_fabric(cur_dev);
-  // Skip multicast for multi-device per process (not supported yet)
-  bool skip_multicast = ((*comm)->ar2_nvsize > 1 && (*comm)->nvsize == (*comm)->ar2_nvsize);
+  // For single process multiple devices, only initialize multicast once per process
+  bool is_multi_device_per_process = ((*comm)->ar2_nvsize > 1 && (*comm)->nvsize == (*comm)->ar2_nvsize);
   
-  if (skip_multicast) {
-    printf("[DEBUG] Skipping multicast for multi-device per process (ar2_nvsize=%d, nvsize=%d)\n", 
+  if (is_multi_device_per_process) {
+    printf("[DEBUG] Multi-device per process detected: ar2_nvsize=%d, nvsize=%d\n", 
            (*comm)->ar2_nvsize, (*comm)->nvsize);
+    printf("[DEBUG] Current device: %d, ar2_nvrank: %d\n", cur_dev, (*comm)->ar2_nvrank);
+    printf("[DEBUG] Using TP leader-only strategy for collective operations\n");
     fflush(stdout);
   }
   
   if (!transformer_engine::getenv<bool>("UB_SKIPMC") &&
-      transformer_engine::cuda::supports_multicast() && (*comm)->ar2_nvsize > 1 && !skip_multicast) {
+      transformer_engine::cuda::supports_multicast() && (*comm)->ar2_nvsize > 1) {
     // multicast init only for TP ops (____2 operations)
     
     // DEBUG: Check device context and rank information
@@ -288,10 +290,9 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
         int root = grp * (*comm)->ar2_nvsize;
 
         // It just needs to be a bcast but reuse existing allgather comm
-        // TODO: This allgather might hang with multi-device per process - temporarily commented out
-        // (*comm)->_allgather(
-        //     reinterpret_cast<void *>(exphndls), (*comm)->nvsize * sizeof(CUmemFabricHandle),
-        //     reinterpret_cast<void *>(tmphndl), sizeof(CUmemFabricHandle), (*comm)->comm_intra);
+        (*comm)->_allgather(
+            reinterpret_cast<void *>(exphndls), (*comm)->nvsize * sizeof(CUmemFabricHandle),
+            reinterpret_cast<void *>(tmphndl), sizeof(CUmemFabricHandle), (*comm)->comm_intra);
 
         //save data if brodcast was from rank 0 in our group
         if ((*comm)->ar2_firstgpu == root)
@@ -315,8 +316,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
       uint64_t opId = 0xdeadcafe0000 + (*comm)->my_node;
       ipcSocketResult_t ret = ipcSocketSuccess;
       IPCCHECK(ipcSocketInit(&ipcSock, (*comm)->ar2_nvrank, (uint64_t)opId, &abortFlag));
-      // TODO: This barrier might hang with multi-device per process - temporarily commented out
-      // (*comm)->_barrier((*comm)->comm_world);
+      (*comm)->_barrier((*comm)->comm_world);
 
       if ((*comm)->ar2_nvrank == 0) {
         NVTE_CALL_CHECK_CUDA_DRIVER(
@@ -325,14 +325,12 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
             (uint64_t)0);
 
         for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
-          // TODO: This barrier might hang with multi-device per process - temporarily commented out
-          // (*comm)->_barrier((*comm)->comm_intra);
+          (*comm)->_barrier((*comm)->comm_intra);
           IPCCHECKGOTO(ipcSocketSendFd(&ipcSock, fd, p, (uint64_t)opId), ret, error);
         }
       } else {
         for (int p = 1; p < (*comm)->ar2_nvsize; p++) {
-          // TODO: This barrier might hang with multi-device per process - temporarily commented out
-          // (*comm)->_barrier((*comm)->comm_intra);
+          (*comm)->_barrier((*comm)->comm_intra);
           if ((*comm)->ar2_nvrank == p) IPCCHECKGOTO(ipcSocketRecvFd(&ipcSock, &fd), ret, error);
         }
       }
@@ -375,6 +373,10 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
 #if CUDART_VERSION >= 12010
   }
 #endif
+
+skip_multicast:
+  printf("[DEBUG] Continuing with userbuffers initialization (multicast section completed)\n");
+  fflush(stdout);
 
 #define LOCALSIZE 4 * (NVTE_REG0_OFFSET(*comm) + NVTE_REG0_FLAGS + NVTE_REG0_COMMBUFFER * NBUF)
   // peer pointers + op flags + comm buffer
