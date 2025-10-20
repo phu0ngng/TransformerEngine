@@ -58,6 +58,7 @@ class CommOverlapCore {
   int _comm_priority;
   bool _atomic_gemm{false};
   bool _is_p2p{false};
+  bool _spmd{false};
 
   TensorWrapper _ubuf;
   TensorWrapper _counter;
@@ -255,7 +256,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
                      int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
-                     bool atomic_gemm = false, bool aggregate = false);
+                     bool atomic_gemm = false, bool aggregate = false, bool spmd = false);
 
   virtual ~CommOverlapP2PBase();
 

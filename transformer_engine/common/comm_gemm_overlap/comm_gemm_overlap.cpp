@@ -60,7 +60,7 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
     create_communicator_grouped2_mpi(&_ub_comm, 1, 1, tp_size, 1);
 #else
     create_communicator_grouped2(&_ub_comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                 allgather_handle, barrier_handle, 1, 1, tp_size, 1);
+                                 allgather_handle, barrier_handle, 1, 1, tp_size, 1, _spmd);
 #endif
     _comm_created = true;
   }
@@ -651,8 +651,8 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
                                        CommOverlapType comm_type, int num_max_streams,
                                        int comm_cga_size, int gemm_priority, int comm_priority,
                                        int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                       bool atomic_gemm, bool aggregate)
-    : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
+                                       bool atomic_gemm, bool aggregate, bool spmd)
+    : _spmd(spmd), CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
                       allgather_handle, barrier_handle, tp_size, num_max_streams, comm_cga_size,
                       gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
                       atomic_gemm) {

@@ -143,7 +143,8 @@ bool has_mnnvl_fabric(int device_id) {
 int create_communicator_grouped2(communicator **comm, int myrank, int numranks, int mylocal,
                                  int numlocal, int mynode, int numnodes,
                                  ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier,
-                                 int pipegpus, int pipenodes, int tensorgpus, int tensornodes) {
+                                 int pipegpus, int pipenodes, int tensorgpus, int tensornodes,
+                                 bool spmd) {
   *comm = new communicator();
 
   (*comm)->comm_world = EXT_COMM_WORLD;
