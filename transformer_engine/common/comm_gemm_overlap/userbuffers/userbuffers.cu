@@ -1673,7 +1673,7 @@ void reducescatter2_userbuff_strided(void *output, const int handler, const int 
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
   const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->ar2_nvrank;
+  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->get_current_ar2_nvrank();
 
   if (elements < 64) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
@@ -1695,7 +1695,7 @@ void reducescatter2_userbuff_strided_atomic(void *output, const int handler, con
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
   const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->ar2_nvrank;
+  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->get_current_ar2_nvrank();
 
   if (elements < 64) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
@@ -1722,7 +1722,7 @@ void reducescatter2_userbuff_strided_universal_fp8(void *output, float *scale, c
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
   const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->ar2_nvrank;
+  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->get_current_ar2_nvrank();
   assert(comm->sm_arch >= 9);
   if (elements < 128) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
@@ -1767,7 +1767,7 @@ void reducescatter2_userbuff_strided_multiatomic(void *output, const int handler
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
   const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->ar2_nvrank;
+  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->get_current_ar2_nvrank();
 
   if (elements < 64) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
@@ -1788,7 +1788,7 @@ void allgather2_userbuff_inplace(const int handler, const int offset, const int 
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
   const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->ar2_nvrank;
+  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->get_current_ar2_nvrank();
 
   if (elements < 64) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
@@ -1816,7 +1816,7 @@ void allgather2_userbuff_inplace_sliced(const int handler, const int offset, con
                                         communicator *comm, const int slice_id, const int nslices,
                                         cudaStream_t stream) {
   const int op = userbuffers_allreduceop_nonsharp2;
-  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->ar2_nvrank;
+  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->get_current_ar2_nvrank();
   const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
   int peerelements = elements / ar_nvsize;
   int saverrkernel = comm->use_rr_kernel;
@@ -1835,7 +1835,7 @@ void reducescatter2_userbuff_inplace(const int handler, const int offset, const 
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
   const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->ar2_nvrank;
+  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->get_current_ar2_nvrank();
 
   if (elements < 64) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
@@ -1868,7 +1868,7 @@ void reducescatter2_userbuff_stridedoutput(void *output, const int handler, cons
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
   const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->ar2_nvrank;
+  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->get_current_ar2_nvrank();
 
   if (elements < 64) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
@@ -1914,7 +1914,7 @@ void reducescatter2_userbuff_stridedoutput_fp8(void *output, float *scale, const
       op == userbuffers_allreduceop_nonsharp ? comm->ar_firstgpu : comm->ar2_firstgpu;
   const int ar_step = op == userbuffers_allreduceop_nonsharp2 ? 1 : comm->ar2_nvsize;
   const int ar_nvsize = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvsize : comm->ar2_nvsize;
-  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->ar2_nvrank;
+  const int ar_nvrank = op == userbuffers_allreduceop_nonsharp ? comm->ar_nvrank : comm->get_current_ar2_nvrank();
   assert(comm->sm_arch >= 9);
   if (elements < 128) return;
   int sms = ar_nvsize == 1 ? 2 : comm->sms;
@@ -2317,7 +2317,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
 
   if (!(comm->launch_mode & NVTE_LAUNCH_GPU)) return;
   if (comm->push == 0) {
-    kuserbuffers_pullsend<<<1, 1, 0, stream>>>(comm->myrank, peer, &(comm->send_id[peer]),
+    kuserbuffers_pullsend<<<1, 1, 0, stream>>>(comm->myrank, peer, &(comm->get_current_send_id()[peer]),
                                                reinterpret_cast<int *>(flagptr));
     NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
@@ -2330,7 +2330,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
       // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
     }
     SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
-    int *arg1 = &comm->send_id[peer], *arg2 = reinterpret_cast<int *>(flagptr);
+    int *arg1 = &comm->get_current_send_id()[peer], *arg2 = reinterpret_cast<int *>(flagptr);
     int4 *arg3 = reinterpret_cast<int4 *>(srcptr), *arg4 = reinterpret_cast<int4 *>(dstptr);
     int arg5 = signalonly ? 0 : bytes / 16;
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
@@ -2364,14 +2364,14 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
 
-  int *arg1 = &comm->send_id[send_peer];
+  int *arg1 = &comm->get_current_send_id()[send_peer];
   int *arg2 = reinterpret_cast<int *>(flagptr_send);
   int4 *arg3 = reinterpret_cast<int4 *>(send_srcptr);
   int4 *arg4 = reinterpret_cast<int4 *>(send_dstptr);
   int arg5 = signalonly ? 0 : bytes / 16;
   int arg6 = send_peer;
   int arg7 = recv_peer;
-  int *arg8 = &comm->recv_id[recv_peer * NVTE_MAX_REGIONS + dsthandler];
+  int *arg8 = &comm->get_current_recv_id()[recv_peer * NVTE_MAX_REGIONS + dsthandler];
   int *arg9 = reinterpret_cast<int *>(flagptr_recv);
   int arg10 = signalonly ? 1 : comm->sms;
   uint64_t arg11 = comm->ub_timeout;
@@ -2420,14 +2420,14 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   }
   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
 
-  int *arg1 = &comm->send_id[send_peer];
+  int *arg1 = &comm->get_current_send_id()[send_peer];
   int *arg2 = reinterpret_cast<int *>(flagptr_send);
   int4 *arg3 = reinterpret_cast<int4 *>(send_srcptr);
   int4 *arg4 = reinterpret_cast<int4 *>(send_dstptr);
   int arg5 = signalonly ? 0 : bytes / 16;
   int arg6 = send_peer;
   int arg7 = recv_peer;
-  int *arg8 = &comm->recv_id[recv_peer * NVTE_MAX_REGIONS + dsthandler];
+  int *arg8 = &comm->get_current_recv_id()[recv_peer * NVTE_MAX_REGIONS + dsthandler];
   int *arg9 = reinterpret_cast<int *>(flagptr_recv);
   int arg10 = signalonly ? 1 : comm->sms;
   void *arg11 = counters;
@@ -2467,14 +2467,14 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
 
   SETUP_LAUNCH_CONFIG(comm->sms, 1024, stream);
 
-  int *arg1 = &comm->send_id[send_peer];
+  int *arg1 = &comm->get_current_send_id()[send_peer];
   int *arg2 = reinterpret_cast<int *>(flagptr_send);
   int4 *arg3 = reinterpret_cast<int4 *>((comm->mem_ptr[srchandler]));
   int4 *arg4 = reinterpret_cast<int4 *>((comm->peer_ptr[dsthandler][send_peerlocal]));
   int arg5 = bytes / 16;
   int arg6 = comm->myrank;
   int arg7 = recv_peer;
-  int *arg8 = &comm->recv_id[recv_peer * NVTE_MAX_REGIONS + dsthandler];
+  int *arg8 = &comm->get_current_recv_id()[recv_peer * NVTE_MAX_REGIONS + dsthandler];
   int *arg9 = reinterpret_cast<int *>(flagptr_recv);
   int arg10 = comm->sms;
   void *arg11 = counters;
@@ -2513,13 +2513,13 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
     void *srcptr = reinterpret_cast<char *>(comm->peer_ptr[srchandler][peerlocal]) + srcoffset;
 
     kuserbuffers_pullrecv<<<signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, 0, stream>>>(
-        comm->myrank, peer, comm->nvrank, peerlocal,
-        &(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]), reinterpret_cast<int *>(flagptr),
+        comm->myrank, peer, comm->get_current_nvrank(), peerlocal,
+        &(comm->get_current_recv_id()[peer * NVTE_MAX_REGIONS + dsthandler]), reinterpret_cast<int *>(flagptr),
         reinterpret_cast<int4 *>(srcptr), reinterpret_cast<int4 *>(dstptr),
         signalonly ? 0 : bytes / 16, comm->ub_timeout);
     NVTE_CHECK_CUDA(cudaGetLastError());
     if (!signalonly) {
-      kuserbuffers_inc<<<1, 1, 0, stream>>>(&(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]));
+      kuserbuffers_inc<<<1, 1, 0, stream>>>(&(comm->get_current_recv_id()[peer * NVTE_MAX_REGIONS + dsthandler]));
       NVTE_CHECK_CUDA(cudaGetLastError());
     }
     if (comm->use_ce) {
@@ -2527,8 +2527,8 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
     }
   } else {
     kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(
-        comm->myrank, peer, comm->nvrank, peerlocal,
-        &comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler], reinterpret_cast<int *>(flagptr),
+        comm->myrank, peer, comm->get_current_nvrank(), peerlocal,
+        &comm->get_current_recv_id()[peer * NVTE_MAX_REGIONS + dsthandler], reinterpret_cast<int *>(flagptr),
         signalonly || comm->sms, comm->ub_timeout,
         reinterpret_cast<int *>(0 ?  // temporary disable
                                     GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 1)

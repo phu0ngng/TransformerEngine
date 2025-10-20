@@ -140,9 +140,23 @@ struct communicator {
   MPI_Request mpihndl[NVTE_MAX_SHARP];
 #endif
 
-  int *send_id, *recv_id;
   int mydev;
   uint64_t ub_timeout;
+  
+  // Unified per-device storage (size=1 for single-process-single-device, size=nvsize for SPMD)
+  bool is_spmd;
+  std::vector<int*> per_device_send_id;         // Array of send_id pointers
+  std::vector<int*> per_device_recv_id;         // Array of recv_id pointers  
+  std::vector<int*> per_device_flags_baseptr;   // Array of flags_baseptr pointers
+  std::vector<int*> per_device_flags;           // Array of flags pointers
+  
+  // SPMD helper methods for dynamic device-aware computation
+  int get_current_nvrank() const;
+  int get_current_ar2_nvrank() const;
+  int get_current_mydev() const;
+  int* get_current_send_id() const;
+  int* get_current_recv_id() const;
+  int* get_current_flags() const;
 };
 typedef struct communicator communicator;
 
@@ -185,7 +199,7 @@ void destroy_communicator_mpi(communicator *comm);
     returned offset is offset of gpubuff relative to buffer registered
 */
 
-int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc);
+int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc, bool spmd);
 /*  returns handler and registers buffers. assumed to be collective i.e. you use same groups and
    dont mix buffers for different operations returns -1 if cant register (too many preregistered
    regions already) if alloc==true will allocate memory and fill the pointers (required for NVL

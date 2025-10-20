@@ -236,6 +236,12 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   }
 
   std::unique_ptr<CommOverlapCore> executor;
+  // Determine if we're in SPMD mode
+  bool is_spmd = comm_handler.num_devices_per_process > 1;
+  NVTE_CHECK(is_spmd == (comm_handler.num_devices_per_process == comm_handler.tp_size),
+             "SPMD mode is only supported when num_devices_per_process == tp_size, got num_devices_per_process=",
+             comm_handler.num_devices_per_process, ", tp_size=", comm_handler.tp_size);
+  
   executor = std::make_unique<CommOverlapP2PBase>(
       buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
       comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
@@ -243,7 +249,7 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
       comm_handler.allgather_func, comm_handler.barrier_func, get_nvte_collective_op(collective_op),
       cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
       cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
-      cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag);
+      cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag, is_spmd);
 
   CommOverlapCore *executor_ptr = executor.get();
   plan_map[plan_id] = std::move(executor);

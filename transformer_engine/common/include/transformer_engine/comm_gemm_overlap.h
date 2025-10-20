@@ -60,8 +60,11 @@ class CommOverlapCore {
   bool _is_p2p{false};
   bool _spmd{false};
 
-  TensorWrapper _ubuf;
   TensorWrapper _counter;
+  
+  // Unified per-device storage (size=1 for multi-process, size=tp_size for SPMD)
+  std::vector<int> _per_device_ub_reg;
+  std::vector<TensorWrapper> _per_device_ubuf;
   float *_ubuf_scale_inv;
   bool _ubuf_scale_inv_initialized{false};
 
@@ -72,6 +75,10 @@ class CommOverlapCore {
   void initialize(int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
                   int gemm_priority, int comm_priority, int num_comm_sm, bool set_sm_margin,
                   bool use_ce, bool atomic_gemm);
+  std::pair<int, int> get_device_aware_rank_and_tp_id();
+  int get_current_ub_reg();
+  TensorWrapper& get_current_ubuf();
+  int get_device_index();  // Helper to get device index for vector access
 
  public:
   CommOverlapCore() {}  // dummy constructor for exposing type to Python
@@ -84,7 +91,7 @@ class CommOverlapCore {
 
   virtual ~CommOverlapCore();
 
-  void *get_ubuf_dptr() { return _ubuf.dptr(); }
+  void *get_ubuf_dptr() { return get_current_ubuf().dptr(); }
 
   void set_ubuf_scale_inv(float *scale_inv) {
     _ubuf_scale_inv = scale_inv;

@@ -49,7 +49,7 @@ class CgemmConfig {
   }
 
   static CgemmConfig &get(bool is_initialized = true) {
-    static thread_local CgemmConfig instance;
+    static CgemmConfig instance;  // Program-wide config (not thread_local)
     NVTE_CHECK(
         instance._initialized == is_initialized,
         "CgemmConfig must be initialized before using it, got is_initialized=", is_initialized);
@@ -163,6 +163,7 @@ class CommunicatorHandler {
 class CollectiveGemmPlanRegistry {
  public:
   static CollectiveGemmPlanRegistry &getInstance() {
+    // Phuong: this should work with static or static thread_local?
     static thread_local CollectiveGemmPlanRegistry instance;
     return instance;
   }
