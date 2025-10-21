@@ -117,9 +117,13 @@ int CommOverlapCore::get_device_index() {
 }
 
 int CommOverlapCore::get_current_ub_reg() {
+  printf("[DEBUG] get_current_ub_reg called: _per_device_ub_reg.size()=%zu\n", _per_device_ub_reg.size());
+  fflush(stdout);
+  
   int device_idx = get_device_index();
   NVTE_CHECK(!_per_device_ub_reg.empty(), 
-             "Per-device ub_reg array is empty! Buffers may not have been initialized.");
+             "Per-device ub_reg array is empty! Buffers may not have been initialized. "
+             "This method should only be called after buffer registration.");
   NVTE_CHECK(device_idx >= 0 && device_idx < static_cast<int>(_per_device_ub_reg.size()),
              "Device index ", device_idx, " out of range for ub_reg array (size=", _per_device_ub_reg.size(), ")");
   
