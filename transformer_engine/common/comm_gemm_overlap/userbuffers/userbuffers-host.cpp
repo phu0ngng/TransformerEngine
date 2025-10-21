@@ -158,6 +158,14 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   // Initialize SPMD-specific fields
   // Initialize unified per-device storage
   (*comm)->is_spmd = spmd;
+  int num_devices = spmd ? numlocal : 1;
+  
+  // Initialize per-device mem_ptr and peer_ptr arrays
+  for (int region = 0; region < NVTE_MAX_REGIONS; region++) {
+    (*comm)->per_device_mem_ptr[region].resize(num_devices, nullptr);
+    (*comm)->per_device_peer_ptr[region].resize(num_devices, nullptr);
+  }
+  
   if (spmd) {
     // SPMD mode: Size = numlocal (number of devices in process)
     (*comm)->per_device_send_id.resize(numlocal, nullptr);
@@ -574,6 +582,18 @@ int communicator::get_current_tp_rank() const {
   }
 }
 
+int communicator::get_current_myrank() const {
+  if (is_spmd) {
+    // SPMD mode: Global rank = device ID
+    int current_device;
+    cudaGetDevice(&current_device);
+    return current_device;
+  } else {
+    // Multi-process mode: Use stored myrank
+    return myrank;
+  }
+}
+
 int* communicator::get_current_send_id() const {
   if (is_spmd) {
     int current_device;
@@ -601,6 +621,38 @@ int* communicator::get_current_flags() const {
     return per_device_flags[current_device];
   } else {
     return per_device_flags[0];  // Use index 0 for single-device
+  }
+}
+
+void* communicator::get_current_mem_ptr(int region) const {
+  if (is_spmd) {
+    int current_device;
+    cudaGetDevice(&current_device);
+    if (region < NVTE_MAX_REGIONS && current_device < static_cast<int>(per_device_mem_ptr[region].size())) {
+      return per_device_mem_ptr[region][current_device];
+    }
+    return nullptr;
+  } else {
+    if (region < NVTE_MAX_REGIONS && !per_device_mem_ptr[region].empty()) {
+      return per_device_mem_ptr[region][0];
+    }
+    return nullptr;
+  }
+}
+
+void** communicator::get_current_peer_ptr(int region) const {
+  if (is_spmd) {
+    int current_device;
+    cudaGetDevice(&current_device);
+    if (region < NVTE_MAX_REGIONS && current_device < static_cast<int>(per_device_peer_ptr[region].size())) {
+      return per_device_peer_ptr[region][current_device];
+    }
+    return nullptr;
+  } else {
+    if (region < NVTE_MAX_REGIONS && !per_device_peer_ptr[region].empty()) {
+      return per_device_peer_ptr[region][0];
+    }
+    return nullptr;
   }
 }
 
@@ -690,7 +742,10 @@ void destroy_communicator(communicator *comm) {
       }
     }
     free(comm->peer_ptr[hndl]);
-    comm->mem_ptr[hndl] = nullptr;  // this points to already cleaned up local device buffer
+    // Clear per-device mem_ptr
+    for (size_t dev_idx = 0; dev_idx < comm->per_device_mem_ptr[hndl].size(); dev_idx++) {
+      comm->per_device_mem_ptr[hndl][dev_idx] = nullptr;
+    }
   }
   // Clear memory allocated in the communicator constructor
   // Clean up unified per-device communication arrays
@@ -730,7 +785,15 @@ void destroy_communicator_mpi(communicator *comm) {
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc, bool spmd) {
   if (comm->free_region >= NVTE_MAX_REGIONS) return -1;
   int hndl = comm->free_region;
-  comm->peer_ptr[hndl] = reinterpret_cast<void **>(malloc(sizeof(void *) * (comm->nvsize)));
+  
+  // Allocate per-device peer_ptr array for current device
+  int device_idx = spmd ? comm->get_current_nvrank() : 0;
+  if (!comm->per_device_peer_ptr[hndl][device_idx]) {
+    comm->per_device_peer_ptr[hndl][device_idx] = reinterpret_cast<void **>(malloc(sizeof(void *) * (comm->nvsize)));
+    printf("[DEBUG] Allocated peer_ptr array for region %d, device %d\n", hndl, device_idx);
+    fflush(stdout);
+  }
+  
   size_t aligned_size = bytes;
   comm->memflags[hndl] = 0;
   comm->mem_dealloc[hndl] = alloc;
@@ -756,12 +819,13 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       fflush(stdout);
     }
     
-    // Set peer pointer for current device only
-    int my_idx = comm->get_current_nvrank();
-    comm->peer_ptr[hndl][my_idx] = *gpubuff;
-    
-    printf("[DEBUG] SPMD runtime: Set peer_ptr[%d][%d]=%p\n", hndl, my_idx, *gpubuff);
-    fflush(stdout);
+      // Set peer pointer for current device in the per-device peer_ptr array
+      int my_idx = comm->get_current_nvrank();
+      void **my_peer_ptr = comm->per_device_peer_ptr[hndl][device_idx];
+      my_peer_ptr[my_idx] = *gpubuff;
+      
+      printf("[DEBUG] SPMD runtime: Set per_device_peer_ptr[%d][%d][%d]=%p\n", hndl, device_idx, my_idx, *gpubuff);
+      fflush(stdout);
     
     // Set memory flags and increment region
     comm->memflags[hndl] = NVTE_UB_MEM_ALLOCATED;
@@ -1004,7 +1068,12 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 #endif
   comm->mem_size[hndl] = aligned_size;
 
-  comm->mem_ptr[hndl] = *gpubuff;
+  // Set per-device mem_ptr for current device
+  int my_idx = spmd ? comm->get_current_nvrank() : 0;
+  comm->per_device_mem_ptr[hndl][my_idx] = *gpubuff;
+  
+  printf("[DEBUG] Set per_device_mem_ptr[%d][%d]=%p\n", hndl, my_idx, *gpubuff);
+  fflush(stdout);
 
   return comm->free_region++;
   printf("***** Returning *****\n");
