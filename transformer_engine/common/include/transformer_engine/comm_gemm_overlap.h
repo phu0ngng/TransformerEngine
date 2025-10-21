@@ -90,7 +90,7 @@ class CommOverlapCore {
                   int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
                   int num_splits, int num_max_streams, int comm_cga_size, int gemm_priority,
                   int comm_priority, int num_comm_sm, bool set_sm_margin, bool use_ce,
-                  bool atomic_gemm);
+                  bool atomic_gemm, bool spmd = false);
 
   virtual ~CommOverlapCore();
 

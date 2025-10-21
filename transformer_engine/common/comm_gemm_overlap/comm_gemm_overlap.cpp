@@ -50,7 +50,8 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
                                  ExtBarrierOp barrier_handle, int num_splits, int num_max_streams,
                                  int comm_cga_size, int gemm_priority, int comm_priority,
                                  int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                 bool atomic_gemm) {
+                                 bool atomic_gemm, bool spmd)
+    : _spmd(spmd) {
   // Initialize userbuf communicator
   if (!_comm_created) {
     if (myrank == 0) {
@@ -378,7 +379,7 @@ void CommOverlapBase::initialize(const std::vector<size_t> &buffer_shape, DType 
       
       void *buffer_ptr;
       _per_device_ub_reg[dev_idx] = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true, true);
-      _per_device_ubuf[dev_idx] = TensorWrapper(buffer_ptr, buffer_shape, buffer_dtype);
+      _per_device_ubuf[dev_idx] = std::move(TensorWrapper(buffer_ptr, buffer_shape, buffer_dtype));
       
       printf("[DEBUG] SPMD: Device %d registered UBuf handle %d at %p\n", 
              dev_idx, _per_device_ub_reg[dev_idx], buffer_ptr);
@@ -397,7 +398,7 @@ void CommOverlapBase::initialize(const std::vector<size_t> &buffer_shape, DType 
     
     void *buffer_ptr;
     _per_device_ub_reg[0] = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true, false);
-    _per_device_ubuf[0] = TensorWrapper(buffer_ptr, buffer_shape, buffer_dtype);
+    _per_device_ubuf[0] = std::move(TensorWrapper(buffer_ptr, buffer_shape, buffer_dtype));
     
     if (_ub_comm->myrank == 0) {
       printf("!!! [UB] Register UBuf %d\n", _per_device_ub_reg[0]);
@@ -716,7 +717,7 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
 
 void CommOverlapBase::bulk_overlap_external_ag(cudaStream_t send_stream, cudaStream_t recv_stream,
                                                cudaStream_t stream_main) {
-  int comm_bytes = _ubuf.bytes();
+  int comm_bytes = get_current_ubuf().bytes();
   int comm_bytes_per_rank = comm_bytes / _tp_size;
 
   // We use the reference to the overlap_gemm to get the stream to send an receive on to ensure the kernels don't finish until the previous gemm is flush
@@ -749,10 +750,10 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
                                        int comm_cga_size, int gemm_priority, int comm_priority,
                                        int num_comm_sm, bool set_sm_margin, bool use_ce,
                                        bool atomic_gemm, bool aggregate, bool spmd)
-    : _spmd(spmd), CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
+    : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
                       allgather_handle, barrier_handle, tp_size, num_max_streams, comm_cga_size,
                       gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
-                      atomic_gemm) {
+                      atomic_gemm, spmd) {
   initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
 }
 
@@ -782,14 +783,11 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
          device_idx, _per_device_ub_reg[device_idx], buffer_ptr);
   fflush(stdout);
   
-  // Create P2P-specific tensor wrapper with adjusted shape
-  TensorWrapper p2p_ubuf = TensorWrapper(
+  // Update the per-device buffer with P2P-specific shape (using move assignment)
+  _per_device_ubuf[device_idx] = std::move(TensorWrapper(
       buffer_ptr,
       std::vector<size_t>{buffer_shape[0] / _tp_size * _num_ubuf_chunks, buffer_shape[1]},
-      buffer_dtype);
-  
-  // Update the per-device buffer with P2P shape
-  _per_device_ubuf[device_idx] = p2p_ubuf;
+      buffer_dtype));
 
   // Create tensor chunks for easy management
   char *ubuf_byte_ptr = reinterpret_cast<char *>(get_current_ubuf().dptr());
@@ -1140,7 +1138,7 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
 
   // Copy all-gathered B from communication buffer into auxiliary output
   if (B_copy.numel() > 0) {
-    NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), get_current_ubuf().dptr(), _ubuf.bytes(),
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), get_current_ubuf().dptr(), get_current_ubuf().bytes(),
                                     cudaMemcpyDeviceToDevice, _stream_send[0]));
   }
 
