@@ -170,7 +170,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   // Bootstrap UB via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
   auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kFloat32,
-                                                                  JAXX_Collective_Op::ALL_GATHER, 
+                                                                  JAXX_Collective_Op::ALL_GATHER,
                                                                   true /*is_bootstrap*/);
 }
 
@@ -237,13 +237,13 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
     fflush(stdout);
   }
 
-  std::unique_ptr<CommOverlapCore> executor;
+  std::unique_ptr<CommOverlapP2PBase> executor;
   // Determine if we're in SPMD mode
   bool is_spmd = comm_handler.num_devices_per_process > 1;
   NVTE_CHECK(is_spmd == (comm_handler.num_devices_per_process == comm_handler.tp_size),
              "SPMD mode is only supported when num_devices_per_process == tp_size, got num_devices_per_process=",
              comm_handler.num_devices_per_process, ", tp_size=", comm_handler.tp_size);
-  
+
   executor = std::make_unique<CommOverlapP2PBase>(
       buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
       comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
