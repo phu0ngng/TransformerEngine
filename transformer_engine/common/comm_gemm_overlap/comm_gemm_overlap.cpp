@@ -102,10 +102,14 @@ std::pair<int, int> CommOverlapCore::get_device_aware_rank_and_tp_id() {
 
 int CommOverlapCore::get_device_index() {
   if (_spmd) {
-    // SPMD mode: Device index = current device ID
+    // SPMD mode: Device index = current device ID (for buffer array access)
     int current_device;
     NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-    return current_device;
+    
+    printf("[DEBUG] get_device_index (SPMD): current_device=%d\n", current_device);
+    fflush(stdout);
+    
+    return current_device;  // Use device ID to index into per-device arrays
   } else {
     // Multi-process mode: Always use index 0 (single element)
     return 0;
@@ -114,15 +118,27 @@ int CommOverlapCore::get_device_index() {
 
 int CommOverlapCore::get_current_ub_reg() {
   int device_idx = get_device_index();
-  NVTE_CHECK(device_idx < static_cast<int>(_per_device_ub_reg.size()),
+  NVTE_CHECK(!_per_device_ub_reg.empty(), 
+             "Per-device ub_reg array is empty! Buffers may not have been initialized.");
+  NVTE_CHECK(device_idx >= 0 && device_idx < static_cast<int>(_per_device_ub_reg.size()),
              "Device index ", device_idx, " out of range for ub_reg array (size=", _per_device_ub_reg.size(), ")");
+  
+  printf("[DEBUG] get_current_ub_reg: device_idx=%d, ub_reg=%d\n", device_idx, _per_device_ub_reg[device_idx]);
+  fflush(stdout);
+  
   return _per_device_ub_reg[device_idx];
 }
 
 TensorWrapper& CommOverlapCore::get_current_ubuf() {
   int device_idx = get_device_index();
-  NVTE_CHECK(device_idx < static_cast<int>(_per_device_ubuf.size()),
+  NVTE_CHECK(!_per_device_ubuf.empty(), 
+             "Per-device ubuf array is empty! Buffers may not have been initialized.");
+  NVTE_CHECK(device_idx >= 0 && device_idx < static_cast<int>(_per_device_ubuf.size()),
              "Device index ", device_idx, " out of range for ubuf array (size=", _per_device_ubuf.size(), ")");
+  
+  printf("[DEBUG] get_current_ubuf: device_idx=%d, ubuf.dptr()=%p\n", device_idx, _per_device_ubuf[device_idx].dptr());
+  fflush(stdout);
+  
   return _per_device_ubuf[device_idx];
 }
 
@@ -154,6 +170,17 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
 
   printf("[DEBUG] CommOverlapCore: _rank=%d, _tp_size=%d, _tp_id=%d (device-aware)\n", 
          _rank, _tp_size, _tp_id);
+  fflush(stdout);
+  
+  printf("[DEBUG] CommOverlapCore: Checking per-device vectors...\n");
+  printf("[DEBUG] _per_device_ub_reg.size()=%zu, _per_device_ubuf.size()=%zu\n", 
+         _per_device_ub_reg.size(), _per_device_ubuf.size());
+  if (!_per_device_ub_reg.empty()) {
+    printf("[DEBUG] _per_device_ub_reg[0]=%d\n", _per_device_ub_reg[0]);
+  }
+  if (!_per_device_ubuf.empty()) {
+    printf("[DEBUG] _per_device_ubuf[0].dptr()=%p\n", _per_device_ubuf[0].dptr());
+  }
   fflush(stdout);
 
   // Set the number of SMs for GEMM with margin
