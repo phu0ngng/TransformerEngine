@@ -121,8 +121,8 @@ int CommOverlapCore::get_current_ub_reg() {
 
 TensorWrapper& CommOverlapCore::get_current_ubuf() {
   int device_idx = get_device_index();
-  NVTE_CHECK(device_idx < static_cast<int>(_per_deviceget_current_ubuf().size()),
-             "Device index ", device_idx, " out of range for ubuf array (size=", _per_deviceget_current_ubuf().size(), ")");
+  NVTE_CHECK(device_idx < static_cast<int>(_per_device_ubuf.size()),
+             "Device index ", device_idx, " out of range for ubuf array (size=", _per_device_ubuf.size(), ")");
   return _per_device_ubuf[device_idx];
 }
 

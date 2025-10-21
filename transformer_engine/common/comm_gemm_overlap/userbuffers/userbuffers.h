@@ -14,6 +14,7 @@
 #include <chrono>
 #include <functional>
 #include <stdexcept>
+#include <vector>
 
 #include "common/util/logging.h"
 

@@ -241,6 +241,12 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   (*comm)->use_ce = 0;
   (*comm)->cga_size = 2;
   for (int i = 0; i < userbuffers_op_types; i++) (*comm)->basecounter[i] = 0;
+  
+  int device_clock = 0;
+  int sec_timeout = getenv("UB_TIMEOUT") ? atoi(getenv("UB_TIMEOUT")) : 110;
+  NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
+  (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
+  
   if ((*comm)->myrank == 0) {
     printf("UB_TIMEOUT is set to %d sec, %" PRIu64 " cycles, freq: %dkhz\n", sec_timeout,
            (*comm)->ub_timeout, device_clock);
@@ -424,6 +430,13 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   // peer pointers + op flags + comm buffer
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, true, spmd); 
+  
+  // Define GPU page constants before use
+#define GPU_PAGE_SHIFT 16
+#define GPU_PAGE_SIZE (1UL << GPU_PAGE_SHIFT)
+#define GPU_PAGE_OFFSET (GPU_PAGE_SIZE - 1)
+#define GPU_PAGE_MASK (~GPU_PAGE_OFFSET)
+
   // Unified per-device array allocation
   int num_devices_per_process = spmd ? (*comm)->nvsize : 1;
   printf("[DEBUG] Allocating communication arrays for %d device(s) (SPMD=%s)\n", 
@@ -469,25 +482,16 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   }
   
   // Set legacy pointers to first device for backward compatibility
-  (*comm)->send_id = (*comm)->per_device_send_id[0];
-  (*comm)->recv_id = (*comm)->per_device_recv_id[0];
   (*comm)->flags_baseptr = (*comm)->per_device_flags_baseptr[0];
   (*comm)->flags = (*comm)->per_device_flags[0];
   
   // Restore original device
   NVTE_CHECK_CUDA(cudaSetDevice(original_device));
       
-  printf("[DEBUG] Communication arrays allocated successfully for %d device(s)\n", num_devices);
+  printf("[DEBUG] Communication arrays allocated successfully for %d device(s)\n", num_devices_per_process);
   fflush(stdout);
   (*comm)->sms = 16;
   (*comm)->threads = 1024;
-
-#define GPU_PAGE_SHIFT 16
-#define GPU_PAGE_SIZE (1UL << GPU_PAGE_SHIFT)
-#define GPU_PAGE_OFFSET (GPU_PAGE_SIZE - 1)
-#define GPU_PAGE_MASK (~GPU_PAGE_OFFSET)
-
-  // Flags allocation is now handled in the unified per-device loop above
 
   using namespace std;
 
@@ -577,14 +581,14 @@ int create_communicator_grouped(communicator **comm, int myrank, int numranks, i
                                 ExtAllgatherOp ext_allgather, ExtBarrierOp ext_barrier,
                                 int pipegpus, int pipenodes) {
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      ext_allgather, ext_barrier, pipegpus, pipenodes, 1, 1);
+                                      ext_allgather, ext_barrier, pipegpus, pipenodes, 1, 1, false);
 }
 
 int create_communicator(communicator **comm, int myrank, int numranks, int mylocal, int numlocal,
                         int mynode, int numnodes, ExtAllgatherOp ext_allgather,
                         ExtBarrierOp ext_barrier) {
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
-                                      ext_allgather, ext_barrier, 1, 1, 1, 1);
+                                      ext_allgather, ext_barrier, 1, 1, 1, 1, false);
 }
 
 int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipenodes,
@@ -609,7 +613,7 @@ int create_communicator_grouped2_mpi(communicator **comm, int pipegpus, int pipe
   // finally call the abstracted constructor with MPI info
   return create_communicator_grouped2(comm, myrank, numranks, mylocal, numlocal, mynode, numnodes,
                                       &ub_mpi_allgather, &ub_mpi_barrier, pipegpus, pipenodes,
-                                      tensorgpus, tensornodes);
+                                      tensorgpus, tensornodes, false);
 #else
   NVTE_ERROR(std::string("Bootstrapping Userbuffers with MPI requires building") +
              std::string("Transformer Engine with NVTE_UB_WITH_MPI=1 and MPI_HOME=/path/to/mpi"));
@@ -876,7 +880,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       remptrs[i] = reinterpret_cast<void *>(ptr + (aligned_size * i));
       NVTE_CALL_CHECK_CUDA_DRIVER(cuMemMap, reinterpret_cast<CUdeviceptr>(remptrs[i]), aligned_size,
                                   (size_t)0, comm->uchandles[hndl][i], (uint64_t)0);
-      if (i == comm->nvrank) {
+      if (i == comm->get_current_nvrank()) {
         if (hndl)
           *gpubuff = remptrs[i];
         else
@@ -932,7 +936,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       NVTE_CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, current_device));
       bool peer_access_available = false;
       for (int i = 0; i < comm->nvsize; i++) {
-        if (i != comm->nvrank) {
+        if (i != comm->get_current_nvrank()) {
           int can_access_peer;
           cudaError_t peer_result = cudaDeviceCanAccessPeer(&can_access_peer, current_device, i);
           if (peer_result == cudaSuccess && can_access_peer) {
