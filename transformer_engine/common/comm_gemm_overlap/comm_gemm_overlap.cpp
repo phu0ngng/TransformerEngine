@@ -105,10 +105,6 @@ int CommOverlapCore::get_device_index() {
     // SPMD mode: Device index = current device ID (for buffer array access)
     int current_device;
     NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-    
-    printf("[DEBUG] get_device_index (SPMD): current_device=%d\n", current_device);
-    fflush(stdout);
-    
     return current_device;  // Use device ID to index into per-device arrays
   } else {
     // Multi-process mode: Always use index 0 (single element)
@@ -117,62 +113,36 @@ int CommOverlapCore::get_device_index() {
 }
 
 int CommOverlapCore::get_current_ub_reg() {
-  printf("[DEBUG] get_current_ub_reg called: _per_device_ub_reg.size()=%zu\n", _per_device_ub_reg.size());
-  fflush(stdout);
-  
   if (_per_device_ub_reg.empty()) {
-    printf("[ERROR] get_current_ub_reg: _per_device_ub_reg is empty! Returning -1.\n");
-    fflush(stdout);
     return -1;  // Return error value instead of crashing
   }
   
   int device_idx = get_device_index();
   if (device_idx < 0 || device_idx >= static_cast<int>(_per_device_ub_reg.size())) {
-    printf("[ERROR] get_current_ub_reg: device_idx=%d out of range (size=%zu)\n", 
-           device_idx, _per_device_ub_reg.size());
-    fflush(stdout);
     return -1;
   }
-  
-  printf("[DEBUG] get_current_ub_reg: device_idx=%d, ub_reg=%d\n", device_idx, _per_device_ub_reg[device_idx]);
-  fflush(stdout);
   
   return _per_device_ub_reg[device_idx];
 }
 
 TensorWrapper& CommOverlapCore::get_current_ubuf() {
-  printf("[DEBUG] get_current_ubuf called: _per_device_ubuf.size()=%zu\n", _per_device_ubuf.size());
-  fflush(stdout);
-  
   if (_per_device_ubuf.empty()) {
-    printf("[ERROR] get_current_ubuf: _per_device_ubuf is empty! Buffers not initialized.\n");
-    fflush(stdout);
-    // Return a reference to a static empty TensorWrapper to avoid crash
     static TensorWrapper empty_tensor;
     return empty_tensor;
   }
   
   int device_idx = get_device_index();
   if (device_idx < 0 || device_idx >= static_cast<int>(_per_device_ubuf.size())) {
-    printf("[ERROR] get_current_ubuf: device_idx=%d out of range (size=%zu)\n", 
-           device_idx, _per_device_ubuf.size());
-    fflush(stdout);
     static TensorWrapper empty_tensor;
     return empty_tensor;
   }
-  
-  printf("[DEBUG] get_current_ubuf: device_idx=%d, ubuf.dptr()=%p\n", device_idx, _per_device_ubuf[device_idx].dptr());
-  fflush(stdout);
   
   return _per_device_ubuf[device_idx];
 }
 
 std::vector<cudaStream_t>& CommOverlapCore::get_current_stream_compute() {
   int device_idx = get_device_index();
-  if (get_current_stream_compute().empty() || device_idx >= static_cast<int>(get_current_stream_compute().size())) {
-    printf("[ERROR] get_current_stream_compute: Invalid access (size=%zu, device_idx=%d)\n", 
-      get_current_stream_compute().size(), device_idx); 
-    fflush(stdout);
+  if (_per_device_stream_compute.empty() || device_idx >= static_cast<int>(_per_device_stream_compute.size())) {
     static std::vector<cudaStream_t> empty_vector;
     return empty_vector;
   }
@@ -213,6 +183,15 @@ cudaStream_t CommOverlapCore::get_current_stream_comm() {
   int device_idx = get_device_index();
   return (device_idx < static_cast<int>(_per_device_stream_comm.size())) ? 
          _per_device_stream_comm[device_idx] : nullptr;
+}
+
+TensorWrapper& CommOverlapCore::get_current_counter() {
+  int device_idx = get_device_index();
+  if (_per_deviceget_current_counter().empty() || device_idx >= static_cast<int>(_per_deviceget_current_counter().size())) {
+    static TensorWrapper empty_tensor;
+    return empty_tensor;
+  }
+  return _per_device_counter[device_idx];
 }
 
 void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_streams,
@@ -284,13 +263,28 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
 
   _atomic_gemm = atomic_gemm;
   if (_atomic_gemm) {
-    void *counter_ptr;
-    size_t counter_bytes = _num_splits * 2 * sizeof(int32_t);
-    NVTE_CHECK_CUDA(cudaMalloc(&counter_ptr, counter_bytes));
-    NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 0, counter_bytes));
-    NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 1, counter_bytes / 2));
-    _counter = TensorWrapper(counter_ptr, std::vector<size_t>{static_cast<size_t>(_num_splits * 2)},
-                             DType::kInt32);
+    printf("[DEBUG] Allocating per-device counters for atomic gemm...\n");
+    fflush(stdout);
+    
+    _per_deviceget_current_counter().resize(num_devices);
+    
+    for (int dev_idx = 0; dev_idx < num_devices; dev_idx++) {
+      int target_device = _spmd ? dev_idx : -1;
+      if (target_device >= 0) {
+        NVTE_CHECK_CUDA(cudaSetDevice(target_device));
+      }
+      
+      void *counter_ptr;
+      size_t counter_bytes = _num_splits * 2 * sizeof(int32_t);
+      NVTE_CHECK_CUDA(cudaMalloc(&counter_ptr, counter_bytes));
+      NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 0, counter_bytes));
+      NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 1, counter_bytes / 2));
+      _per_device_counter[dev_idx] = TensorWrapper(counter_ptr, 
+          std::vector<size_t>{static_cast<size_t>(_num_splits * 2)}, DType::kInt32);
+      
+      printf("[DEBUG] Allocated counter for device %d\n", dev_idx);
+      fflush(stdout);
+    }
   }
   // CUDA event and comm stream creation (per-device)
   _per_device_stream_comm.resize(num_devices);
@@ -362,8 +356,11 @@ CommOverlapCore::~CommOverlapCore() {
     if (_per_device_comm_launch_event[dev_idx]) cudaEventDestroy(_per_device_comm_launch_event[dev_idx]);
   }
 
-  if (_atomic_gemm) {
-    cudaFree(_counter.dptr());
+  // Clean up per-device counters
+  for (size_t dev_idx = 0; dev_idx < _per_deviceget_current_counter().size(); dev_idx++) {
+    if (_per_device_counter[dev_idx].dptr()) {
+      cudaFree(_per_device_counter[dev_idx].dptr());
+    }
   }
 
   auto error = cudaGetLastError();
@@ -652,7 +649,7 @@ void CommOverlapBase::atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa
   char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
 
   // Reset atomic counters
-  int *counter_ptr = reinterpret_cast<int *>(_counter.dptr());
+  int *counter_ptr = reinterpret_cast<int *>(get_current_counter().dptr());
   reset_counters(counter_ptr, _num_splits, false, stream_main);
 
   // Catch up the default torch stream
@@ -666,7 +663,7 @@ void CommOverlapBase::atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa
   auto workspace_chunk = get_tensor_chunk(workspace, 0, {workspace_size_chunk});
   nvte_cublas_atomic_gemm(A.data(), B.data(), output_d.data(), bias.data(), pre_gelu_out.data(),
                           transa, transb, grad, workspace_chunk.data(), accumulate,
-                          use_split_accumulator, _math_sms, _num_splits, 0, true, _counter.data(),
+                          use_split_accumulator, _math_sms, _num_splits, 0, true, get_current_counter().data(),
                           get_current_stream_compute()[0]);
 
   for (int i = 0; i < _num_splits; i++) {
@@ -1011,16 +1008,44 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   printf("[DEBUG] P2P: self_chunk_id=%d\n", _self_chunk_id);
   fflush(stdout);
   if (_atomic_gemm && !_is_reduce_scatter) {
+    printf("[DEBUG] P2P: Entering atomic_gemm block (_atomic_gemm=%d, _is_reduce_scatter=%d)\n",
+           _atomic_gemm, _is_reduce_scatter);
+    fflush(stdout);
+    
+    printf("[DEBUG] P2P: Getting env NVTE_AG_P2P_MULTI_ATOMIC...\n");
+    fflush(stdout);
+    
     _use_multiatomic_ag = getenv<bool>("NVTE_AG_P2P_MULTI_ATOMIC");
+    
+    printf("[DEBUG] P2P: _use_multiatomic_ag=%d\n", _use_multiatomic_ag);
+    fflush(stdout);
+    
     if (_use_multiatomic_ag) {
+      printf("[DEBUG] P2P: Setting up multiatomic AG...\n");
+      fflush(stdout);
+      
       _use_ce = 0;
       _ub_comm->push = 1;
       if (_rank == 0) {
         printf("!!userbuffers_sendrecv_multi_atomic_shuffle\n");
       }
+      
+      printf("[DEBUG] P2P: Multiatomic AG setup done\n");
+      fflush(stdout);
     }
+    
+    printf("[DEBUG] P2P: Setting _self_chunk_id to 0...\n");
+    fflush(stdout);
+    
     _self_chunk_id = 0;
-    NVTE_CHECK_CUDA(cudaMemset(_counter.dptr(), 0, sizeof(int32_t)));
+    
+    printf("[DEBUG] P2P: About to memset counter (ptr=%p)...\n", get_current_counter().dptr());
+    fflush(stdout);
+    
+    NVTE_CHECK_CUDA(cudaMemset(get_current_counter().dptr(), 0, sizeof(int32_t)));
+    
+    printf("[DEBUG] P2P: Memset counter completed\n");
+    fflush(stdout);
   }
 
   printf("[DEBUG] P2P: Creating send/recv streams (num_compute_streams=%zu)...\n", 
@@ -1140,7 +1165,7 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
                                 D.scale_inv(), D.scale_inv_shape(), D.scaling_mode());
 
   // Reset atomic counters
-  int *counter_ptr = reinterpret_cast<int *>(_counter.dptr());
+  int *counter_ptr = reinterpret_cast<int *>(get_current_counter().dptr());
   reset_counters(counter_ptr, _tp_size, true, stream_main);
 
   // Catch up the default torch stream
@@ -1180,7 +1205,7 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
       nvte_cublas_atomic_gemm(A.data(), input_b.data(), D_buffer.data(), bias.data(),
                               pre_gelu_out.data(), transa, transb, grad, workspace_chunk.data(),
                               accumulate, use_split_accumulator, _math_sms, 0, _tp_size, false,
-                              _counter.data(), stream_main);
+                              get_current_counter().data(), stream_main);
     }
   }
 
@@ -1397,7 +1422,7 @@ void CommOverlapP2PBase::atomic_gemm_overlap_rs(
   const int comm_bytes = _ubufs[0].bytes();
 
   // Reset counters
-  int *counter_ptr = reinterpret_cast<int *>(_counter.dptr());
+  int *counter_ptr = reinterpret_cast<int *>(get_current_counter().dptr());
   reset_counters(counter_ptr, _tp_size, false, stream_main);
 
   // Catch up the main stream
@@ -1409,7 +1434,7 @@ void CommOverlapP2PBase::atomic_gemm_overlap_rs(
   auto output_d = get_buffer_chunk_like(D, 0, shape_to_vector(D.shape()));
   nvte_cublas_atomic_gemm(A.data(), B.data(), output_d.data(), bias.data(), pre_gelu_out.data(),
                           transa, transb, grad, workspace.data(), accumulate, use_split_accumulator,
-                          _math_sms, 0, _tp_size, true, _counter.data(), stream_main);
+                          _math_sms, 0, _tp_size, true, get_current_counter().data(), stream_main);
 
   // P2P communication chunk
   for (int i = 1; i < _tp_size; i++) {

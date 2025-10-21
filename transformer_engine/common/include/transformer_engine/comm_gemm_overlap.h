@@ -59,7 +59,7 @@ class CommOverlapCore {
   bool _is_p2p{false};
   bool _spmd{false};
 
-  TensorWrapper _counter;
+  std::vector<TensorWrapper> _per_device_counter;  // Per-device counters for atomic operations
   float *_ubuf_scale_inv;
   bool _ubuf_scale_inv_initialized{false};
 
@@ -79,6 +79,7 @@ class CommOverlapCore {
   // Protected device-aware accessor methods (derived classes can use these)
   int get_current_ub_reg();
   TensorWrapper& get_current_ubuf();
+  TensorWrapper& get_current_counter();
   std::vector<cudaStream_t>& get_current_stream_compute();
   cudaStream_t get_current_stream_comm();
   cudaEvent_t get_current_start_compute();
