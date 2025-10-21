@@ -736,87 +736,39 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   comm->mem_dealloc[hndl] = alloc;
 
   if (spmd) {
-    // SPMD mode: Allocate buffers on all devices and enable peer-to-peer access
-    printf("[DEBUG] SPMD register_user_buffer_collective: Allocating on all %d devices\n", comm->nvsize);
+    // SPMD runtime mode: Single device allocation (called per-thread at runtime)
+    printf("[DEBUG] SPMD runtime register_user_buffer_collective: Current device buffer allocation\n");
     fflush(stdout);
     
-    // Store current device to restore later
-    int original_device;
-    NVTE_CHECK_CUDA(cudaGetDevice(&original_device));
+    int current_device;
+    NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
+    printf("[DEBUG] SPMD runtime: Operating on device %d\n", current_device);
+    fflush(stdout);
     
-    // Allocate buffer on each device
-    for (int dev_idx = 0; dev_idx < comm->nvsize; dev_idx++) {
-      printf("[DEBUG] SPMD: Allocating buffer on device %d (%zu bytes)\n", dev_idx, bytes);
+    if (alloc) {
+      printf("[DEBUG] SPMD runtime: cudaMalloc on device %d (%zu bytes)...\n", current_device, bytes);
       fflush(stdout);
       
-      NVTE_CHECK_CUDA(cudaSetDevice(dev_idx));
+      NVTE_CHECK_CUDA(cudaMalloc(gpubuff, bytes));
+      NVTE_CHECK_CUDA(cudaMemset(*gpubuff, 0, bytes));
       
-      if (alloc) {
-        printf("[DEBUG] SPMD: cudaMalloc on device %d (%zu bytes)...\n", dev_idx, bytes);
-        fflush(stdout);
-        
-        cudaError_t err = cudaMalloc(&comm->peer_ptr[hndl][dev_idx], bytes);
-        if (err != cudaSuccess) {
-          printf("[ERROR] SPMD: cudaMalloc failed on device %d: %s\n", dev_idx, cudaGetErrorString(err));
-          fflush(stdout);
-          NVTE_CHECK_CUDA(err);
-        }
-        
-        printf("[DEBUG] SPMD: cudaMalloc succeeded, ptr=%p, about to memset...\n", comm->peer_ptr[hndl][dev_idx]);
-        fflush(stdout);
-        
-        err = cudaMemset(comm->peer_ptr[hndl][dev_idx], 0, bytes);
-        if (err != cudaSuccess) {
-          printf("[ERROR] SPMD: cudaMemset failed on device %d: %s\n", dev_idx, cudaGetErrorString(err));
-          fflush(stdout);
-          NVTE_CHECK_CUDA(err);
-        }
-        
-        printf("[DEBUG] SPMD: Device %d buffer allocated at %p\n", dev_idx, comm->peer_ptr[hndl][dev_idx]);
-        fflush(stdout);
-      }
+      printf("[DEBUG] SPMD runtime: Allocated buffer at %p on device %d\n", *gpubuff, current_device);
+      fflush(stdout);
     }
     
-    // Enable peer-to-peer access between all devices
-    printf("[DEBUG] SPMD: Enabling peer-to-peer access between all devices\n");
+    // Set peer pointer for current device only
+    int my_idx = comm->get_current_nvrank();
+    comm->peer_ptr[hndl][my_idx] = *gpubuff;
+    
+    printf("[DEBUG] SPMD runtime: Set peer_ptr[%d][%d]=%p\n", hndl, my_idx, *gpubuff);
     fflush(stdout);
     
-    for (int src_dev = 0; src_dev < comm->nvsize; src_dev++) {
-      NVTE_CHECK_CUDA(cudaSetDevice(src_dev));
-      for (int dst_dev = 0; dst_dev < comm->nvsize; dst_dev++) {
-        if (src_dev != dst_dev) {
-          int can_access_peer;
-          NVTE_CHECK_CUDA(cudaDeviceCanAccessPeer(&can_access_peer, src_dev, dst_dev));
-          if (can_access_peer) {
-            cudaError_t err = cudaDeviceEnablePeerAccess(dst_dev, 0);
-            if (err == cudaSuccess) {
-              printf("[DEBUG] SPMD: Enabled peer access from device %d to device %d\n", src_dev, dst_dev);
-            } else if (err == cudaErrorPeerAccessAlreadyEnabled) {
-              printf("[DEBUG] SPMD: Peer access already enabled from device %d to device %d\n", src_dev, dst_dev);
-            } else {
-              printf("[WARNING] SPMD: Failed to enable peer access from device %d to device %d: %s\n", 
-                     src_dev, dst_dev, cudaGetErrorString(err));
-            }
-            fflush(stdout);
-          } else {
-            printf("[WARNING] SPMD: Device %d cannot access device %d (no peer access support)\n", src_dev, dst_dev);
-            fflush(stdout);
-          }
-        }
-      }
-    }
-    
-    // Set the main buffer pointer to the buffer on the original device
-    *gpubuff = comm->peer_ptr[hndl][original_device];
-    
-    // Restore original device
-    NVTE_CHECK_CUDA(cudaSetDevice(original_device));
-    
-    // Set memory flags
+    // Set memory flags and increment region
     comm->memflags[hndl] = NVTE_UB_MEM_ALLOCATED;
-    comm->free_region++;
     
-    printf("[DEBUG] SPMD: register_user_buffer_collective completed for handle %d\n", hndl);
+    // Note: Don't increment free_region here as it's shared across threads
+    // Return current handle
+    printf("[DEBUG] SPMD runtime: register_user_buffer_collective completed for handle %d\n", hndl);
     fflush(stdout);
     
     return hndl;

@@ -960,7 +960,10 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
 
   // Register buffer for current device only (runtime per-thread)
   void *buf_ptr;
-  _per_device_ub_reg[device_idx] = register_user_buffer_collective(&buf_ptr, buffer_bytes, _ub_comm, true, false);
+  printf("[DEBUG] P2P: Calling register_user_buffer_collective with spmd=%d\n", _spmd);
+  fflush(stdout);
+  
+  _per_device_ub_reg[device_idx] = register_user_buffer_collective(&buf_ptr, buffer_bytes, _ub_comm, true, _spmd);
   _per_device_ubuf[device_idx] = std::move(TensorWrapper(buf_ptr, buffer_shape, buffer_dtype));
 
   printf("[DEBUG] P2P: Runtime registered buffer for device %d (handle=%d, ptr=%p)\n",
