@@ -176,7 +176,7 @@ std::vector<cudaStream_t>& CommOverlapCore::get_current_stream_compute() {
     static std::vector<cudaStream_t> empty_vector;
     return empty_vector;
   }
-  return _per_deviceget_current_stream_compute()[device_idx];
+  return _per_device_stream_compute[device_idx];
 }
 
 cudaEvent_t CommOverlapCore::get_current_start_compute() {
@@ -231,7 +231,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
   }
   // Create per-device streams (size=1 for multi-process, size=nvsize for SPMD)
   int num_devices = _spmd ? _ub_comm->nvsize : 1;
-  _per_deviceget_current_stream_compute().resize(num_devices);
+  _per_device_stream_compute.resize(num_devices);
   
   for (int dev_idx = 0; dev_idx < num_devices; dev_idx++) {
     int target_device = _spmd ? dev_idx : -1;  // -1 means use current device
@@ -242,11 +242,11 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
       cudaStream_t stream;
       NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _gemm_priority));
-      _per_deviceget_current_stream_compute()[dev_idx].push_back(std::move(stream));
+      _per_device_stream_compute[dev_idx].push_back(std::move(stream));
     }
     
     printf("[DEBUG] Created %d compute streams for device index %d\n", 
-           static_cast<int>(_per_deviceget_current_stream_compute()[dev_idx].size()), dev_idx);
+           static_cast<int>(_per_device_stream_compute[dev_idx].size()), dev_idx);
     fflush(stdout);
   }
 
@@ -618,10 +618,10 @@ void CommOverlapBase::bulk_overlap(const TensorWrapper &A, bool transa, const Te
                    get_current_stream_compute()[0]);
 
   _ub_comm->sms = ori_sms;
-  NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, get_current_stream_comm()));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
-  NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, get_current_stream_compute()[0]));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
+  NVTE_CHECK_CUDA(cudaEventRecord(get_current_stop_comm(), get_current_stream_comm()));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, get_current_stop_comm(), 0));
+  NVTE_CHECK_CUDA(cudaEventRecord(get_current_stop_comm(), get_current_stream_compute()[0]));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, get_current_stop_comm(), 0));
 
 }  // CommOverlapBase::bulk_overlap
 
@@ -717,9 +717,9 @@ void CommOverlapBase::atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa
 
   _ub_comm->sms = ori_sms;
   NVTE_CHECK_CUDA(cudaEventRecord(get_current_stop_compute(), get_current_stream_compute()[0]));
-  NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, get_current_stream_comm()));
+  NVTE_CHECK_CUDA(cudaEventRecord(get_current_stop_comm(), get_current_stream_comm()));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, get_current_stop_compute(), 0));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, get_current_stop_comm(), 0));
 }  // split_overlap_rs
 
 /*
@@ -862,8 +862,8 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
     NVTE_CHECK_CUDA(cudaEventRecord(get_current_stop_compute(), get_current_stream_compute()[i]));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, get_current_stop_compute(), 0));
   }
-  NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, get_current_stream_comm()));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
+  NVTE_CHECK_CUDA(cudaEventRecord(get_current_stop_comm(), get_current_stream_comm()));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, get_current_stop_comm(), 0));
 }  // CommOverlapBase::split_overlap_rs
 
 void CommOverlapBase::bulk_overlap_external_ag(cudaStream_t send_stream, cudaStream_t recv_stream,
@@ -879,14 +879,14 @@ void CommOverlapBase::bulk_overlap_external_ag(cudaStream_t send_stream, cudaStr
 
   // We sync with the internal comm stream so the destructor can wait for the comm stream to finish before freeing the ubuf
   for (auto stream : {send_stream, recv_stream}) {
-    NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, stream));
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(get_current_stream_comm(), _stop_comm, 0));
+    NVTE_CHECK_CUDA(cudaEventRecord(get_current_stop_comm(), stream));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(get_current_stream_comm(), get_current_stop_comm(), 0));
   }
 
   // Next we sync with the main stream
   // We have to recapture an event off the comm stream to enable cuda graph capture otherwise the comm stream will be never be joined in the graph
-  NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, get_current_stream_comm()));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
+  NVTE_CHECK_CUDA(cudaEventRecord(get_current_stop_comm(), get_current_stream_comm()));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, get_current_stop_comm(), 0));
 }
 
 /***************************************************************************************************
