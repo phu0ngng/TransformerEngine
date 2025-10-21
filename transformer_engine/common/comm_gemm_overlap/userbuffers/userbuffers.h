@@ -150,11 +150,13 @@ struct communicator {
   std::vector<int*> per_device_recv_id;         // Array of recv_id pointers  
   std::vector<int*> per_device_flags_baseptr;   // Array of flags_baseptr pointers
   std::vector<int*> per_device_flags;           // Array of flags pointers
+  std::vector<int> device_to_tp_rank;           // Maps device ID to TP rank within TP domain
   
   // SPMD helper methods for dynamic device-aware computation
   int get_current_nvrank() const;
   int get_current_ar2_nvrank() const;
   int get_current_mydev() const;
+  int get_current_tp_rank() const;  // Get TP rank within TP domain
   int* get_current_send_id() const;
   int* get_current_recv_id() const;
   int* get_current_flags() const;

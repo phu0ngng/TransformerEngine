@@ -53,7 +53,6 @@ class CommOverlapCore {
   int _num_comm_sm;
   int _cga_size;
   int _use_ce;
-  int _ub_reg;
   int _gemm_priority;
   int _comm_priority;
   bool _atomic_gemm{false};
@@ -61,24 +60,27 @@ class CommOverlapCore {
   bool _spmd{false};
 
   TensorWrapper _counter;
-  
-  // Unified per-device storage (size=1 for multi-process, size=tp_size for SPMD)
-  std::vector<int> _per_device_ub_reg;
-  std::vector<TensorWrapper> _per_device_ubuf;
   float *_ubuf_scale_inv;
   bool _ubuf_scale_inv_initialized{false};
 
   std::vector<cudaStream_t> _stream_compute;
   cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm, _comm_launch_event;
-
- private:
-  void initialize(int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
-                  int gemm_priority, int comm_priority, int num_comm_sm, bool set_sm_margin,
-                  bool use_ce, bool atomic_gemm);
-  std::pair<int, int> get_device_aware_rank_and_tp_id();
+  
+  // Protected device-aware accessor methods (derived classes can use these)
   int get_current_ub_reg();
   TensorWrapper& get_current_ubuf();
   int get_device_index();  // Helper to get device index for vector access
+  std::pair<int, int> get_device_aware_rank_and_tp_id();
+
+ private:
+  // Private unified per-device storage (size=1 for multi-process, size=tp_size for SPMD)
+  std::vector<int> _per_device_ub_reg;
+  std::vector<TensorWrapper> _per_device_ubuf;
+  
+  // Private initialization method
+  void initialize(int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
+                  int gemm_priority, int comm_priority, int num_comm_sm, bool set_sm_margin,
+                  bool use_ce, bool atomic_gemm);
 
  public:
   CommOverlapCore() {}  // dummy constructor for exposing type to Python
@@ -115,7 +117,7 @@ class CommOverlapCore {
 
   bool is_p2p_overlap() { return _is_p2p; }
 
-  bool is_fp8_ubuf() { return _ubuf.element_size() == 1; }
+  bool is_fp8_ubuf() { return get_current_ubuf().element_size() == 1; }
 
   virtual void bulk_overlap(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                             bool transb, TensorWrapper &D, TensorWrapper &bias,

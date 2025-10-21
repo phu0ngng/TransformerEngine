@@ -164,12 +164,30 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     (*comm)->per_device_recv_id.resize(numlocal, nullptr);
     (*comm)->per_device_flags_baseptr.resize(numlocal, nullptr);
     (*comm)->per_device_flags.resize(numlocal, nullptr);
+    (*comm)->device_to_tp_rank.resize(numlocal);
+    
+    // Initialize device to TP rank mapping
+    // For DP+TP: Device ID maps to TP rank within its TP domain
+    // Example: DP=2, TP=4, 8 devices total
+    //   Devices 0,1,2,3 → TP domain 0 → TP ranks 0,1,2,3
+    //   Devices 4,5,6,7 → TP domain 1 → TP ranks 0,1,2,3
+    for (int dev_idx = 0; dev_idx < numlocal; dev_idx++) {
+      (*comm)->device_to_tp_rank[dev_idx] = dev_idx % tensorgpus;  // tensorgpus = tp_size
+    }
+    
+    printf("[DEBUG] SPMD: Device to TP rank mapping initialized (tp_size=%d)\n", tensorgpus);
+    for (int dev_idx = 0; dev_idx < numlocal; dev_idx++) {
+      printf("[DEBUG] SPMD: Device %d → TP rank %d\n", dev_idx, (*comm)->device_to_tp_rank[dev_idx]);
+    }
+    fflush(stdout);
   } else {
     // Single-process-single-device mode: Size = 1
     (*comm)->per_device_send_id.resize(1, nullptr);
     (*comm)->per_device_recv_id.resize(1, nullptr);
     (*comm)->per_device_flags_baseptr.resize(1, nullptr);
     (*comm)->per_device_flags.resize(1, nullptr);
+    (*comm)->device_to_tp_rank.resize(1);
+    (*comm)->device_to_tp_rank[0] = mylocal % tensorgpus;
   }
 
   if (spmd) {
@@ -543,6 +561,16 @@ int communicator::get_current_mydev() const {
     return current_device;  // mydev = current device in SPMD
   } else {
     return mydev;  // Use stored value for multi-process
+  }
+}
+
+int communicator::get_current_tp_rank() const {
+  if (is_spmd) {
+    int current_device;
+    cudaGetDevice(&current_device);
+    return device_to_tp_rank[current_device];  // Get TP rank from mapping
+  } else {
+    return nvrank % ar2_nvsize;  // Compute TP rank for multi-process
   }
 }
 

@@ -71,16 +71,15 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
 
 std::pair<int, int> CommOverlapCore::get_device_aware_rank_and_tp_id() {
   if (_ub_comm->is_spmd) {
-    // SPMD mode: Both rank and TP ID based on current device context
+    // SPMD mode: Rank = device ID, TP ID from device_to_tp_rank mapping
     int current_device;
     NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
     
-    // In SPMD mode, rank = TP ID = device ID
-    NVTE_CHECK(current_device >= 0 && current_device < _tp_size,
-               "SPMD: Current device ", current_device, " is out of TP range [0, ", _tp_size, ")");
+    NVTE_CHECK(current_device >= 0 && current_device < static_cast<int>(_ub_comm->device_to_tp_rank.size()),
+               "SPMD: Current device ", current_device, " is out of range [0, ", _ub_comm->device_to_tp_rank.size(), ")");
     
-    int rank = current_device;
-    int tp_id = current_device;
+    int rank = current_device;  // Global rank = device ID
+    int tp_id = _ub_comm->device_to_tp_rank[current_device];  // TP rank within TP domain
     
     printf("[DEBUG] SPMD get_device_aware_rank_and_tp_id: current_device=%d → rank=%d, tp_id=%d\n", 
            current_device, rank, tp_id);
