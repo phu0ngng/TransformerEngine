@@ -170,7 +170,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   // Bootstrap UB via creating a dummy CommOverlapP2PBase object
   std::vector<size_t> buffer_shape{1, 1};
   auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kFloat32,
-                                                                  JAXX_Collective_Op::ALL_GATHER);
+                                                                  JAXX_Collective_Op::ALL_GATHER, 
+                                                                  true /*is_bootstrap*/);
 }
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
@@ -190,7 +191,8 @@ int GetCgemmNumMaxStreams() {
 
 CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> buffer_shape,
                                                           DType dtype,
-                                                          JAXX_Collective_Op collective_op) {
+                                                          JAXX_Collective_Op collective_op,
+                                                          bool is_bootstrap) {
   auto &comm_handler = CommunicatorHandler::get();
   auto &cgemm_config = CgemmConfig::get();
 
@@ -249,7 +251,8 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
       comm_handler.allgather_func, comm_handler.barrier_func, get_nvte_collective_op(collective_op),
       cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
       cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
-      cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag, is_spmd);
+      cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag, is_spmd,
+      is_bootstrap);
 
   CommOverlapCore *executor_ptr = executor.get();
   plan_map[plan_id] = std::move(executor);
