@@ -897,12 +897,20 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
                                        CommOverlapType comm_type, int num_max_streams,
                                        int comm_cga_size, int gemm_priority, int comm_priority,
                                        int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                       bool atomic_gemm, bool aggregate, bool spmd)
+                                       bool atomic_gemm, bool aggregate, bool spmd,
+                                       bool is_bootstrap)
     : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
                       allgather_handle, barrier_handle, tp_size, num_max_streams, comm_cga_size,
                       gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
                       atomic_gemm, spmd) {
-  initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
+  if (!is_bootstrap) {
+    // Runtime: Each device thread initializes its own P2P resources
+    initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
+  } else {
+    // Bootstrap: Skip P2P initialization (only Core initialization needed)
+    printf("[DEBUG] P2PBase: Bootstrap mode - skipping P2P initialization\n");
+    fflush(stdout);
+  }
 }
 
 void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
@@ -932,40 +940,35 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     _num_ubuf_chunks = _tp_size * 2 - 1;
   }
 
-  printf("[DEBUG] P2P: About to register/get buffers...\n");
+  printf("[DEBUG] P2P: Runtime initialization - registering buffer for current device...\n");
   fflush(stdout);
   
-  // Register buffers if not already done (SPMD mode registers once, non-SPMD per-device)
+  // Runtime: Each device thread registers its own buffer
+  int device_idx = get_device_index();
+  
+  printf("[DEBUG] P2P: device_idx=%d, current device context\n", device_idx);
+  fflush(stdout);
+  
+  // Ensure per-device vectors are sized (should be done in bootstrap)
   if (_per_device_ubuf.empty()) {
-    printf("[DEBUG] P2P: Buffers not registered yet, registering now...\n");
+    printf("[DEBUG] P2P: Resizing per-device vectors to %d\n", _spmd ? _ub_comm->nvsize : 1);
     fflush(stdout);
     
-    // Register buffers for all devices (SPMD) or single device (non-SPMD)
     int num_devices = _spmd ? _ub_comm->nvsize : 1;
-    _per_device_ub_reg.resize(num_devices);
+    _per_device_ub_reg.resize(num_devices, -1);
     _per_device_ubuf.resize(num_devices);
-    
-    int original_device;
-    NVTE_CHECK_CUDA(cudaGetDevice(&original_device));
-    
-    for (int dev_idx = 0; dev_idx < num_devices; dev_idx++) {
-      int target_device = _spmd ? dev_idx : original_device;
-      NVTE_CHECK_CUDA(cudaSetDevice(target_device));
-      
-      void *buf_ptr;
-      _per_device_ub_reg[dev_idx] = register_user_buffer_collective(&buf_ptr, buffer_bytes, _ub_comm, true, _spmd);
-      _per_device_ubuf[dev_idx] = std::move(TensorWrapper(buf_ptr, buffer_shape, buffer_dtype));
-      
-      printf("[DEBUG] P2P: Registered buffer for device %d (handle=%d, ptr=%p)\n",
-             dev_idx, _per_device_ub_reg[dev_idx], buf_ptr);
-      fflush(stdout);
-    }
-    
-    NVTE_CHECK_CUDA(cudaSetDevice(original_device));
   }
   
-  int device_idx = get_device_index();
-  void *buffer_ptr = _per_device_ubuf[device_idx].dptr();
+  // Register buffer for current device only (runtime per-thread)
+  void *buf_ptr;
+  _per_device_ub_reg[device_idx] = register_user_buffer_collective(&buf_ptr, buffer_bytes, _ub_comm, true, false);
+  _per_device_ubuf[device_idx] = std::move(TensorWrapper(buf_ptr, buffer_shape, buffer_dtype));
+  
+  printf("[DEBUG] P2P: Runtime registered buffer for device %d (handle=%d, ptr=%p)\n",
+         device_idx, _per_device_ub_reg[device_idx], buf_ptr);
+  fflush(stdout);
+  
+  void *buffer_ptr = buf_ptr;
   
   printf("[DEBUG] P2P: Using device index %d buffer (handle %d) at %p\n", 
          device_idx, _per_device_ub_reg[device_idx], buffer_ptr);

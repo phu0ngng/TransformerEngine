@@ -752,8 +752,26 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       NVTE_CHECK_CUDA(cudaSetDevice(dev_idx));
       
       if (alloc) {
-        NVTE_CHECK_CUDA(cudaMalloc(&comm->peer_ptr[hndl][dev_idx], bytes));
-        NVTE_CHECK_CUDA(cudaMemset(comm->peer_ptr[hndl][dev_idx], 0, bytes));
+        printf("[DEBUG] SPMD: cudaMalloc on device %d (%zu bytes)...\n", dev_idx, bytes);
+        fflush(stdout);
+        
+        cudaError_t err = cudaMalloc(&comm->peer_ptr[hndl][dev_idx], bytes);
+        if (err != cudaSuccess) {
+          printf("[ERROR] SPMD: cudaMalloc failed on device %d: %s\n", dev_idx, cudaGetErrorString(err));
+          fflush(stdout);
+          NVTE_CHECK_CUDA(err);
+        }
+        
+        printf("[DEBUG] SPMD: cudaMalloc succeeded, ptr=%p, about to memset...\n", comm->peer_ptr[hndl][dev_idx]);
+        fflush(stdout);
+        
+        err = cudaMemset(comm->peer_ptr[hndl][dev_idx], 0, bytes);
+        if (err != cudaSuccess) {
+          printf("[ERROR] SPMD: cudaMemset failed on device %d: %s\n", dev_idx, cudaGetErrorString(err));
+          fflush(stdout);
+          NVTE_CHECK_CUDA(err);
+        }
+        
         printf("[DEBUG] SPMD: Device %d buffer allocated at %p\n", dev_idx, comm->peer_ptr[hndl][dev_idx]);
         fflush(stdout);
       }
