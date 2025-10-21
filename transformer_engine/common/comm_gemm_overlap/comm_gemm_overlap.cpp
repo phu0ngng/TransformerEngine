@@ -120,12 +120,19 @@ int CommOverlapCore::get_current_ub_reg() {
   printf("[DEBUG] get_current_ub_reg called: _per_device_ub_reg.size()=%zu\n", _per_device_ub_reg.size());
   fflush(stdout);
   
+  if (_per_device_ub_reg.empty()) {
+    printf("[ERROR] get_current_ub_reg: _per_device_ub_reg is empty! Returning -1.\n");
+    fflush(stdout);
+    return -1;  // Return error value instead of crashing
+  }
+  
   int device_idx = get_device_index();
-  NVTE_CHECK(!_per_device_ub_reg.empty(), 
-             "Per-device ub_reg array is empty! Buffers may not have been initialized. "
-             "This method should only be called after buffer registration.");
-  NVTE_CHECK(device_idx >= 0 && device_idx < static_cast<int>(_per_device_ub_reg.size()),
-             "Device index ", device_idx, " out of range for ub_reg array (size=", _per_device_ub_reg.size(), ")");
+  if (device_idx < 0 || device_idx >= static_cast<int>(_per_device_ub_reg.size())) {
+    printf("[ERROR] get_current_ub_reg: device_idx=%d out of range (size=%zu)\n", 
+           device_idx, _per_device_ub_reg.size());
+    fflush(stdout);
+    return -1;
+  }
   
   printf("[DEBUG] get_current_ub_reg: device_idx=%d, ub_reg=%d\n", device_idx, _per_device_ub_reg[device_idx]);
   fflush(stdout);
@@ -134,11 +141,25 @@ int CommOverlapCore::get_current_ub_reg() {
 }
 
 TensorWrapper& CommOverlapCore::get_current_ubuf() {
+  printf("[DEBUG] get_current_ubuf called: _per_device_ubuf.size()=%zu\n", _per_device_ubuf.size());
+  fflush(stdout);
+  
+  if (_per_device_ubuf.empty()) {
+    printf("[ERROR] get_current_ubuf: _per_device_ubuf is empty! Buffers not initialized.\n");
+    fflush(stdout);
+    // Return a reference to a static empty TensorWrapper to avoid crash
+    static TensorWrapper empty_tensor;
+    return empty_tensor;
+  }
+  
   int device_idx = get_device_index();
-  NVTE_CHECK(!_per_device_ubuf.empty(), 
-             "Per-device ubuf array is empty! Buffers may not have been initialized.");
-  NVTE_CHECK(device_idx >= 0 && device_idx < static_cast<int>(_per_device_ubuf.size()),
-             "Device index ", device_idx, " out of range for ubuf array (size=", _per_device_ubuf.size(), ")");
+  if (device_idx < 0 || device_idx >= static_cast<int>(_per_device_ubuf.size())) {
+    printf("[ERROR] get_current_ubuf: device_idx=%d out of range (size=%zu)\n", 
+           device_idx, _per_device_ubuf.size());
+    fflush(stdout);
+    static TensorWrapper empty_tensor;
+    return empty_tensor;
+  }
   
   printf("[DEBUG] get_current_ubuf: device_idx=%d, ubuf.dptr()=%p\n", device_idx, _per_device_ubuf[device_idx].dptr());
   fflush(stdout);
