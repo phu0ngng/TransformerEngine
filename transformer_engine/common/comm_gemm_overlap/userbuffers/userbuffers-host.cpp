@@ -959,14 +959,41 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
   } else {
 #endif
-    if (alloc) {
-      NVTE_CHECK_CUDA(cudaMalloc(gpubuff, bytes));
-      NVTE_CHECK_CUDA(cudaMemset(*gpubuff, 0, bytes));
-    }
+    if (spmd) {
+      // SPMD runtime mode: Direct memory access (no IPC in single process)
+      printf("[DEBUG] SPMD runtime register_user_buffer_collective: device context\n");
+      fflush(stdout);
+      
+      if (alloc) {
+        int current_device;
+        NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
+        printf("[DEBUG] SPMD runtime: Allocating on current device %d\n", current_device);
+        fflush(stdout);
+        
+        NVTE_CHECK_CUDA(cudaMalloc(gpubuff, bytes));
+        NVTE_CHECK_CUDA(cudaMemset(*gpubuff, 0, bytes));
+        
+        printf("[DEBUG] SPMD runtime: Allocated buffer at %p\n", *gpubuff);
+        fflush(stdout);
+      }
+      
+      // Set peer pointer for current device (P2P already enabled during bootstrap)
+      int my_idx = comm->get_current_nvrank();
+      comm->peer_ptr[hndl][my_idx] = *gpubuff;
+      
+      printf("[DEBUG] SPMD runtime: Set peer_ptr[%d][%d]=%p\n", hndl, my_idx, *gpubuff);
+      fflush(stdout);
+      
+    } else {
+      // Multi-process mode: Use CUDA IPC
+      if (alloc) {
+        NVTE_CHECK_CUDA(cudaMalloc(gpubuff, bytes));
+        NVTE_CHECK_CUDA(cudaMemset(*gpubuff, 0, bytes));
+      }
 
-    NVTE_CHECK(comm->nvsize <= 8, "CUDA IPC supports only up to 8 GPUs in an NVLink domain.");
-    cudaIpcMemHandle_t memhndl;
-    NVTE_CHECK_CUDA(cudaIpcGetMemHandle(&memhndl, *gpubuff));
+      NVTE_CHECK(comm->nvsize <= 8, "CUDA IPC supports only up to 8 GPUs in an NVLink domain.");
+      cudaIpcMemHandle_t memhndl;
+      NVTE_CHECK_CUDA(cudaIpcGetMemHandle(&memhndl, *gpubuff));
 
     cudaIpcMemHandle_t *tmp =
         reinterpret_cast<cudaIpcMemHandle_t *>(malloc(comm->nvsize * sizeof(cudaIpcMemHandle_t)));
@@ -1007,15 +1034,16 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
                                              cudaIpcMemLazyEnablePeerAccess));
       }
     }
-    comm->peer_ptr[hndl][comm->get_current_nvrank()] = *gpubuff;
-    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+      comm->peer_ptr[hndl][comm->get_current_nvrank()] = *gpubuff;
+      NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
-    NVTE_CHECK_CUDA(cudaMemcpy(
-        reinterpret_cast<char *>(comm->gpu_ptrs) + (hndl * comm->nvsize * sizeof(void *)),
-        comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
+      NVTE_CHECK_CUDA(cudaMemcpy(
+          reinterpret_cast<char *>(comm->gpu_ptrs) + (hndl * comm->nvsize * sizeof(void *)),
+          comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
-    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-    free(tmp);
+      NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+      free(tmp);
+    }  // end else (multi-process)
 #if CUDART_VERSION >= 12010
   }
 #endif
