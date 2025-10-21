@@ -66,6 +66,10 @@ class CommOverlapCore {
   std::vector<cudaStream_t> _stream_compute;
   cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm, _comm_launch_event;
   
+  // Protected unified per-device storage (derived classes need access for initialization)
+  std::vector<int> _per_device_ub_reg;
+  std::vector<TensorWrapper> _per_device_ubuf;
+  
   // Protected device-aware accessor methods (derived classes can use these)
   int get_current_ub_reg();
   TensorWrapper& get_current_ubuf();
@@ -73,9 +77,6 @@ class CommOverlapCore {
   std::pair<int, int> get_device_aware_rank_and_tp_id();
 
  private:
-  // Private unified per-device storage (size=1 for multi-process, size=tp_size for SPMD)
-  std::vector<int> _per_device_ub_reg;
-  std::vector<TensorWrapper> _per_device_ubuf;
   
   // Private initialization method
   void initialize(int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
