@@ -984,6 +984,9 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       printf("[DEBUG] SPMD runtime: Set peer_ptr[%d][%d]=%p\n", hndl, my_idx, *gpubuff);
       fflush(stdout);
       
+      // SPMD runtime path ends here - skip IPC code below
+      // Continue to common finalization at the end
+      
     } else {
       // Multi-process mode: Use CUDA IPC
       if (alloc) {
@@ -1028,12 +1031,12 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       }
     }
 
-    for (int i = 0; i < comm->nvsize; i++) {
-      if (i != comm->get_current_nvrank()) {
-        NVTE_CHECK_CUDA(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],
-                                             cudaIpcMemLazyEnablePeerAccess));
+      for (int i = 0; i < comm->nvsize; i++) {
+        if (i != comm->get_current_nvrank()) {
+          NVTE_CHECK_CUDA(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],
+                                               cudaIpcMemLazyEnablePeerAccess));
+        }
       }
-    }
       comm->peer_ptr[hndl][comm->get_current_nvrank()] = *gpubuff;
       NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
