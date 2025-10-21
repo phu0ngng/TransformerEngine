@@ -163,8 +163,8 @@ class CommunicatorHandler {
 class CollectiveGemmPlanRegistry {
  public:
   static CollectiveGemmPlanRegistry &getInstance() {
-    // Phuong: this should work with static or static thread_local?
-    static thread_local CollectiveGemmPlanRegistry instance;
+    // SPMD: Process-wide registry (not thread_local) since bootstrap happens once per process
+    static CollectiveGemmPlanRegistry instance;
     return instance;
   }
 

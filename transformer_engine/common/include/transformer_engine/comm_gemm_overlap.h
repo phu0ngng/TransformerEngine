@@ -63,8 +63,14 @@ class CommOverlapCore {
   float *_ubuf_scale_inv;
   bool _ubuf_scale_inv_initialized{false};
 
-  std::vector<cudaStream_t> _stream_compute;
-  cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm, _comm_launch_event;
+  // Unified per-device CUDA resources (size=1 for multi-process, size=nvsize for SPMD)
+  std::vector<std::vector<cudaStream_t>> _per_device_stream_compute;  // [device][stream_id]
+  std::vector<cudaStream_t> _per_device_stream_comm;
+  std::vector<cudaEvent_t> _per_device_start_compute;
+  std::vector<cudaEvent_t> _per_device_stop_compute;
+  std::vector<cudaEvent_t> _per_device_start_comm;
+  std::vector<cudaEvent_t> _per_device_stop_comm;
+  std::vector<cudaEvent_t> _per_device_comm_launch_event;
   
   // Protected unified per-device storage (derived classes need access for initialization)
   std::vector<int> _per_device_ub_reg;
@@ -73,6 +79,13 @@ class CommOverlapCore {
   // Protected device-aware accessor methods (derived classes can use these)
   int get_current_ub_reg();
   TensorWrapper& get_current_ubuf();
+  std::vector<cudaStream_t>& get_current_stream_compute();
+  cudaStream_t get_current_stream_comm();
+  cudaEvent_t get_current_start_compute();
+  cudaEvent_t get_current_stop_compute();
+  cudaEvent_t get_current_start_comm();
+  cudaEvent_t get_current_stop_comm();
+  cudaEvent_t get_current_comm_launch_event();
   int get_device_index();  // Helper to get device index for vector access
   std::pair<int, int> get_device_aware_rank_and_tp_id();
 
