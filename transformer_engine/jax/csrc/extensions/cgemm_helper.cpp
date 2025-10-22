@@ -196,12 +196,12 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
   auto &comm_handler = CommunicatorHandler::get();
   auto &cgemm_config = CgemmConfig::get();
 
-  int device_idx = comm_handler.get_local_device_idx_for_current_device();
+  // Use process_id instead of device_idx for plan hash (one executor per process, not per device)
   int64_t plan_id = 0;
   hash_combine(plan_id, buffer_shape[0], buffer_shape[1], static_cast<size_t>(dtype),
                static_cast<int>(collective_op), comm_handler.tp_size, cgemm_config.num_max_streams,
                cgemm_config.gemm_priority, cgemm_config.comm_priority, cgemm_config.num_comm_sm,
-               cgemm_config.use_ce, cgemm_config.aggregate_ag, device_idx);
+               cgemm_config.use_ce, cgemm_config.aggregate_ag, comm_handler.process_id);
 
   auto it = plan_map.find(plan_id);
   if (it != plan_map.end()) {
