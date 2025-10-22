@@ -1251,6 +1251,15 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
                                           TensorWrapper &workspace, bool grad, bool accumulate,
                                           bool use_split_accumulator, TensorWrapper &B_copy,
                                           cudaStream_t stream_main) {
+  // Verify device context at function entry
+  int current_device;
+  NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
+  printf("[DEBUG] split_overlap_ag: Entry - current_device=%d, _rank=%d, _tp_id=%d, _spmd=%d\n",
+         current_device, _rank, _tp_id, _spmd);
+  printf("[DEBUG] split_overlap_ag: CUDA resources - streams.size()=%zu, events.size()=%zu\n",
+         _per_device_stream_compute.size(), _per_device_start_compute.size());
+  fflush(stdout);
+  
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -1274,11 +1283,22 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
                "-bit data type but got ", B_copy.element_size() * 8, "-bit");
   }
 
-  NVTE_CHECK_CUDA(cudaEventRecord(get_current_start_compute(), stream_main));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send[0], get_current_start_compute(), 0));
-  NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, get_current_start_compute(), 0));
+  cudaEvent_t start_compute_event = get_current_start_compute();
+  printf("[DEBUG] split_overlap_ag: start_compute_event=%p\n", (void*)start_compute_event);
+  fflush(stdout);
+  
+  if (!start_compute_event) {
+    printf("[ERROR] split_overlap_ag: start_compute_event is NULL! _per_device_start_compute.size()=%zu\n",
+           _per_device_start_compute.size());
+    fflush(stdout);
+    return;
+  }
+  
+  NVTE_CHECK_CUDA(cudaEventRecord(start_compute_event, stream_main));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send[0], start_compute_event, 0));
+  NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, start_compute_event, 0));
   for (size_t i = 0; i < get_current_stream_compute().size(); i++) {
-    NVTE_CHECK_CUDA(cudaStreamWaitEvent(get_current_stream_compute()[i], get_current_start_compute(), 0));
+    NVTE_CHECK_CUDA(cudaStreamWaitEvent(get_current_stream_compute()[i], start_compute_event, 0));
   }
   if (_aggregate) {
     const int num_steps = _tp_size / 2;
