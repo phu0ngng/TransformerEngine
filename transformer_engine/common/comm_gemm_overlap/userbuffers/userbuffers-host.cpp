@@ -546,7 +546,7 @@ int communicator::get_current_nvrank() const {
   if (is_spmd) {
     int current_device;
     cudaGetDevice(&current_device);
-    return current_device;  // nvrank = device ID in SPMD
+    return current_device % nvsize;  //TODO: use get_current_tp_rank() instead
   } else {
     return nvrank;  // Use stored value for multi-process
   }
@@ -556,7 +556,7 @@ int communicator::get_current_ar2_nvrank() const {
   if (is_spmd) {
     int current_device;
     cudaGetDevice(&current_device);
-    return current_device - ar2_firstgpu;  // ar2_nvrank = device - first_gpu
+    return current_device % nvsize;  //TODO: use get_current_tp_rank() instead
   } else {
     return ar2_nvrank;  // Use stored value for multi-process
   }
@@ -566,7 +566,7 @@ int communicator::get_current_mydev() const {
   if (is_spmd) {
     int current_device;
     cudaGetDevice(&current_device);
-    return current_device;  // mydev = current device in SPMD
+    return current_device;  
   } else {
     return mydev;  // Use stored value for multi-process
   }
@@ -584,12 +584,10 @@ int communicator::get_current_tp_rank() const {
 
 int communicator::get_current_myrank() const {
   if (is_spmd) {
-    // SPMD mode: Global rank = device ID
     int current_device;
     cudaGetDevice(&current_device);
-    return current_device;
+    return current_device; //TODO: use get_current_mydev() instead
   } else {
-    // Multi-process mode: Use stored myrank
     return myrank;
   }
 }
