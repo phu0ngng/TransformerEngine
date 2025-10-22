@@ -721,7 +721,7 @@ void destroy_communicator(communicator *comm) {
       // Unmap memory addresses and release handles for both peer and own buffers
       for (int rank = 0; rank < comm->nvsize; rank++) {
         NVTE_CALL_CHECK_CUDA_DRIVER(cuMemUnmap,
-                                    reinterpret_cast<CUdeviceptr>(comm->peer_ptr[hndl][rank]),
+                                    reinterpret_cast<CUdeviceptr>(comm->get_current_peer_ptr(hndl)[rank]),
                                     comm->mem_size[hndl]);
         NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->uchandles[hndl][rank]);
       }
@@ -733,15 +733,15 @@ void destroy_communicator(communicator *comm) {
     } else {
     for (int rank = 0; rank < comm->nvsize; rank++) {
       if (rank != comm->get_current_nvrank()) {
-        NVTE_CHECK_CUDA(cudaIpcCloseMemHandle(comm->peer_ptr[hndl][rank]));
+        NVTE_CHECK_CUDA(cudaIpcCloseMemHandle(comm->get_current_peer_ptr(hndl)[rank]));
       } else if (comm->mem_dealloc[hndl]) {
-          NVTE_CHECK_CUDA(cudaFree(comm->peer_ptr[hndl][rank]));
+          NVTE_CHECK_CUDA(cudaFree(comm->get_current_peer_ptr(hndl)[rank]));
         } else {
-          comm->peer_ptr[hndl][rank] = nullptr;  // remove reference to external buffer
+          comm->get_current_peer_ptr(hndl)[rank] = nullptr;  // remove reference to external buffer
         }
       }
     }
-    free(comm->peer_ptr[hndl]);
+    free(comm->get_current_peer_ptr(hndl));
     // Clear per-device mem_ptr
     for (size_t dev_idx = 0; dev_idx < comm->per_device_mem_ptr[hndl].size(); dev_idx++) {
       comm->per_device_mem_ptr[hndl][dev_idx] = nullptr;
@@ -948,7 +948,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         else
           comm->gpu_ptrs = remptrs[i];
       }
-      comm->peer_ptr[hndl][i] = remptrs[i];
+      comm->get_current_peer_ptr(hndl)[i] = remptrs[i];
     }
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemSetAccess, ptr, (size_t)(aligned_size * nranks),
                                 const_cast<CUmemAccessDesc *>(&accessDesc), (size_t)1);
@@ -995,7 +995,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       
       // Set peer pointer for current device (P2P already enabled during bootstrap)
       int my_idx = comm->get_current_nvrank();
-      comm->peer_ptr[hndl][my_idx] = *gpubuff;
+      comm->get_current_peer_ptr(hndl)[my_idx] = *gpubuff;
       
       printf("[DEBUG] SPMD runtime: Set peer_ptr[%d][%d]=%p\n", hndl, my_idx, *gpubuff);
       fflush(stdout);
@@ -1049,16 +1049,16 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
       for (int i = 0; i < comm->nvsize; i++) {
         if (i != comm->get_current_nvrank()) {
-          NVTE_CHECK_CUDA(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],
+          NVTE_CHECK_CUDA(cudaIpcOpenMemHandle(&(comm->get_current_peer_ptr(hndl)[i]), tmp[i],
                                                cudaIpcMemLazyEnablePeerAccess));
         }
       }
-      comm->peer_ptr[hndl][comm->get_current_nvrank()] = *gpubuff;
+      comm->get_current_peer_ptr(hndl)[comm->get_current_nvrank()] = *gpubuff;
       NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
       NVTE_CHECK_CUDA(cudaMemcpy(
           reinterpret_cast<char *>(comm->gpu_ptrs) + (hndl * comm->nvsize * sizeof(void *)),
-          comm->peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
+          comm->get_current_peer_ptr(hndl), comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
       NVTE_CHECK_CUDA(cudaDeviceSynchronize());
       free(tmp);
