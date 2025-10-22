@@ -2289,8 +2289,8 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
 // 1 - CE start index counter
 // 2 - CE end index counter
 #define GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsth, index)                                 \
-  ((reinterpret_cast<char *>((comm)->peer_ptr[0][(peerlocal)])) +                           \
-   ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + (comm)->myrank * NVTE_MAX_REGIONS + (dsth) + \
+  ((reinterpret_cast<char *>((comm)->get_current_peer_ptr(0)[(peerlocal)])) +               \
+   ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + (comm)->get_current_myrank() * NVTE_MAX_REGIONS + (dsth) + \
      (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                        \
     sizeof(int)))
 
@@ -2299,7 +2299,7 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
 // 1 - CE start index counter
 // 2 - CE end index counter
 #define GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsth, index)                              \
-  ((reinterpret_cast<char *>((comm)->mem_ptr[0])) +                                      \
+  ((reinterpret_cast<char *>((comm)->get_current_mem_ptr(0))) +                          \
    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + (recv_peer) * NVTE_MAX_REGIONS + (dsth) + \
      (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                     \
     sizeof(int)))
