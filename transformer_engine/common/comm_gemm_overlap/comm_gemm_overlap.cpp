@@ -50,9 +50,9 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
                                  ExtBarrierOp barrier_handle, int num_splits, int num_max_streams,
                                  int comm_cga_size, int gemm_priority, int comm_priority,
                                  int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                 bool atomic_gemm, bool spmd)
+                                 bool atomic_gemm, bool spmd, bool is_bootstrap)
     : _spmd(spmd) {
-  // Initialize userbuf communicator
+  // Initialize userbuf communicator (once per process)
   if (!_comm_created) {
     if (myrank == 0) {
       printf("!!! [UB] Create Userbuffers Communicator\n");
@@ -66,8 +66,18 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
     _comm_created = true;
   }
 
-  initialize(tp_size, num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority,
-             num_comm_sm, set_sm_margin, use_ce,   atomic_gemm);
+  if (!is_bootstrap) {
+    // Runtime: Each device thread initializes its own resources
+    printf("[DEBUG] CommOverlapCore: Runtime mode - calling initialize()\n");
+    fflush(stdout);
+    
+    initialize(tp_size, num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority,
+               num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
+  } else {
+    // Bootstrap: Skip initialize, just set up communicator
+    printf("[DEBUG] CommOverlapCore: Bootstrap mode - skipping initialize()\n");
+    fflush(stdout);
+  }
 }
 
 std::pair<int, int> CommOverlapCore::get_device_aware_rank_and_tp_id() {
@@ -208,26 +218,31 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     _gemm_priority = gemm_priority;
     _comm_priority = comm_priority;
   }
-  // Create per-device streams (size=1 for multi-process, size=nvsize for SPMD)
-  int num_devices = _spmd ? _ub_comm->nvsize : 1;
-  _per_device_stream_compute.resize(num_devices);
-
-  for (int dev_idx = 0; dev_idx < num_devices; dev_idx++) {
-    int target_device = _spmd ? dev_idx : -1;  // -1 means use current device
-    if (target_device >= 0) {
-      NVTE_CHECK_CUDA(cudaSetDevice(target_device));
-    }
-
-    for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
-      cudaStream_t stream;
-      NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _gemm_priority));
-      _per_device_stream_compute[dev_idx].push_back(std::move(stream));
-    }
-
-    printf("[DEBUG] Created %d compute streams for device index %d\n",
-           static_cast<int>(_per_device_stream_compute[dev_idx].size()), dev_idx);
+  // Get current device (set by XLA at runtime)
+  int current_device;
+  NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
+  printf("[DEBUG] CommOverlapCore::initialize: current_device=%d (set by XLA)\n", current_device);
+  fflush(stdout);
+  
+  // Initialize per-device vectors (once, first thread to arrive)
+  if (_per_device_stream_compute.empty()) {
+    int num_devices = _spmd ? _ub_comm->nvsize : 1;
+    _per_device_stream_compute.resize(num_devices);
+    printf("[DEBUG] Resized per_device_stream_compute to %d devices\n", num_devices);
     fflush(stdout);
   }
+  
+  // Create streams for current device only
+  int device_idx = _spmd ? current_device : 0;
+  for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
+    cudaStream_t stream;
+    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _gemm_priority));
+    _per_device_stream_compute[device_idx].push_back(std::move(stream));
+  }
+  
+  printf("[DEBUG] Created %d compute streams for device %d\n",
+         static_cast<int>(_per_device_stream_compute[device_idx].size()), current_device);
+  fflush(stdout);
 
   _num_splits = num_splits;
   _tp_size = tp_size;
@@ -263,58 +278,51 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
 
   _atomic_gemm = atomic_gemm;
   if (_atomic_gemm) {
-    printf("[DEBUG] Allocating per-device counters for atomic gemm...\n");
+    printf("[DEBUG] Allocating counter for current device...\n");
     fflush(stdout);
 
-    _per_device_counter.resize(num_devices);
-
-    for (int dev_idx = 0; dev_idx < num_devices; dev_idx++) {
-      int target_device = _spmd ? dev_idx : -1;
-      if (target_device >= 0) {
-        NVTE_CHECK_CUDA(cudaSetDevice(target_device));
-      }
-
-      void *counter_ptr;
-      size_t counter_bytes = _num_splits * 2 * sizeof(int32_t);
-      NVTE_CHECK_CUDA(cudaMalloc(&counter_ptr, counter_bytes));
-      NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 0, counter_bytes));
-      NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 1, counter_bytes / 2));
-      _per_device_counter[dev_idx] = TensorWrapper(counter_ptr,
-          std::vector<size_t>{static_cast<size_t>(_num_splits * 2)}, DType::kInt32);
-
-      printf("[DEBUG] Allocated counter for device %d\n", dev_idx);
-      fflush(stdout);
+    // Resize vector if needed (first thread)
+    if (_per_device_counter.empty()) {
+      int num_devices = _spmd ? _ub_comm->nvsize : 1;
+      _per_device_counter.resize(num_devices);
     }
+
+    // Allocate counter for current device only
+    void *counter_ptr;
+    size_t counter_bytes = _num_splits * 2 * sizeof(int32_t);
+    NVTE_CHECK_CUDA(cudaMalloc(&counter_ptr, counter_bytes));
+    NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 0, counter_bytes));
+    NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 1, counter_bytes / 2));
+    _per_device_counter[device_idx] = TensorWrapper(counter_ptr,
+        std::vector<size_t>{static_cast<size_t>(_num_splits * 2)}, DType::kInt32);
+
+    printf("[DEBUG] Allocated counter for device %d\n", current_device);
+    fflush(stdout);
   }
   // CUDA event and comm stream creation (per-device)
-  _per_device_stream_comm.resize(num_devices);
-  _per_device_start_compute.resize(num_devices);
-  _per_device_stop_compute.resize(num_devices);
-  _per_device_start_comm.resize(num_devices);
-  _per_device_stop_comm.resize(num_devices);
-  _per_device_comm_launch_event.resize(num_devices);
-
-  for (int dev_idx = 0; dev_idx < num_devices; dev_idx++) {
-    int target_device = _spmd ? dev_idx : -1;
-    if (target_device >= 0) {
-      NVTE_CHECK_CUDA(cudaSetDevice(target_device));
-    }
-
-    // Create communication stream
-    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&_per_device_stream_comm[dev_idx], cudaStreamNonBlocking, _comm_priority));
-
-    // Create events
-    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_start_compute[dev_idx], 0));
-    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_stop_compute[dev_idx], 0));
-    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_start_comm[dev_idx], 0));
-    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_stop_comm[dev_idx], 0));
-    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_comm_launch_event[dev_idx], cudaEventDisableTiming));
-
-    printf("[DEBUG] Created CUDA stream and events for device index %d\n", dev_idx);
-    fflush(stdout);
+  // Resize vectors if needed (first thread)
+  if (_per_device_stream_comm.empty()) {
+    int num_devices = _spmd ? _ub_comm->nvsize : 1;
+    _per_device_stream_comm.resize(num_devices);
+    _per_device_start_compute.resize(num_devices);
+    _per_device_stop_compute.resize(num_devices);
+    _per_device_start_comm.resize(num_devices);
+    _per_device_stop_comm.resize(num_devices);
+    _per_device_comm_launch_event.resize(num_devices);
   }
-
-  printf("[DEBUG] Per-device CUDA resources created for %d device(s)\n", num_devices);
+  
+  // Create resources for current device only (no device switching)
+  // Create communication stream
+  NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&_per_device_stream_comm[device_idx], cudaStreamNonBlocking, _comm_priority));
+  
+  // Create events
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_start_compute[device_idx], 0));
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_stop_compute[device_idx], 0));
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_start_comm[device_idx], 0));
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_stop_comm[device_idx], 0));
+  NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_comm_launch_event[device_idx], cudaEventDisableTiming));
+  
+  printf("[DEBUG] Created CUDA stream and events for device %d (no context switch)\n", current_device);
   fflush(stdout);
 
   /*
