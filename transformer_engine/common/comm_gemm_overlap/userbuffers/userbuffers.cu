@@ -2353,7 +2353,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
   // void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 2);
   void *flagptr_recv = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
 
-  void *send_srcptr = reinterpret_cast<char *>(comm->get_current_mem_ptr(srchandler) + send_offset;
+  void *send_srcptr = reinterpret_cast<char *>(comm->get_current_mem_ptr(srchandler)) + send_offset;
   void *send_dstptr =
       reinterpret_cast<char *>(comm->get_current_peer_ptr(dsthandler)[send_peerlocal]) + send_offset;
 
@@ -2410,7 +2410,7 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
   // void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(send_peerlocal, comm, dsthandler, 2);
   void *flagptr_recv = GET_RECV_PTR_BY_INDEX(recv_peer, comm, dsthandler, 0);
 
-  void *send_srcptr = reinterpret_cast<char *>(comm->get_current_mem_ptr(srchandler) + send_offset;
+  void *send_srcptr = reinterpret_cast<char *>(comm->get_current_mem_ptr(srchandler)) + send_offset;
   void *send_dstptr =
       reinterpret_cast<char *>(comm->get_current_peer_ptr(dsthandler)[send_peerlocal]) + send_offset;
   if (comm->use_ce) {
@@ -2470,8 +2470,8 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
 
   int *arg1 = &comm->get_current_send_id()[send_peer];
   int *arg2 = reinterpret_cast<int *>(flagptr_send);
-  int4 *arg3 = reinterpret_cast<int4 *>((comm->get_current_mem_ptr(srchandler));
-  int4 *arg4 = reinterpret_cast<int4 *>((comm->get_current_peer_ptr(dsthandler)[send_peerlocal]));
+  int4 *arg3 = reinterpret_cast<int4 *>(comm->get_current_mem_ptr(srchandler));
+  int4 *arg4 = reinterpret_cast<int4 *>(comm->get_current_peer_ptr(dsthandler)[send_peerlocal]);
   int arg5 = bytes / 16;
   int arg6 = comm->myrank;
   int arg7 = recv_peer;
@@ -2510,8 +2510,8 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
 
   if (!(comm->launch_mode & NVTE_LAUNCH_GPU)) return;
   if (comm->push == 0) {
-    void *dstptr = reinterpret_cast<char *>(comm->get_current_mem_ptr(dsthandler) + dstoffset;
-    void *srcptr = reinterpret_cast<char *>(comm->get_current_peer_ptr(srchandler][peerlocal]) + srcoffset;
+    void *dstptr = reinterpret_cast<char *>(comm->get_current_mem_ptr(dsthandler)) + dstoffset;
+    void *srcptr = reinterpret_cast<char *>(comm->get_current_peer_ptr(srchandler)[peerlocal]) + srcoffset;
 
     kuserbuffers_pullrecv<<<signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, 0, stream>>>(
         comm->get_current_myrank(), peer, comm->get_current_nvrank(), peerlocal,
