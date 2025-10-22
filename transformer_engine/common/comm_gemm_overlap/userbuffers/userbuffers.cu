@@ -2321,9 +2321,24 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
                                                reinterpret_cast<int *>(flagptr));
     NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
-    void *srcptr = reinterpret_cast<char *>(comm->get_current_mem_ptr(srchandler)) + srcoffset;
+    void *mem_ptr_base = comm->get_current_mem_ptr(srchandler);
+    void *srcptr = reinterpret_cast<char *>(mem_ptr_base) + srcoffset;
+    
     void **peer_ptr_array = comm->get_current_peer_ptr(dsthandler);
-    void *dstptr = reinterpret_cast<char *>(peer_ptr_array[peerlocal]) + dstoffset;
+    void *peer_buf = peer_ptr_array ? peer_ptr_array[peerlocal] : nullptr;
+    void *dstptr = reinterpret_cast<char *>(peer_buf) + dstoffset;
+    
+    printf("[DEBUG] userbuffers_send: srchandler=%d, dsthandler=%d, peer=%d, peerlocal=%d\n",
+           srchandler, dsthandler, peer, peerlocal);
+    printf("[DEBUG] userbuffers_send: mem_ptr_base=%p, srcptr=%p, peer_buf=%p, dstptr=%p, bytes=%zu\n",
+           mem_ptr_base, srcptr, peer_buf, dstptr, bytes);
+    fflush(stdout);
+    
+    if (!srcptr || !dstptr) {
+      printf("[ERROR] userbuffers_send: NULL pointer! srcptr=%p, dstptr=%p\n", srcptr, dstptr);
+      fflush(stdout);
+      return;
+    }
 
     if (comm->use_ce) {
       // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
