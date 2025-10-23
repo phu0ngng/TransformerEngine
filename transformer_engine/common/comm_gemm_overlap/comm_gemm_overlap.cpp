@@ -1088,10 +1088,6 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     fflush(stdout);
   }
 
-  printf("[DEBUG] P2P: Creating send/recv streams for current device (num_compute_streams=%zu)...\n",
-         get_current_stream_compute().size());
-  fflush(stdout);
-
   // Initialize per-device vectors
   _per_device_stream_send.resize(_ub_comm->nvsize);
   _per_device_stream_recv.resize(_ub_comm->nvsize);
@@ -1102,7 +1098,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   for (int i = 0; i < get_current_stream_compute().size(); i++) {
     cudaStream_t stream;
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
-    get_current_stream_send()[device_idx] = std::move(stream);
+    get_current_stream_send().push_back(std::move(stream));
     printf("[DEBUG] P2P: Created send stream %d for device %d\n", i, device_idx);
     fflush(stdout);
   }
@@ -1128,20 +1124,20 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
 
 CommOverlapP2PBase::~CommOverlapP2PBase() {
   // Clean up per-device P2P resources
-  for (size_t dev_idx = 0; dev_idx < _per_device_stream_send.size(); dev_idx++) {
-    for (size_t i = 0; i < _per_device_stream_send[dev_idx].size(); i++) {
-      cudaStreamDestroy(_per_device_stream_send[dev_idx][i]);
-    }
-    if (_per_device_stream_recv[dev_idx]) {
-      cudaStreamDestroy(_per_device_stream_recv[dev_idx]);
-    }
-    if (_per_device_stop_send[dev_idx]) {
-      cudaEventDestroy(_per_device_stop_send[dev_idx]);
-    }
-    if (_per_device_stop_recv[dev_idx]) {
-      cudaEventDestroy(_per_device_stop_recv[dev_idx]);
-    }
-  }
+  // for (size_t dev_idx = 0; dev_idx < _per_device_stream_send.size(); dev_idx++) {
+  //   for (size_t i = 0; i < _per_device_stream_send[dev_idx].size(); i++) {
+  //     cudaStreamDestroy(_per_device_stream_send[dev_idx][i]);
+  //   }
+  //   if (_per_device_stream_recv[dev_idx]) {
+  //     cudaStreamDestroy(_per_device_stream_recv[dev_idx]);
+  //   }
+  //   if (_per_device_stop_send[dev_idx]) {
+  //     cudaEventDestroy(_per_device_stop_send[dev_idx]);
+  //   }
+  //   if (_per_device_stop_recv[dev_idx]) {
+  //     cudaEventDestroy(_per_device_stop_recv[dev_idx]);
+  //   }
+  // }
 }
 
 void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapper &source,
