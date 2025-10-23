@@ -2324,7 +2324,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     void *mem_ptr_base = comm->get_current_mem_ptr(srchandler);
     void *srcptr = reinterpret_cast<char *>(mem_ptr_base) + srcoffset;
     
-    void **peer_ptr_array = comm->get_current_peer_ptr(dsthandler);
+    void **peer_ptr_array = comm->get_per_region_peer_ptr(dsthandler);
     void *peer_buf = peer_ptr_array ? peer_ptr_array[peerlocal] : nullptr;
     void *dstptr = reinterpret_cast<char *>(peer_buf) + dstoffset;
     
@@ -2370,7 +2370,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
 
   void *send_srcptr = reinterpret_cast<char *>(comm->get_current_mem_ptr(srchandler)) + send_offset;
   void *send_dstptr =
-      reinterpret_cast<char *>(comm->get_current_peer_ptr(dsthandler)[send_peerlocal]) + send_offset;
+      reinterpret_cast<char *>(comm->get_peer_ptr(dsthandler, send_peerlocal)) + send_offset;
 
   if (comm->use_ce) {
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
@@ -2427,7 +2427,7 @@ void userbuffers_sendrecv_atomic(const int srchandler, const int dsthandler,
 
   void *send_srcptr = reinterpret_cast<char *>(comm->get_current_mem_ptr(srchandler)) + send_offset;
   void *send_dstptr =
-      reinterpret_cast<char *>(comm->get_current_peer_ptr(dsthandler)[send_peerlocal]) + send_offset;
+      reinterpret_cast<char *>(comm->get_peer_ptr(dsthandler, send_peerlocal)) + send_offset;
   if (comm->use_ce) {
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
     NVTE_CHECK_CUDA(
@@ -2486,7 +2486,7 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
   int *arg1 = &comm->get_current_send_id()[send_peer];
   int *arg2 = reinterpret_cast<int *>(flagptr_send);
   int4 *arg3 = reinterpret_cast<int4 *>(comm->get_current_mem_ptr(srchandler));
-  int4 *arg4 = reinterpret_cast<int4 *>(comm->get_current_peer_ptr(dsthandler)[send_peerlocal]);
+  int4 *arg4 = reinterpret_cast<int4 *>(comm->get_peer_ptr(dsthandler, send_peerlocal));
   int arg5 = bytes / 16;
   int arg6 = comm->myrank;
   int arg7 = recv_peer;
@@ -2526,7 +2526,7 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
   if (!(comm->launch_mode & NVTE_LAUNCH_GPU)) return;
   if (comm->push == 0) {
     void *dstptr = reinterpret_cast<char *>(comm->get_current_mem_ptr(dsthandler)) + dstoffset;
-    void *srcptr = reinterpret_cast<char *>(comm->get_current_peer_ptr(srchandler)[peerlocal]) + srcoffset;
+    void *srcptr = reinterpret_cast<char *>(comm->get_peer_ptr(srchandler, peerlocal)) + srcoffset;
 
     kuserbuffers_pullrecv<<<signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, 0, stream>>>(
         comm->get_current_myrank(), peer, comm->get_current_nvrank(), peerlocal,
