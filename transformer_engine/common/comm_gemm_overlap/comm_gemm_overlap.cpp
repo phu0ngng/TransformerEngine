@@ -514,6 +514,7 @@ void CommOverlapBase::initialize(const std::vector<size_t> &buffer_shape, DType 
 
   NVTE_CHECK(buffer_shape.size() == 2, "Userbuffer shape must be 2-dimensional!");
   size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
+  NVTE_CHECK(!_spmd, "Unsupported!");
   if (_spmd) {
     // SPMD mode: Register buffers for all devices
     printf("[DEBUG] SPMD: Registering buffers for all devices in CommOverlapCore\n");
@@ -930,8 +931,8 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   // Create workspace tensor with userbuffer
   NVTE_CHECK(buffer_shape.size() == 2, "Userbuffer shape must be 2-dimensional!");
 
-  printf("[DEBUG] P2P: Buffer shape validated: [%zu, %zu], dtype=%d, element_size=%zu\n", 
-         buffer_shape[0], buffer_shape[1], static_cast<int>(buffer_dtype), 
+  printf("[DEBUG] P2P: Buffer shape validated: [%zu, %zu], dtype=%d, element_size=%zu\n",
+         buffer_shape[0], buffer_shape[1], static_cast<int>(buffer_dtype),
          typeToSize(buffer_dtype));
   fflush(stdout);
   size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
@@ -954,13 +955,11 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   fflush(stdout);
 
   // Ensure per-device vectors are sized (should be done in bootstrap)
-  if (_per_device_ubuf.empty()) {
-    printf("[DEBUG] P2P: Resizing per-device vectors to %d\n", _spmd ? _ub_comm->nvsize : 1);
-    fflush(stdout);
-    int num_devices = _spmd ? _ub_comm->nvsize : 1;
-    _per_device_ub_reg.resize(num_devices);
-    _per_device_ubuf.resize(num_devices);
-  }
+  printf("[DEBUG] P2P: Resizing per-device vectors to %d\n", _spmd ? _ub_comm->nvsize : 1);
+  fflush(stdout);
+  int num_devices = _spmd ? _ub_comm->nvsize : 1;
+  _per_device_ub_reg.resize(num_devices);
+  _per_device_ubuf.resize(num_devices);
 
   // Register buffer for current device only (runtime per-thread)
   void *buf_ptr;
@@ -968,35 +967,31 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   fflush(stdout);
 
   _per_device_ub_reg[device_idx] = register_user_buffer_collective(&buf_ptr, buffer_bytes, _ub_comm, true, _spmd);
-  _per_device_ubuf[device_idx] = std::move(TensorWrapper(buf_ptr, buffer_shape, buffer_dtype));
+  _per_device_ubuf[device_idx] = std::move(TensorWrapper(
+      buf_ptr,
+      std::vector<size_t>{buffer_shape[0] / _tp_size * _num_ubuf_chunks, buffer_shape[1]},
+      buffer_dtype));
 
   printf("[DEBUG] P2P: Runtime registered buffer for device %d (handle=%d, ptr=%p)\n",
          device_idx, _per_device_ub_reg[device_idx], buf_ptr);
   fflush(stdout);
-  
+
   // Barrier to ensure all devices have registered their buffers before proceeding
-  if (_spmd) {
-    printf("[DEBUG] P2P: Calling barrier to sync all devices after buffer registration...\n");
-    fflush(stdout);
-    _ub_comm->_barrier(_ub_comm->comm_intra);
-    printf("[DEBUG] P2P: Barrier completed - all devices registered\n");
-    fflush(stdout);
-  }
-  
-  void *buffer_ptr = buf_ptr;
+  // if (_spmd) {
+  //   printf("[DEBUG] P2P: Calling barrier to sync all devices after buffer registration...\n");
+  //   fflush(stdout);
+  //   _ub_comm->_barrier(_ub_comm->comm_intra);
+  //   printf("[DEBUG] P2P: Barrier completed - all devices registered\n");
+  //   fflush(stdout);
+  // }
 
   printf("[DEBUG] P2P: Using device index %d buffer (handle %d) at %p\n",
-         device_idx, _per_device_ub_reg[device_idx], buffer_ptr);
+         device_idx, _per_device_ub_reg[device_idx], buf_ptr);
   fflush(stdout);
 
   printf("[DEBUG] P2P: Updating buffer with P2P-specific shape...\n");
   fflush(stdout);
 
-  // Update the per-device buffer with P2P-specific shape (using move assignment)
-  _per_device_ubuf[device_idx] = std::move(TensorWrapper(
-      buffer_ptr,
-      std::vector<size_t>{buffer_shape[0] / _tp_size * _num_ubuf_chunks, buffer_shape[1]},
-      buffer_dtype));
 
   printf("[DEBUG] P2P: Creating tensor chunks (_num_ubuf_chunks=%d)...\n", _num_ubuf_chunks);
   fflush(stdout);
