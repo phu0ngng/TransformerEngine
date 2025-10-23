@@ -168,9 +168,8 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   handler._initialize = true;
 
   // Bootstrap UB via creating a dummy CommOverlapP2PBase object
-  std::vector<size_t> buffer_shape{0, 0};
-  // TODO: change dtype here back to FP32
-  auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kBFloat16,
+  std::vector<size_t> buffer_shape{1, 1};
+  auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kFloat32,
                                                                   JAXX_Collective_Op::ALL_GATHER,
                                                                   true /*is_bootstrap*/);
 }
@@ -265,18 +264,17 @@ void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
 
   // For single process multiple devices, no barrier needed (all devices in same process)
   bool is_multi_device_per_process = (num_devices_per_process > 1 && num_devices_per_process == tp_size);
-  if (is_multi_device_per_process) {
-    printf("[DEBUG] Barrier: Single process multiple devices - no barrier needed, returning immediately\n");
-    fflush(stdout);
-    return;  // No-op for single process multiple devices
-  }
 
   int device_idx = get_local_device_idx_for_current_device();
   ncclComm_t tp_comm = tp_comms[device_idx];
 
   NVTE_CHECK_NCCL(
       ncclAllReduce(_device_barriers[device_idx], _device_barriers[device_idx], 1, ncclInt, ncclSum, tp_comm, nullptr));
-  cudaDeviceSynchronize();
+
+  // Need to sync with host for IPC in the case of single device per process
+  if (!is_multi_device_per_process) {
+    cudaDeviceSynchronize();
+  }
 }
 
 void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_bytes,

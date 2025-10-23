@@ -2324,13 +2324,24 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     void *mem_ptr_base = comm->get_current_mem_ptr(srchandler);
     void *srcptr = reinterpret_cast<char *>(mem_ptr_base) + srcoffset;
 
+    printf("[DEBUG] userbuffers_send: Accessing peer_ptr[%d][%d]\n", dsthandler, peerlocal);
+    printf("[DEBUG] userbuffers_send: peer_ptr[%d].size()=%zu\n", dsthandler, comm->peer_ptr[dsthandler].size());
+    fflush(stdout);
+    
     void *peer_buf = comm->peer_ptr[dsthandler][peerlocal];
     void *dstptr = reinterpret_cast<char *>(peer_buf) + dstoffset;
-
+    
     printf("[DEBUG] userbuffers_send: srchandler=%d, dsthandler=%d, peer=%d, peerlocal=%d\n",
            srchandler, dsthandler, peer, peerlocal);
     printf("[DEBUG] userbuffers_send: mem_ptr_base=%p, srcptr=%p, peer_buf=%p, dstptr=%p, bytes=%zu\n",
            mem_ptr_base, srcptr, peer_buf, dstptr, bytes);
+    
+    if (!peer_buf || peer_buf == nullptr) {
+      printf("[ERROR] userbuffers_send: peer_buf is NULL for peer %d!\n", peerlocal);
+      fflush(stdout);
+      return;
+    }
+    
     fflush(stdout);
 
     if (!srcptr || !dstptr) {

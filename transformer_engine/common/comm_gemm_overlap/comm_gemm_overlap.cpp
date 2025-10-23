@@ -1,4 +1,4 @@
-/*************************************************************************
+t u/*************************************************************************
  * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -973,7 +973,16 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   printf("[DEBUG] P2P: Runtime registered buffer for device %d (handle=%d, ptr=%p)\n",
          device_idx, _per_device_ub_reg[device_idx], buf_ptr);
   fflush(stdout);
-
+  
+  // Barrier to ensure all devices have registered their buffers before proceeding
+  if (_spmd) {
+    printf("[DEBUG] P2P: Calling barrier to sync all devices after buffer registration...\n");
+    fflush(stdout);
+    _ub_comm->_barrier(_ub_comm->comm_intra);
+    printf("[DEBUG] P2P: Barrier completed - all devices registered\n");
+    fflush(stdout);
+  }
+  
   void *buffer_ptr = buf_ptr;
 
   printf("[DEBUG] P2P: Using device index %d buffer (handle %d) at %p\n",
