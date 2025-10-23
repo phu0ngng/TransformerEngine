@@ -930,7 +930,9 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   // Create workspace tensor with userbuffer
   NVTE_CHECK(buffer_shape.size() == 2, "Userbuffer shape must be 2-dimensional!");
 
-  printf("[DEBUG] P2P: Buffer shape validated: [%zu, %zu]\n", buffer_shape[0], buffer_shape[1]);
+  printf("[DEBUG] P2P: Buffer shape validated: [%zu, %zu], dtype=%d, element_size=%zu\n", 
+         buffer_shape[0], buffer_shape[1], static_cast<int>(buffer_dtype), 
+         typeToSize(buffer_dtype));
   fflush(stdout);
   size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
   int buffer_chunk_bytes = buffer_bytes / _tp_size;
