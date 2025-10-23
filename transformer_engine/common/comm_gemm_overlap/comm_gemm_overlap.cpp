@@ -1120,6 +1120,8 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
 
   printf("[DEBUG] P2P: All initialization steps completed successfully\n");
   fflush(stdout);
+
+  cudaDeviceSynchronize();
 }
 
 CommOverlapP2PBase::~CommOverlapP2PBase() {
