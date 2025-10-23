@@ -204,10 +204,19 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
                cgemm_config.gemm_priority, cgemm_config.comm_priority, cgemm_config.num_comm_sm,
                cgemm_config.use_ce, cgemm_config.aggregate_ag, comm_handler.process_id);
 
+  int current_device;
+  cudaGetDevice(&current_device);
+  
   auto it = plan_map.find(plan_id);
   if (it != plan_map.end()) {
+    printf("[DEBUG] get_executor: Device %d found CACHED executor for plan_id=%ld (executor=%p)\n", 
+           current_device, plan_id, it->second.get());
+    fflush(stdout);
     return it->second.get();
   }
+  
+  printf("[DEBUG] get_executor: Device %d creating NEW executor for plan_id=%ld\n", current_device, plan_id);
+  fflush(stdout);
 
   if (comm_handler.num_devices_per_process == comm_handler.tp_size) {
     // Multi-device per process
