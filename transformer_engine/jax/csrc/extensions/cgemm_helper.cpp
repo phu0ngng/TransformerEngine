@@ -265,17 +265,14 @@ void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
 
   // For single process multiple devices, no barrier needed (all devices in same process)
   bool is_multi_device_per_process = (num_devices_per_process > 1 && num_devices_per_process == tp_size);
+  if (is_multi_device_per_process) return;
 
   int device_idx = get_local_device_idx_for_current_device();
   ncclComm_t tp_comm = tp_comms[device_idx];
 
   NVTE_CHECK_NCCL(
       ncclAllReduce(_device_barriers[device_idx], _device_barriers[device_idx], 1, ncclInt, ncclSum, tp_comm, nullptr));
-
-  // Need to sync with host for IPC in the case of single device per process
-  if (!is_multi_device_per_process) {
-    cudaDeviceSynchronize();
-  }
+  cudaDeviceSynchronize();
 }
 
 void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_bytes,
