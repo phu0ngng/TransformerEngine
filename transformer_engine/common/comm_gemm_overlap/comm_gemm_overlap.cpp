@@ -198,6 +198,12 @@ TensorWrapper& CommOverlapCore::get_current_counter() {
   return _per_device_counter[device_idx];
 }
 
+std::vector<TensorWrapper>& CommOverlapP2PBase::get_current_ubufs() {
+  int device_idx = get_device_index();
+  NVTE_CHECK(!_per_device_ubufs.empty() && device_idx < static_cast<int>(_per_device_ubufs.size())); {
+  return _per_device_ubufs[device_idx];
+}
+
 void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_streams,
                                  int comm_cga_size, int gemm_priority, int comm_priority,
                                  int num_comm_sm, bool set_sm_margin, bool use_ce,
@@ -987,14 +993,21 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   printf("[DEBUG] P2P: Creating tensor chunks (_num_ubuf_chunks=%d)...\n", _num_ubuf_chunks);
   fflush(stdout);
 
-  // Create tensor chunks for easy management
+  // Initialize per-device ubufs vector
+    int num_devices = _spmd ? _ub_comm->nvsize : 1;
+    _per_device_ubufs.resize(num_devices);
+  
+  // Create tensor chunks for current device
   char *ubuf_byte_ptr = reinterpret_cast<char *>(get_current_ubuf().dptr());
   for (int i = 0; i < _num_ubuf_chunks; i++) {
-    _ubufs.push_back(TensorWrapper(reinterpret_cast<void *>(ubuf_byte_ptr),
+    _per_device_ubufs[device_idx].push_back(TensorWrapper(reinterpret_cast<void *>(ubuf_byte_ptr),
                                    std::vector<size_t>{buffer_shape[0] / _tp_size, buffer_shape[1]},
                                    buffer_dtype));
     ubuf_byte_ptr += buffer_chunk_bytes;
   }
+  
+  printf("[DEBUG] P2P: Created %d tensor chunks for device %d\n", _num_ubuf_chunks, device_idx);
+  fflush(stdout);
 
   printf("[DEBUG] P2P: Computing rank topology (_rank=%d, _tp_size=%d)...\n", _rank, _tp_size);
   fflush(stdout);
@@ -1108,10 +1121,10 @@ void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapp
   // Userbuffers data
   void *dst_ptr;
   if (local_chunk) {
-    NVTE_CHECK(_ubufs[_tp_id].numel() == source_size,
+    NVTE_CHECK(get_current_ubufs()[_tp_id].numel() == source_size,
                "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
-               "(source_size=", source_size, ", local_ubuf_size=", _ubufs[_tp_id].numel(), ")");
-    dst_ptr = _ubufs[_tp_id].dptr();
+               "(source_size=", source_size, ", local_ubuf_size=", get_current_ubufs()[_tp_id].numel(), ")");
+    dst_ptr = get_current_ubufs()[_tp_id].dptr();
   } else {
     NVTE_CHECK(get_current_ubuf().numel() == source_size,
                "Tried to copy an invalid tensor into a Userbuffers buffer ",
@@ -1127,21 +1140,21 @@ void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapp
 TensorWrapper CommOverlapP2PBase::get_buffer_chunk_by_id(const TensorWrapper &source,
                                                          size_t chunk_id) {
   // Start with a chunk of the source tensor
-  auto chunk = get_tensor_chunk(source, 0, shape_to_vector(_ubufs[chunk_id].shape()));
+  auto chunk = get_tensor_chunk(source, 0, shape_to_vector(get_current_ubufs()[chunk_id].shape()));
 
   // Update chunk with offset data pointers from the communication buffer
   if (chunk.dptr() != nullptr) {
-    chunk.set_rowwise_data(_ubufs[chunk_id].dptr(), chunk.dtype(), chunk.shape());
+    chunk.set_rowwise_data(get_current_ubufs()[chunk_id].dptr(), chunk.dtype(), chunk.shape());
   }
   if (chunk.columnwise_dptr() != nullptr) {
-    chunk.set_columnwise_data(_ubufs[chunk_id].dptr(), chunk.dtype(), chunk.columnwise_shape());
+    chunk.set_columnwise_data(get_current_ubufs()[chunk_id].dptr(), chunk.dtype(), chunk.columnwise_shape());
   }
   return chunk;
 }
 
 /*
 ** Split AllGather + AtomicGEMM using P2P communication
-** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG
+** This function assumes the input_b is pre-copied to get_current_ubufs()[rank_id]. This is needed to have AG
 ** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
 */
 void CommOverlapP2PBase::atomic_gemm_overlap_ag(
@@ -1155,11 +1168,11 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
 
   // Get GEMM dimensions between TN and NN input layouts
   const size_t m = (transa) ? A.size(0) : A.size(1);
-  const size_t n_chunk = _ubufs[0].size(0);
+  const size_t n_chunk = get_current_ubufs()[0].size(0);
   assert(pre_gelu_out.numel() == 0);
 
   // Get communication and GEMM output chunk sizes
-  const int comm_bytes = _ubufs[0].bytes();
+  const int comm_bytes = get_current_ubufs()[0].bytes();
 
   // Create an GEMM output buffer with N+1 chunks in a contiguous memory
   void *D_buffer_ptr;
@@ -1215,10 +1228,10 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
 
   // Store the input activation for backprop
   if (B_copy.numel() > 0) {
-    assert(B_copy.numel() == _ubufs[_self_chunk_id].numel());
-    assert(B_copy.element_size() == _ubufs[_self_chunk_id].element_size());
-    NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), _ubufs[_self_chunk_id].dptr(),
-                                    _ubufs[_self_chunk_id].bytes(), cudaMemcpyDeviceToDevice,
+    assert(B_copy.numel() == get_current_ubufs()[_self_chunk_id].numel());
+    assert(B_copy.element_size() == get_current_ubufs()[_self_chunk_id].element_size());
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(B_copy.dptr(), get_current_ubufs()[_self_chunk_id].dptr(),
+                                    get_current_ubufs()[_self_chunk_id].bytes(), cudaMemcpyDeviceToDevice,
                                     _stream_send[0]));
     NVTE_CHECK_CUDA(cudaEventRecord(_stop_send, _stream_send[0]));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_send, 0));
@@ -1241,7 +1254,7 @@ void CommOverlapP2PBase::atomic_gemm_overlap_ag(
 
 /*
 ** Split AllGather + GEMM using P2P communication
-** This function assumes the input_b is pre-copied to _ubufs[rank_id]. This is needed to have AG
+** This function assumes the input_b is pre-copied to get_current_ubufs()[rank_id]. This is needed to have AG
 ** outputs in each rank to be in the contiguous memory space after all ring exchange phases.
 */
 void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
@@ -1266,10 +1279,10 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
   // Get GEMM dimensions between TN and NN input layouts
   const size_t m = (transa) ? A.size(0) : A.size(1);
   const size_t k = (transa) ? A.size(1) : A.size(0);
-  const size_t n_chunk = _ubufs[0].size(0);
+  const size_t n_chunk = get_current_ubufs()[0].size(0);
 
   // Get communication and GEMM output chunk sizes
-  const int comm_bytes = _ubufs[0].bytes();
+  const int comm_bytes = get_current_ubufs()[0].bytes();
   const bool do_gelu = pre_gelu_out.numel() > 0;
   size_t workspace_size_chunk = workspace.numel() / get_current_stream_compute().size();
 
@@ -1443,7 +1456,7 @@ void CommOverlapP2PBase::atomic_gemm_overlap_rs(
   _ub_comm->cga_size = _cga_size;
 
   // Get communication and GEMM input chunk sizes
-  const int comm_bytes = _ubufs[0].bytes();
+  const int comm_bytes = get_current_ubufs()[0].bytes();
 
   // Reset counters
   int *counter_ptr = reinterpret_cast<int *>(get_current_counter().dptr());
@@ -1479,15 +1492,15 @@ void CommOverlapP2PBase::atomic_gemm_overlap_rs(
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_recv, 0));
 
   // Reduce GEMM output chunks
-  char *reduce_buf_ptr = reinterpret_cast<char *>(_ubufs[_tp_size - 1].dptr());
+  char *reduce_buf_ptr = reinterpret_cast<char *>(get_current_ubufs()[_tp_size - 1].dptr());
   char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
   if (get_current_ubuf().element_size() == 1 && rs_output.element_size() == 2) {
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
         D.dtype(), fp8_type,
         reduce_fp8_in_bf16_out<fp8_type>(reduce_buf_ptr, rs_output_ptr, D.scale_inv(), _tp_size,
-                                         _ubufs[0].numel(), stream_main););
+                                         get_current_ubufs()[0].numel(), stream_main););
   } else {
-    reduce_bf16(reduce_buf_ptr, rs_output_ptr, _tp_size, _ubufs[0].numel(), stream_main);
+    reduce_bf16(reduce_buf_ptr, rs_output_ptr, _tp_size, get_current_ubufs()[0].numel(), stream_main);
   }
   _ub_comm->sms = ori_sms;
 }
@@ -1509,8 +1522,8 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
   // Get communication and GEMM input chunk sizes
   size_t m = transa ? A.size(0) : A.size(1);
   size_t k = transa ? A.size(1) : A.size(0);
-  size_t n_chunk = _ubufs[0].size(0);
-  const int comm_bytes = _ubufs[0].bytes();
+  size_t n_chunk = get_current_ubufs()[0].size(0);
+  const int comm_bytes = get_current_ubufs()[0].bytes();
 
   // Get input and workspace data pointers
   size_t input_chunk_size = n_chunk * k;
@@ -1572,16 +1585,16 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_recv, 0));
 
   // Reduce GEMM output chunks
-  char *reduce_buf_ptr = reinterpret_cast<char *>(_ubufs[_tp_size - 1].dptr());
+  char *reduce_buf_ptr = reinterpret_cast<char *>(get_current_ubufs()[_tp_size - 1].dptr());
   char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
   if (get_current_ubuf().element_size() == 1 && rs_output.element_size() == 2) {
     char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
     TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
         D.dtype(), fp8_type,
         reduce_fp8_in_bf16_out<fp8_type>(reduce_buf_ptr, rs_output_ptr, D.scale_inv(), _tp_size,
-                                         _ubufs[0].numel(), stream_main););
+                                         get_current_ubufs()[0].numel(), stream_main););
   } else {
-    reduce_bf16(reduce_buf_ptr, rs_output_ptr, _tp_size, _ubufs[0].numel(), stream_main);
+    reduce_bf16(reduce_buf_ptr, rs_output_ptr, _tp_size, get_current_ubufs()[0].numel(), stream_main);
   }
 
   _ub_comm->sms = ori_sms;

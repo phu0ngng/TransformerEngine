@@ -80,6 +80,7 @@ class CommOverlapCore {
   int get_current_ub_reg();
   TensorWrapper& get_current_ubuf();
   TensorWrapper& get_current_counter();
+  std::vector<TensorWrapper>& get_current_ubufs();  // Get current device's chunk array
   std::vector<cudaStream_t>& get_current_stream_compute();
   cudaStream_t get_current_stream_comm();
   cudaEvent_t get_current_start_compute();
@@ -262,7 +263,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
   int _rank_round_tp;
   int _num_ubuf_chunks;
   int _self_chunk_id;
-  std::vector<TensorWrapper> _ubufs;
+  std::vector<std::vector<TensorWrapper>> _per_device_ubufs;  // [device][chunk] - per-device chunks
   std::vector<cudaStream_t> _stream_send;
   cudaStream_t _stream_recv;
   cudaEvent_t _stop_send, _stop_recv;
