@@ -101,9 +101,12 @@ struct communicator {
   int cga_size;
   int push, use_ce;
 
-  // Unified per-device storage (size=1 for multi-process, size=nvsize for SPMD)
-  std::vector<void*> per_device_mem_ptr[NVTE_MAX_REGIONS];   // [region][device] = my buffer ptr
-  std::vector<void**> per_device_peer_ptr[NVTE_MAX_REGIONS]; // [region][device] = array of peer ptrs
+  // Unified per-device storage
+  // mem_ptr: [region][1] for single-device, [region][nvsize] for SPMD
+  std::vector<void*> per_device_mem_ptr[NVTE_MAX_REGIONS];
+  
+  // peer_ptr: always [region][nvsize] - shared by all threads  
+  std::vector<void*> peer_ptr[NVTE_MAX_REGIONS];
 
   int memflags[NVTE_MAX_REGIONS];  // UC,MC, user/lib allocated
 
@@ -162,8 +165,8 @@ struct communicator {
   int* get_current_send_id() const;
   int* get_current_recv_id() const;
   int* get_current_flags() const;
-  void* get_current_mem_ptr(int region) const;     // Get mem_ptr for current device
-  void** get_current_peer_ptr(int region) const;   // Get peer_ptr array for current device
+  void* get_current_mem_ptr(int region) const;           // Get mem_ptr for current device
+  void* get_current_peer_ptr(int region, int peer_id) const; // Get peer's buffer from current device's view
 };
 typedef struct communicator communicator;
 

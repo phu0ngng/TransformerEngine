@@ -160,10 +160,12 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   (*comm)->is_spmd = spmd;
   int num_devices = spmd ? numlocal : 1;
   
-  // Initialize per-device mem_ptr and peer_ptr arrays
+  // Initialize per-device mem_ptr and shared peer_ptr arrays
+  // mem_ptr: size = 1 (single device) or nvsize (SPMD)
+  // peer_ptr: always size = nvsize (each device needs array to hold all peer pointers)
   for (int region = 0; region < NVTE_MAX_REGIONS; region++) {
     (*comm)->per_device_mem_ptr[region].resize(num_devices, nullptr);
-    (*comm)->per_device_peer_ptr[region].resize(num_devices, nullptr);
+    (*comm)->peer_ptr[region].resize(numlocal, nullptr);  // Always nvsize, shared by all threads
   }
   
   if (spmd) {
@@ -662,44 +664,12 @@ void* communicator::get_current_mem_ptr(int region) const {
   }
 }
 
-void** communicator::get_current_peer_ptr(int region) const {
-  int current_device;
-  cudaGetDevice(&current_device);
-  
-  printf("[DEBUG] get_current_peer_ptr: region=%d, is_spmd=%d, current_device=%d\n",
-         region, is_spmd, current_device);
-  fflush(stdout);
-  
-  if (is_spmd) {
-    if (region >= NVTE_MAX_REGIONS) {
-      printf("[ERROR] get_current_peer_ptr: Invalid region %d (max=%d)\n", region, NVTE_MAX_REGIONS);
-      fflush(stdout);
-      return nullptr;
-    }
-    
-    printf("[DEBUG] get_current_peer_ptr: per_device_peer_ptr[%d].size()=%zu\n",
-           region, per_device_peer_ptr[region].size());
-    fflush(stdout);
-    
-    if (current_device >= static_cast<int>(per_device_peer_ptr[region].size())) {
-      printf("[ERROR] get_current_peer_ptr: current_device=%d out of range (size=%zu)\n",
-             current_device, per_device_peer_ptr[region].size());
-      fflush(stdout);
-      return nullptr;
-    }
-    
-    void** ptr_array = per_device_peer_ptr[region][current_device];
-    printf("[DEBUG] get_current_peer_ptr: Returning per_device_peer_ptr[%d][%d]=%p\n",
-           region, current_device, ptr_array);
-    fflush(stdout);
-    
-    return ptr_array;
-  } else {
-    if (region < NVTE_MAX_REGIONS && !per_device_peer_ptr[region].empty()) {
-      return per_device_peer_ptr[region][0];
-    }
+void* communicator::get_current_peer_ptr(int region, int peer_id) const {
+  if (region >= NVTE_MAX_REGIONS || peer_id >= static_cast<int>(peer_ptr[region].size())) {
     return nullptr;
   }
+  
+  return peer_ptr[region][peer_id];  // Simple 2D access, shared by all threads
 }
 
 int create_communicator_grouped(communicator **comm, int myrank, int numranks, int mylocal,
@@ -868,13 +838,12 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     // Set mem_ptr for current device
     comm->per_device_mem_ptr[hndl][device_idx] = *gpubuff;
     
-    // Set peer pointer for current device in the per-device peer_ptr array
+    // Set peer pointer in shared 2D peer_ptr array (visible to all threads)
     int my_idx = comm->get_current_nvrank();
-    void **my_peer_ptr = comm->per_device_peer_ptr[hndl][device_idx];
-    my_peer_ptr[my_idx] = *gpubuff;
+    comm->peer_ptr[hndl][my_idx] = *gpubuff;
     
     printf("[DEBUG] SPMD runtime: Set per_device_mem_ptr[%d][%d]=%p\n", hndl, device_idx, *gpubuff);
-    printf("[DEBUG] SPMD runtime: Set per_device_peer_ptr[%d][%d][%d]=%p\n", hndl, device_idx, my_idx, *gpubuff);
+    printf("[DEBUG] SPMD runtime: Set shared peer_ptr[%d][%d]=%p (visible to all devices)\n", hndl, my_idx, *gpubuff);
     fflush(stdout);
     
     // Set memory flags and increment region
