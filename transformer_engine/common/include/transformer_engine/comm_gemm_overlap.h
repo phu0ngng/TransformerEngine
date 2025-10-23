@@ -263,15 +263,20 @@ class CommOverlapP2PBase : public CommOverlapCore {
   int _num_ubuf_chunks;
   int _self_chunk_id;
   std::vector<std::vector<TensorWrapper>> _per_device_ubufs;  // [device][chunk] - per-device chunks
-  std::vector<cudaStream_t> _stream_send;
-  cudaStream_t _stream_recv;
-  cudaEvent_t _stop_send, _stop_recv;
+  std::vector<std::vector<cudaStream_t>> _per_device_stream_send;  // [device][stream] - per-device send streams
+  std::vector<cudaStream_t> _per_device_stream_recv;  // [device] - per-device recv stream
+  std::vector<cudaEvent_t> _per_device_stop_send;  // [device] - per-device send event
+  std::vector<cudaEvent_t> _per_device_stop_recv;  // [device] - per-device recv event
 
  private:
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                   CommOverlapType comm_type, bool aggregate);
 
-  std::vector<TensorWrapper>& get_current_ubufs();  // Get current device's chunk array
+  std::vector<TensorWrapper>& get_current_ubufs();       // Get current device's chunk array
+  std::vector<cudaStream_t>& get_current_stream_send();  // Get current device's send streams
+  cudaStream_t get_current_stream_recv();                // Get current device's recv stream  
+  cudaEvent_t get_current_stop_send();                   // Get current device's stop_send event
+  cudaEvent_t get_current_stop_recv();                   // Get current device's stop_recv event
 
  public:
   CommOverlapP2PBase() {}  // dummy constructor for exposing type to Python
