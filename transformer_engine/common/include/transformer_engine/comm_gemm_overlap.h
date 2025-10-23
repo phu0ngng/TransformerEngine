@@ -71,11 +71,11 @@ class CommOverlapCore {
   std::vector<cudaEvent_t> _per_device_start_comm;
   std::vector<cudaEvent_t> _per_device_stop_comm;
   std::vector<cudaEvent_t> _per_device_comm_launch_event;
-  
+
   // Protected unified per-device storage (derived classes need access for initialization)
   std::vector<int> _per_device_ub_reg;
   std::vector<TensorWrapper> _per_device_ubuf;
-  
+
   // Protected device-aware accessor methods (derived classes can use these)
   int get_current_ub_reg();
   TensorWrapper& get_current_ubuf();
@@ -91,7 +91,7 @@ class CommOverlapCore {
   std::pair<int, int> get_device_aware_rank_and_tp_id();
 
  private:
-  
+
   // Private initialization method
   void initialize(int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
                   int gemm_priority, int comm_priority, int num_comm_sm, bool set_sm_margin,
@@ -262,7 +262,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
   int _rank_round_tp;
   int _num_ubuf_chunks;
   int _self_chunk_id;
-  std::vector<TensorWrapper> _ubufs;
+  std::vector<std::vector<TensorWrapper>> _per_device_ubufs;  // [device][chunk] - per-device chunks
   std::vector<cudaStream_t> _stream_send;
   cudaStream_t _stream_recv;
   cudaEvent_t _stop_send, _stop_recv;
@@ -270,6 +270,8 @@ class CommOverlapP2PBase : public CommOverlapCore {
  private:
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                   CommOverlapType comm_type, bool aggregate);
+
+  std::vector<TensorWrapper>& get_current_ubufs();  // Get current device's chunk array
 
  public:
   CommOverlapP2PBase() {}  // dummy constructor for exposing type to Python
