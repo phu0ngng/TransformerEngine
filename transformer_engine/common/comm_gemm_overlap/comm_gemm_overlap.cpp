@@ -70,7 +70,7 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
     // Runtime: Each device thread initializes its own resources
     printf("[DEBUG] CommOverlapCore: Runtime mode - calling initialize()\n");
     fflush(stdout);
-    
+
     initialize(tp_size, num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority,
                num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
   } else {
@@ -136,16 +136,10 @@ int CommOverlapCore::get_current_ub_reg() {
 }
 
 TensorWrapper& CommOverlapCore::get_current_ubuf() {
-  if (_per_device_ubuf.empty()) {
-    static TensorWrapper empty_tensor;
-    return empty_tensor;
-  }
+  NVTE_CHECK(!_per_device_ubuf.empty());
 
   int device_idx = get_device_index();
-  if (device_idx < 0 || device_idx >= static_cast<int>(_per_device_ubuf.size())) {
-    static TensorWrapper empty_tensor;
-    return empty_tensor;
-  }
+  NVTE_CHECK(device_idx >=0 && device_idx < _per_device_ubuf.size());
 
   return _per_device_ubuf[device_idx];
 }
@@ -223,7 +217,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
   NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
   printf("[DEBUG] CommOverlapCore::initialize: current_device=%d (set by XLA)\n", current_device);
   fflush(stdout);
-  
+
   // Initialize per-device vectors (once, first thread to arrive)
   if (_per_device_stream_compute.empty()) {
     int num_devices = _spmd ? _ub_comm->nvsize : 1;
@@ -231,7 +225,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     printf("[DEBUG] Resized per_device_stream_compute to %d devices\n", num_devices);
     fflush(stdout);
   }
-  
+
   // Create streams for current device only
   int device_idx = _spmd ? current_device : 0;
   for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
@@ -239,7 +233,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _gemm_priority));
     _per_device_stream_compute[device_idx].push_back(std::move(stream));
   }
-  
+
   printf("[DEBUG] Created %d compute streams for device %d\n",
          static_cast<int>(_per_device_stream_compute[device_idx].size()), current_device);
   fflush(stdout);
@@ -310,18 +304,18 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     _per_device_stop_comm.resize(num_devices);
     _per_device_comm_launch_event.resize(num_devices);
   }
-  
+
   // Create resources for current device only (no device switching)
   // Create communication stream
   NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&_per_device_stream_comm[device_idx], cudaStreamNonBlocking, _comm_priority));
-  
+
   // Create events
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_start_compute[device_idx], 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_stop_compute[device_idx], 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_start_comm[device_idx], 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_stop_comm[device_idx], 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_comm_launch_event[device_idx], cudaEventDisableTiming));
-  
+
   printf("[DEBUG] Created CUDA stream and events for device %d (no context switch)\n", current_device);
   fflush(stdout);
 
@@ -970,7 +964,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   void *buf_ptr;
   printf("[DEBUG] P2P: Calling register_user_buffer_collective with spmd=%d\n", _spmd);
   fflush(stdout);
-  
+
   _per_device_ub_reg[device_idx] = register_user_buffer_collective(&buf_ptr, buffer_bytes, _ub_comm, true, _spmd);
   _per_device_ubuf[device_idx] = std::move(TensorWrapper(buf_ptr, buffer_shape, buffer_dtype));
 
@@ -1267,7 +1261,7 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
   printf("[DEBUG] split_overlap_ag: CUDA resources - streams.size()=%zu, events.size()=%zu\n",
          _per_device_stream_compute.size(), _per_device_start_compute.size());
   fflush(stdout);
-  
+
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;
@@ -1294,14 +1288,14 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
   cudaEvent_t start_compute_event = get_current_start_compute();
   printf("[DEBUG] split_overlap_ag: start_compute_event=%p\n", (void*)start_compute_event);
   fflush(stdout);
-  
+
   if (!start_compute_event) {
     printf("[ERROR] split_overlap_ag: start_compute_event is NULL! _per_device_start_compute.size()=%zu\n",
            _per_device_start_compute.size());
     fflush(stdout);
     return;
   }
-  
+
   NVTE_CHECK_CUDA(cudaEventRecord(start_compute_event, stream_main));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_send[0], start_compute_event, 0));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_recv, start_compute_event, 0));
