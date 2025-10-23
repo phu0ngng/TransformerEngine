@@ -2324,7 +2324,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     void *mem_ptr_base = comm->get_current_mem_ptr(srchandler);
     void *srcptr = reinterpret_cast<char *>(mem_ptr_base) + srcoffset;
 
-    void *peer_buf = comm->get_peer_ptr(dsthandler, peerlocal);
+    void *peer_buf = comm->peer_ptr[dsthandler][peerlocal];
     void *dstptr = reinterpret_cast<char *>(peer_buf) + dstoffset;
 
     printf("[DEBUG] userbuffers_send: srchandler=%d, dsthandler=%d, peer=%d, peerlocal=%d\n",
@@ -2369,7 +2369,7 @@ void userbuffers_sendrecv(const int srchandler, const int dsthandler, const size
 
   void *send_srcptr = reinterpret_cast<char *>(comm->get_current_mem_ptr(srchandler)) + send_offset;
   void *send_dstptr =
-      reinterpret_cast<char *>(comm->get_peer_ptr(dsthandler, send_peerlocal)) + send_offset;
+      reinterpret_cast<char *>(comm->peer_ptr[dsthandler][send_peerlocal]) + send_offset;
 
   if (comm->use_ce) {
     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
@@ -2485,7 +2485,7 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
   int *arg1 = &comm->get_current_send_id()[send_peer];
   int *arg2 = reinterpret_cast<int *>(flagptr_send);
   int4 *arg3 = reinterpret_cast<int4 *>(comm->get_current_mem_ptr(srchandler));
-  int4 *arg4 = reinterpret_cast<int4 *>(comm->get_peer_ptr(dsthandler, send_peerlocal));
+  int4 *arg4 = reinterpret_cast<int4 *>(comm->peer_ptr[dsthandler][send_peerlocal]);
   int arg5 = bytes / 16;
   int arg6 = comm->myrank;
   int arg7 = recv_peer;
