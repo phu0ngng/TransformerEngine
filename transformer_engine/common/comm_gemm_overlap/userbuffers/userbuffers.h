@@ -166,7 +166,7 @@ struct communicator {
   int* get_current_recv_id() const;
   int* get_current_flags() const;
   void* get_current_mem_ptr(int region) const;        // Get mem_ptr for current device
-  void** get_per_region_peer_ptr(int region) const;   // Get peer_ptr array for a region (shared)
+  void* get_peer_ptr(int region, int peer_id) const;   // Get peer_ptr array for a region (shared)
 };
 typedef struct communicator communicator;
 
