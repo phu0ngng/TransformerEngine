@@ -769,17 +769,18 @@ void destroy_communicator(communicator *comm) {
   printf("[DEBUG] Cleaning up per-device communication arrays (%zu devices)\n", comm->per_device_send_id.size());
   fflush(stdout);
 
-  for (size_t dev_idx = 0; dev_idx < comm->per_device_send_id.size(); dev_idx++) {
-    if (comm->per_device_send_id[dev_idx]) {
-      NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_send_id[dev_idx])));
-    }
-    if (comm->per_device_recv_id[dev_idx]) {
-      NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_recv_id[dev_idx])));
-    }
-    if (comm->per_device_flags_baseptr[dev_idx]) {
-      NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_flags_baseptr[dev_idx])));
-    }
-  }
+  // TODO: clean need to be call once per process
+  // for (size_t dev_idx = 0; dev_idx < comm->per_device_send_id.size(); dev_idx++) {
+  //   if (comm->per_device_send_id[dev_idx]) {
+  //     NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_send_id[dev_idx])));
+  //   }
+  //   if (comm->per_device_recv_id[dev_idx]) {
+  //     NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_recv_id[dev_idx])));
+  //   }
+  //   if (comm->per_device_flags_baseptr[dev_idx]) {
+  //     NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_flags_baseptr[dev_idx])));
+  //   }
+  // }
   if (comm->use_mc) {
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemUnmap, reinterpret_cast<CUdeviceptr>(comm->mc_baseptr),
                                 comm->mc_maxsize);
