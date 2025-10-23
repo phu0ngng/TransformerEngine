@@ -247,10 +247,37 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, 0));
     (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
 
+    // Enable peer-to-peer access between all devices
+    printf("[DEBUG] SPMD: Enabling P2P access between all %d devices...\n", numlocal);
+    fflush(stdout);
+    
+    for (int src_dev = 0; src_dev < numlocal; src_dev++) {
+      NVTE_CHECK_CUDA(cudaSetDevice(src_dev));
+      for (int dst_dev = 0; dst_dev < numlocal; dst_dev++) {
+        if (src_dev != dst_dev) {
+          int can_access;
+          NVTE_CHECK_CUDA(cudaDeviceCanAccessPeer(&can_access, src_dev, dst_dev));
+          if (can_access) {
+            cudaError_t err = cudaDeviceEnablePeerAccess(dst_dev, 0);
+            if (err == cudaSuccess) {
+              printf("[DEBUG] SPMD: Enabled P2P access from device %d to device %d\n", src_dev, dst_dev);
+            } else if (err == cudaErrorPeerAccessAlreadyEnabled) {
+              printf("[DEBUG] SPMD: P2P already enabled from device %d to device %d\n", src_dev, dst_dev);
+            } else {
+              printf("[WARNING] SPMD: Failed to enable P2P from device %d to device %d: %s\n",
+                     src_dev, dst_dev, cudaGetErrorString(err));
+            }
+          } else {
+            printf("[WARNING] SPMD: Device %d cannot access device %d (no P2P support)\n", src_dev, dst_dev);
+          }
+        }
+      }
+    }
+    
     // Restore original device context
     NVTE_CHECK_CUDA(cudaSetDevice(cur_dev));
 
-    printf("[DEBUG] SPMD: All %d devices initialized, restored to device %d\n", numlocal, cur_dev);
+    printf("[DEBUG] SPMD: All %d devices initialized with P2P enabled, restored to device %d\n", numlocal, cur_dev);
     fflush(stdout);
   } else {
     // Multi-process mode: Original single device setup
