@@ -623,13 +623,37 @@ int* communicator::get_current_flags() const {
 }
 
 void* communicator::get_current_mem_ptr(int region) const {
+  int current_device;
+  cudaGetDevice(&current_device);
+  
+  printf("[DEBUG] get_current_mem_ptr: region=%d, is_spmd=%d, current_device=%d\n", 
+         region, is_spmd, current_device);
+  fflush(stdout);
+  
   if (is_spmd) {
-    int current_device;
-    cudaGetDevice(&current_device);
-    if (region < NVTE_MAX_REGIONS && current_device < static_cast<int>(per_device_mem_ptr[region].size())) {
-      return per_device_mem_ptr[region][current_device];
+    if (region >= NVTE_MAX_REGIONS) {
+      printf("[ERROR] get_current_mem_ptr: Invalid region %d (max=%d)\n", region, NVTE_MAX_REGIONS);
+      fflush(stdout);
+      return nullptr;
     }
-    return nullptr;
+    
+    printf("[DEBUG] get_current_mem_ptr: per_device_mem_ptr[%d].size()=%zu\n", 
+           region, per_device_mem_ptr[region].size());
+    fflush(stdout);
+    
+    if (current_device >= static_cast<int>(per_device_mem_ptr[region].size())) {
+      printf("[ERROR] get_current_mem_ptr: current_device=%d out of range (size=%zu)\n",
+             current_device, per_device_mem_ptr[region].size());
+      fflush(stdout);
+      return nullptr;
+    }
+    
+    void* ptr = per_device_mem_ptr[region][current_device];
+    printf("[DEBUG] get_current_mem_ptr: Returning per_device_mem_ptr[%d][%d]=%p\n", 
+           region, current_device, ptr);
+    fflush(stdout);
+    
+    return ptr;
   } else {
     if (region < NVTE_MAX_REGIONS && !per_device_mem_ptr[region].empty()) {
       return per_device_mem_ptr[region][0];
@@ -639,13 +663,37 @@ void* communicator::get_current_mem_ptr(int region) const {
 }
 
 void** communicator::get_current_peer_ptr(int region) const {
+  int current_device;
+  cudaGetDevice(&current_device);
+  
+  printf("[DEBUG] get_current_peer_ptr: region=%d, is_spmd=%d, current_device=%d\n",
+         region, is_spmd, current_device);
+  fflush(stdout);
+  
   if (is_spmd) {
-    int current_device;
-    cudaGetDevice(&current_device);
-    if (region < NVTE_MAX_REGIONS && current_device < static_cast<int>(per_device_peer_ptr[region].size())) {
-      return per_device_peer_ptr[region][current_device];
+    if (region >= NVTE_MAX_REGIONS) {
+      printf("[ERROR] get_current_peer_ptr: Invalid region %d (max=%d)\n", region, NVTE_MAX_REGIONS);
+      fflush(stdout);
+      return nullptr;
     }
-    return nullptr;
+    
+    printf("[DEBUG] get_current_peer_ptr: per_device_peer_ptr[%d].size()=%zu\n",
+           region, per_device_peer_ptr[region].size());
+    fflush(stdout);
+    
+    if (current_device >= static_cast<int>(per_device_peer_ptr[region].size())) {
+      printf("[ERROR] get_current_peer_ptr: current_device=%d out of range (size=%zu)\n",
+             current_device, per_device_peer_ptr[region].size());
+      fflush(stdout);
+      return nullptr;
+    }
+    
+    void** ptr_array = per_device_peer_ptr[region][current_device];
+    printf("[DEBUG] get_current_peer_ptr: Returning per_device_peer_ptr[%d][%d]=%p\n",
+           region, current_device, ptr_array);
+    fflush(stdout);
+    
+    return ptr_array;
   } else {
     if (region < NVTE_MAX_REGIONS && !per_device_peer_ptr[region].empty()) {
       return per_device_peer_ptr[region][0];
