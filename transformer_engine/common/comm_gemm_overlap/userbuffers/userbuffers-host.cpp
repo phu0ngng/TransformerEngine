@@ -865,13 +865,17 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       fflush(stdout);
     }
     
-      // Set peer pointer for current device in the per-device peer_ptr array
-      int my_idx = comm->get_current_nvrank();
-      void **my_peer_ptr = comm->per_device_peer_ptr[hndl][device_idx];
-      my_peer_ptr[my_idx] = *gpubuff;
-      
-      printf("[DEBUG] SPMD runtime: Set per_device_peer_ptr[%d][%d][%d]=%p\n", hndl, device_idx, my_idx, *gpubuff);
-      fflush(stdout);
+    // Set mem_ptr for current device
+    comm->per_device_mem_ptr[hndl][device_idx] = *gpubuff;
+    
+    // Set peer pointer for current device in the per-device peer_ptr array
+    int my_idx = comm->get_current_nvrank();
+    void **my_peer_ptr = comm->per_device_peer_ptr[hndl][device_idx];
+    my_peer_ptr[my_idx] = *gpubuff;
+    
+    printf("[DEBUG] SPMD runtime: Set per_device_mem_ptr[%d][%d]=%p\n", hndl, device_idx, *gpubuff);
+    printf("[DEBUG] SPMD runtime: Set per_device_peer_ptr[%d][%d][%d]=%p\n", hndl, device_idx, my_idx, *gpubuff);
+    fflush(stdout);
     
     // Set memory flags and increment region
     comm->memflags[hndl] = NVTE_UB_MEM_ALLOCATED;
