@@ -154,12 +154,12 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   (*comm)->myrank = myrank;
   (*comm)->free_region = 0;
   (*comm)->launch_mode = NVTE_LAUNCH_GPU | NVTE_LAUNCH_CPU;
-  
+
   // Initialize SPMD-specific fields
   // Initialize unified per-device storage
   (*comm)->is_spmd = spmd;
   int num_devices = spmd ? numlocal : 1;
-  
+
   // Initialize per-device mem_ptr and shared peer_ptr arrays
   // mem_ptr: size = 1 (single device) or nvsize (SPMD)
   // peer_ptr: always size = nvsize (each device needs array to hold all peer pointers)
@@ -167,7 +167,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     (*comm)->per_device_mem_ptr[region].resize(num_devices, nullptr);
     (*comm)->peer_ptr[region].resize(numlocal, nullptr);  // Always nvsize, shared by all threads
   }
-  
+
   if (spmd) {
     // SPMD mode: Size = numlocal (number of devices in process)
     (*comm)->per_device_send_id.resize(numlocal, nullptr);
@@ -175,7 +175,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     (*comm)->per_device_flags_baseptr.resize(numlocal, nullptr);
     (*comm)->per_device_flags.resize(numlocal, nullptr);
     (*comm)->device_to_tp_rank.resize(numlocal);
-    
+
     // Initialize device to TP rank mapping
     // For DP+TP: Device ID maps to TP rank within its TP domain
     // Example: DP=2, TP=4, 8 devices total
@@ -184,7 +184,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     for (int dev_idx = 0; dev_idx < numlocal; dev_idx++) {
       (*comm)->device_to_tp_rank[dev_idx] = dev_idx % tensorgpus;  // tensorgpus = tp_size
     }
-    
+
     printf("[DEBUG] SPMD: Device to TP rank mapping initialized (tp_size=%d)\n", tensorgpus);
     for (int dev_idx = 0; dev_idx < numlocal; dev_idx++) {
       printf("[DEBUG] SPMD: Device %d → TP rank %d\n", dev_idx, (*comm)->device_to_tp_rank[dev_idx]);
@@ -202,7 +202,7 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
 
   if (spmd) {
     printf("[DEBUG] SPMD bootstrap: Setting up communicator for %d devices in single process\n", numlocal);
-    printf("[DEBUG] SPMD: myrank=%d, numranks=%d, mylocal=%d, numlocal=%d\n", 
+    printf("[DEBUG] SPMD: myrank=%d, numranks=%d, mylocal=%d, numlocal=%d\n",
            myrank, numranks, mylocal, numlocal);
     fflush(stdout);
   }
@@ -211,70 +211,70 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   cudaDeviceProp device_prop;
   NVTE_CHECK_CUDA(cudaGetDevice(&cur_dev));
   NVTE_CHECK_CUDA(cudaGetDeviceCount(&ndev));
-  
+
   if (spmd) {
     // SPMD mode: Initialize all devices in this process during bootstrap
-    printf("[DEBUG] SPMD: Initializing all %d devices in process (bootstrap from device %d)\n", 
+    printf("[DEBUG] SPMD: Initializing all %d devices in process (bootstrap from device %d)\n",
            numlocal, cur_dev);
     fflush(stdout);
-    
+
     // Verify all devices have similar properties (use device 0 as reference)
     NVTE_CHECK_CUDA(cudaGetDeviceProperties(&device_prop, 0));
     (*comm)->sm_arch = device_prop.major;
-    
+
     // Initialize each device in the process
     for (int dev_idx = 0; dev_idx < numlocal; dev_idx++) {
       printf("[DEBUG] SPMD: Initializing device %d\n", dev_idx);
       fflush(stdout);
-      
+
       NVTE_CHECK_CUDA(cudaSetDevice(dev_idx));
-      
+
       // Verify device properties are consistent
       cudaDeviceProp dev_prop;
       NVTE_CHECK_CUDA(cudaGetDeviceProperties(&dev_prop, dev_idx));
       if (dev_prop.major != device_prop.major) {
-        printf("[WARNING] Device %d has different SM arch (%d) than device 0 (%d)\n", 
+        printf("[WARNING] Device %d has different SM arch (%d) than device 0 (%d)\n",
                dev_idx, dev_prop.major, device_prop.major);
       }
-      
+
       // Initialize device context
       NVTE_CHECK_CUDA(cudaFree(0));  // Initialize CUDA context on this device
     }
-    
+
     // Set timeout based on device 0
     int device_clock = 0;
     int sec_timeout = getenv("UB_TIMEOUT") ? atoi(getenv("UB_TIMEOUT")) : 110;
     NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, 0));
     (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
-    
+
     // Restore original device context
     NVTE_CHECK_CUDA(cudaSetDevice(cur_dev));
-    
+
     printf("[DEBUG] SPMD: All %d devices initialized, restored to device %d\n", numlocal, cur_dev);
     fflush(stdout);
   } else {
     // Multi-process mode: Original single device setup
     NVTE_CHECK_CUDA(cudaGetDeviceProperties(&device_prop, cur_dev));
     (*comm)->sm_arch = device_prop.major;
-    
+
     int device_clock = 0;
     int sec_timeout = getenv("UB_TIMEOUT") ? atoi(getenv("UB_TIMEOUT")) : 110;
     NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
     (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
   }
-  
+
   // (*comm)->use_rr_kernel = device_prop.major == 8;
   (*comm)->use_rr_kernel = 0;
   (*comm)->push = 1;
   (*comm)->use_ce = 0;
   (*comm)->cga_size = 2;
   for (int i = 0; i < userbuffers_op_types; i++) (*comm)->basecounter[i] = 0;
-  
+
   int device_clock = 0;
   int sec_timeout = getenv("UB_TIMEOUT") ? atoi(getenv("UB_TIMEOUT")) : 110;
   NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, cur_dev));
   (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
-  
+
   if ((*comm)->myrank == 0) {
     printf("UB_TIMEOUT is set to %d sec, %" PRIu64 " cycles, freq: %dkhz\n", sec_timeout,
            (*comm)->ub_timeout, device_clock);
@@ -457,8 +457,8 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
 #define LOCALSIZE 4 * (NVTE_REG0_OFFSET(*comm) + NVTE_REG0_FLAGS + NVTE_REG0_COMMBUFFER * NBUF)
   // peer pointers + op flags + comm buffer
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-  register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, true, spmd); 
-  
+  register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, true, spmd);
+
   // Define GPU page constants before use
 #define GPU_PAGE_SHIFT 16
 #define GPU_PAGE_SIZE (1UL << GPU_PAGE_SHIFT)
@@ -467,55 +467,55 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
 
   // Unified per-device array allocation
   int num_devices_per_process = spmd ? (*comm)->nvsize : 1;
-  printf("[DEBUG] Allocating communication arrays for %d device(s) (SPMD=%s)\n", 
+  printf("[DEBUG] Allocating communication arrays for %d device(s) (SPMD=%s)\n",
          num_devices_per_process, spmd ? "true" : "false");
   fflush(stdout);
-  
+
   // Store current device to restore later
   int original_device;
   NVTE_CHECK_CUDA(cudaGetDevice(&original_device));
-  
+
   // Allocate communication arrays on each device
   for (int dev_idx = 0; dev_idx < num_devices_per_process; dev_idx++) {
     int target_device = spmd ? dev_idx : original_device;
     printf("[DEBUG] Allocating communication arrays on device %d\n", target_device);
     fflush(stdout);
-    
+
     NVTE_CHECK_CUDA(cudaSetDevice(target_device));
-    
+
     // Allocate communication arrays
     NVTE_CHECK_CUDA(
-        cudaMalloc(reinterpret_cast<void **>(&(*comm)->per_device_send_id[dev_idx]), 
+        cudaMalloc(reinterpret_cast<void **>(&(*comm)->per_device_send_id[dev_idx]),
                    (*comm)->nranks * sizeof(int)));
     NVTE_CHECK_CUDA(
         cudaMalloc(reinterpret_cast<void **>(&(*comm)->per_device_recv_id[dev_idx]),
                    NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
-    
+
     // Allocate flags arrays (GPU page-aligned)
     NVTE_CHECK_CUDA(
-        cudaMalloc(reinterpret_cast<void **>(&(*comm)->per_device_flags_baseptr[dev_idx]), 
+        cudaMalloc(reinterpret_cast<void **>(&(*comm)->per_device_flags_baseptr[dev_idx]),
                    2 * GPU_PAGE_SIZE));
     NVTE_CHECK_CUDA(cudaMemset((*comm)->per_device_flags_baseptr[dev_idx], 0, 2 * GPU_PAGE_SIZE));
     (*comm)->per_device_flags[dev_idx] = reinterpret_cast<int *>(
         ((CUdeviceptr)(*comm)->per_device_flags_baseptr[dev_idx] + GPU_PAGE_SIZE - 1) & GPU_PAGE_MASK);
-    
+
     // Initialize arrays
     NVTE_CHECK_CUDA(cudaMemset((*comm)->per_device_send_id[dev_idx], 0, (*comm)->nranks * sizeof(int)));
     NVTE_CHECK_CUDA(
         cudaMemset((*comm)->per_device_recv_id[dev_idx], 0, NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int)));
-    
+
     printf("[DEBUG] Device %d arrays allocated (send_id: %zu bytes, recv_id: %zu bytes, flags: %zu bytes)\n",
            target_device, (*comm)->nranks * sizeof(int), NVTE_MAX_REGIONS * (*comm)->nranks * sizeof(int), 2 * GPU_PAGE_SIZE);
     fflush(stdout);
   }
-  
+
   // Set legacy pointers to first device for backward compatibility
   (*comm)->flags_baseptr = (*comm)->per_device_flags_baseptr[0];
   (*comm)->flags = (*comm)->per_device_flags[0];
-  
+
   // Restore original device
   NVTE_CHECK_CUDA(cudaSetDevice(original_device));
-      
+
   printf("[DEBUG] Communication arrays allocated successfully for %d device(s)\n", num_devices_per_process);
   fflush(stdout);
   (*comm)->sms = 16;
@@ -568,7 +568,7 @@ int communicator::get_current_mydev() const {
   if (is_spmd) {
     int current_device;
     cudaGetDevice(&current_device);
-    return current_device;  
+    return current_device;
   } else {
     return mydev;  // Use stored value for multi-process
   }
@@ -627,34 +627,34 @@ int* communicator::get_current_flags() const {
 void* communicator::get_current_mem_ptr(int region) const {
   int current_device;
   cudaGetDevice(&current_device);
-  
-  printf("[DEBUG] get_current_mem_ptr: region=%d, is_spmd=%d, current_device=%d\n", 
+
+  printf("[DEBUG] get_current_mem_ptr: region=%d, is_spmd=%d, current_device=%d\n",
          region, is_spmd, current_device);
   fflush(stdout);
-  
+
   if (is_spmd) {
     if (region >= NVTE_MAX_REGIONS) {
       printf("[ERROR] get_current_mem_ptr: Invalid region %d (max=%d)\n", region, NVTE_MAX_REGIONS);
       fflush(stdout);
       return nullptr;
     }
-    
-    printf("[DEBUG] get_current_mem_ptr: per_device_mem_ptr[%d].size()=%zu\n", 
+
+    printf("[DEBUG] get_current_mem_ptr: per_device_mem_ptr[%d].size()=%zu\n",
            region, per_device_mem_ptr[region].size());
     fflush(stdout);
-    
+
     if (current_device >= static_cast<int>(per_device_mem_ptr[region].size())) {
       printf("[ERROR] get_current_mem_ptr: current_device=%d out of range (size=%zu)\n",
              current_device, per_device_mem_ptr[region].size());
       fflush(stdout);
       return nullptr;
     }
-    
+
     void* ptr = per_device_mem_ptr[region][current_device];
-    printf("[DEBUG] get_current_mem_ptr: Returning per_device_mem_ptr[%d][%d]=%p\n", 
+    printf("[DEBUG] get_current_mem_ptr: Returning per_device_mem_ptr[%d][%d]=%p\n",
            region, current_device, ptr);
     fflush(stdout);
-    
+
     return ptr;
   } else {
     if (region < NVTE_MAX_REGIONS && !per_device_mem_ptr[region].empty()) {
@@ -668,7 +668,7 @@ void* communicator::get_peer_ptr(int region, int peer_id) const {
   if (region >= NVTE_MAX_REGIONS || peer_ptr[region].empty()) {
     return nullptr;
   }
-  
+
   return peer_ptr[region][peer_id];  // Simple 2D access, shared by all threads
 }
 
@@ -752,9 +752,10 @@ void destroy_communicator(communicator *comm) {
         NVTE_CHECK_CUDA(cudaIpcCloseMemHandle(comm->get_peer_ptr(hndl, rank)));
       } else if (comm->mem_dealloc[hndl]) {
           NVTE_CHECK_CUDA(cudaFree(comm->get_peer_ptr(hndl, rank)));
-        } else {
-          comm->get_peer_ptr(hndl, rank) = nullptr;  // remove reference to external buffer
         }
+        // else {
+          // comm->get_peer_ptr(hndl, rank) = nullptr;  // remove reference to external buffer
+        // }
       }
     }
     // peer_ptr is now std::vector, no need to free
@@ -767,7 +768,7 @@ void destroy_communicator(communicator *comm) {
   // Clean up unified per-device communication arrays
   printf("[DEBUG] Cleaning up per-device communication arrays (%zu devices)\n", comm->per_device_send_id.size());
   fflush(stdout);
-  
+
   for (size_t dev_idx = 0; dev_idx < comm->per_device_send_id.size(); dev_idx++) {
     if (comm->per_device_send_id[dev_idx]) {
       NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_send_id[dev_idx])));
@@ -801,15 +802,15 @@ void destroy_communicator_mpi(communicator *comm) {
 int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *comm, bool alloc, bool spmd) {
   if (comm->free_region >= NVTE_MAX_REGIONS) return -1;
   int hndl = comm->free_region;
-  
+
   // Allocate per-device peer_ptr array for current device
   int device_idx = spmd ? comm->get_current_nvrank() : 0;
-  if (!comm->per_device_peer_ptr[hndl][device_idx]) {
-    comm->per_device_peer_ptr[hndl][device_idx] = reinterpret_cast<void **>(malloc(sizeof(void *) * (comm->nvsize)));
+  if (!comm->peer_ptr[hndl][device_idx]) {
+    comm->peer_ptr[hndl][device_idx] = reinterpret_cast<void **>(malloc(sizeof(void *) * (comm->nvsize)));
     printf("[DEBUG] Allocated peer_ptr array for region %d, device %d\n", hndl, device_idx);
     fflush(stdout);
   }
-  
+
   size_t aligned_size = bytes;
   comm->memflags[hndl] = 0;
   comm->mem_dealloc[hndl] = alloc;
@@ -818,42 +819,42 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     // SPMD runtime mode: Single device allocation (called per-thread at runtime)
     printf("[DEBUG] SPMD runtime register_user_buffer_collective: Current device buffer allocation\n");
     fflush(stdout);
-    
+
     int current_device;
     NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
     printf("[DEBUG] SPMD runtime: Operating on device %d\n", current_device);
     fflush(stdout);
-    
+
     if (alloc) {
       printf("[DEBUG] SPMD runtime: cudaMalloc on device %d (%zu bytes)...\n", current_device, bytes);
       fflush(stdout);
-      
+
       NVTE_CHECK_CUDA(cudaMalloc(gpubuff, bytes));
       NVTE_CHECK_CUDA(cudaMemset(*gpubuff, 0, bytes));
-      
+
       printf("[DEBUG] SPMD runtime: Allocated buffer at %p on device %d\n", *gpubuff, current_device);
       fflush(stdout);
     }
-    
+
     // Set mem_ptr for current device
     comm->per_device_mem_ptr[hndl][device_idx] = *gpubuff;
-    
+
     // Set peer pointer in shared 2D peer_ptr array (visible to all threads)
     int my_idx = comm->get_current_nvrank();
     comm->peer_ptr[hndl][my_idx] = *gpubuff;
-    
+
     printf("[DEBUG] SPMD runtime: Set per_device_mem_ptr[%d][%d]=%p\n", hndl, device_idx, *gpubuff);
     printf("[DEBUG] SPMD runtime: Set shared peer_ptr[%d][%d]=%p (visible to all devices)\n", hndl, my_idx, *gpubuff);
     fflush(stdout);
-    
+
     // Set memory flags and increment region
     comm->memflags[hndl] = NVTE_UB_MEM_ALLOCATED;
-    
+
     // Note: Don't increment free_region here as it's shared across threads
     // Return current handle
     printf("[DEBUG] SPMD runtime: register_user_buffer_collective completed for handle %d\n", hndl);
     fflush(stdout);
-    
+
     return hndl;
   }
 
@@ -967,7 +968,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
         else
           comm->gpu_ptrs = remptrs[i];
       }
-      comm->per_device_peer_ptr[hndl][i] = remptrs[i];
+      comm->peer_ptr[hndl][i] = remptrs[i];
     }
     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemSetAccess, ptr, (size_t)(aligned_size * nranks),
                                 const_cast<CUmemAccessDesc *>(&accessDesc), (size_t)1);
@@ -998,30 +999,30 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
       // SPMD runtime mode: Direct memory access (no IPC in single process)
       printf("[DEBUG] SPMD runtime register_user_buffer_collective: device context\n");
       fflush(stdout);
-      
+
       if (alloc) {
         int current_device;
         NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
         printf("[DEBUG] SPMD runtime: Allocating on current device %d\n", current_device);
         fflush(stdout);
-        
+
         NVTE_CHECK_CUDA(cudaMalloc(gpubuff, bytes));
         NVTE_CHECK_CUDA(cudaMemset(*gpubuff, 0, bytes));
-        
+
         printf("[DEBUG] SPMD runtime: Allocated buffer at %p\n", *gpubuff);
         fflush(stdout);
       }
-      
+
       // Set peer pointer for current device (P2P already enabled during bootstrap)
       int my_idx = comm->get_current_nvrank();
-      comm->per_device_peer_ptr[hndl][my_idx] = *gpubuff;
-      
+      comm->peer_ptr[hndl][my_idx] = *gpubuff;
+
       printf("[DEBUG] SPMD runtime: Set peer_ptr[%d][%d]=%p\n", hndl, my_idx, *gpubuff);
       fflush(stdout);
-      
+
       // SPMD runtime path ends here - skip IPC code below
       // Continue to common finalization at the end
-      
+
     } else {
       // Multi-process mode: Use CUDA IPC
       if (alloc) {
@@ -1068,16 +1069,16 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
       for (int i = 0; i < comm->nvsize; i++) {
         if (i != comm->get_current_nvrank()) {
-          NVTE_CHECK_CUDA(cudaIpcOpenMemHandle(&(comm->per_device_peer_ptr[hndl][i]), tmp[i],
+          NVTE_CHECK_CUDA(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],
                                                cudaIpcMemLazyEnablePeerAccess));
         }
       }
-      comm->per_device_peer_ptr[hndl][comm->get_current_nvrank()] = *gpubuff;
+      comm->peer_ptr[hndl][comm->get_current_nvrank()] = *gpubuff;
       NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
       NVTE_CHECK_CUDA(cudaMemcpy(
           reinterpret_cast<char *>(comm->gpu_ptrs) + (hndl * comm->nvsize * sizeof(void *)),
-          comm->per_device_peer_ptr[hndl], comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
+          comm->peer_ptr[hndl].data(), comm->nvsize * sizeof(void *), cudaMemcpyHostToDevice));
 
       NVTE_CHECK_CUDA(cudaDeviceSynchronize());
       free(tmp);
@@ -1090,7 +1091,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   // Set per-device mem_ptr for current device
   int my_idx = spmd ? comm->get_current_nvrank() : 0;
   comm->per_device_mem_ptr[hndl][my_idx] = *gpubuff;
-  
+
   printf("[DEBUG] Set per_device_mem_ptr[%d][%d]=%p\n", hndl, my_idx, *gpubuff);
   fflush(stdout);
 

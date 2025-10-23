@@ -2289,7 +2289,7 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
 // 1 - CE start index counter
 // 2 - CE end index counter
 #define GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsth, index)                                 \
-  ((reinterpret_cast<char *>((comm)->get_current_peer_ptr(0)[(peerlocal)])) +               \
+  ((reinterpret_cast<char *>((comm)->get_peer_ptr(0, peerlocal)))) +               \
    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + (comm)->get_current_myrank() * NVTE_MAX_REGIONS + (dsth) + \
      (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                        \
     sizeof(int)))
@@ -2323,16 +2323,16 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
   } else {
     void *mem_ptr_base = comm->get_current_mem_ptr(srchandler);
     void *srcptr = reinterpret_cast<char *>(mem_ptr_base) + srcoffset;
-    
+
     void *peer_buf = comm->get_peer_ptr(dsthandler, peerlocal);
     void *dstptr = reinterpret_cast<char *>(peer_buf) + dstoffset;
-    
+
     printf("[DEBUG] userbuffers_send: srchandler=%d, dsthandler=%d, peer=%d, peerlocal=%d\n",
            srchandler, dsthandler, peer, peerlocal);
     printf("[DEBUG] userbuffers_send: mem_ptr_base=%p, srcptr=%p, peer_buf=%p, dstptr=%p, bytes=%zu\n",
            mem_ptr_base, srcptr, peer_buf, dstptr, bytes);
     fflush(stdout);
-    
+
     if (!srcptr || !dstptr) {
       printf("[ERROR] userbuffers_send: NULL pointer! srcptr=%p, dstptr=%p\n", srcptr, dstptr);
       fflush(stdout);
