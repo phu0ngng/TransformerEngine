@@ -16,6 +16,7 @@
 #include <memory>
 #include <thread>
 #include <unordered_map>
+#include <mutex>
 
 #include "../extensions.h"
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
@@ -163,20 +164,25 @@ class CommunicatorHandler {
 class CollectiveGemmPlanRegistry {
  public:
   static CollectiveGemmPlanRegistry &getInstance() {
-    // SPMD: Process-wide registry (not thread_local) since bootstrap happens once per process
     static CollectiveGemmPlanRegistry instance;
     return instance;
   }
 
-  CommOverlapCore *get_executor(std::vector<size_t> buffer_shape, DType dtype,
-                                JAXX_Collective_Op collective_op, bool is_bootstrap = false);
+  std::shared_ptr<CommOverlapP2PBase> get_executor(std::vector<size_t> buffer_shape, DType dtype,
+                                JAXX_Collective_Op collective_op);
 
  private:
   CollectiveGemmPlanRegistry() {}
   CollectiveGemmPlanRegistry(const CollectiveGemmPlanRegistry &) = delete;
   CollectiveGemmPlanRegistry &operator=(const CollectiveGemmPlanRegistry &) = delete;
 
-  std::unordered_map<int64_t, std::unique_ptr<CommOverlapCore>> plan_map;
+  struct PlanEntry { 
+    std::once_flag flag; 
+    std::shared_ptr<CommOverlapP2PBase> executor_ptr; 
+  };
+  std::mutex _mutex;
+
+  std::unordered_map<int64_t, std::unique_ptr<PlanEntry>> _plan_map;
 };
 
 // Function declarations

@@ -168,11 +168,10 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   handler._initialize = true;
 
   // Bootstrap UB via creating a dummy CommOverlapP2PBase object
-  std::vector<size_t> buffer_shape{0, 0};
-  // TODO: change dtype here back to FP32
-  auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(buffer_shape, DType::kBFloat16,
-                                                                  JAXX_Collective_Op::ALL_GATHER,
-                                                                  true /*is_bootstrap*/);
+  auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(
+    std::vector<size_t>{}, DType::kBFloat16,
+    JAXX_Collective_Op::ALL_GATHER,
+  );
 }
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
@@ -190,10 +189,9 @@ int GetCgemmNumMaxStreams() {
   return config.num_max_streams;
 }
 
-CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> buffer_shape,
+std::shared_ptr<CommOverlapP2PBase> CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> buffer_shape,
                                                           DType dtype,
-                                                          JAXX_Collective_Op collective_op,
-                                                          bool is_bootstrap) {
+                                                          JAXX_Collective_Op collective_op) {
   auto &comm_handler = CommunicatorHandler::get();
   auto &cgemm_config = CgemmConfig::get();
 
@@ -206,67 +204,52 @@ CommOverlapCore *CollectiveGemmPlanRegistry::get_executor(std::vector<size_t> bu
 
   int current_device;
   cudaGetDevice(&current_device);
-  
-  auto it = plan_map.find(plan_id);
-  if (it != plan_map.end()) {
-    printf("[DEBUG] get_executor: Device %d found CACHED executor for plan_id=%ld (executor=%p)\n", 
-           current_device, plan_id, it->second.get());
-    fflush(stdout);
-    return it->second.get();
-  }
-  
-  printf("[DEBUG] get_executor: Device %d creating NEW executor for plan_id=%ld\n", current_device, plan_id);
-  fflush(stdout);
 
-  if (comm_handler.num_devices_per_process == comm_handler.tp_size) {
-    // Multi-device per process
-  } else if (comm_handler.num_devices_per_process == 1) {
-    // Single device per process
-    NVTE_CHECK(comm_handler.num_total_devices % comm_handler.tp_size == 0,
-               "For single device per process, num_total_devices must be divisible by tp_size, "
-               "got num_total_devices=",
-               comm_handler.num_total_devices, ", tp_size=", comm_handler.tp_size);
-  } else {
-    NVTE_ERROR("Unsupported TP configuration: num_devices_per_process=",
-               comm_handler.num_devices_per_process, ", tp_size=", comm_handler.tp_size,
-               ". Supported scenarios: "
-               "(1) num_devices_per_process == tp_size (multi-device per process), "
-               "(2) num_devices_per_process == 1 (single device per process)");
+  // Get or create PlanEntry for this plan_id
+  PlanEntry* entry_ptr = nullptr;
+  bool is_new_plan = false;
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    auto it = _plan_map.find(plan_id);
+    if (it == _plan_map.end()) {
+      // Create a new PlanEntry with uninitialized executor
+      auto new_entry = std::make_unique<PlanEntry>();
+      entry_ptr = new_entry.get();
+      _plan_map[plan_id] = std::move(new_entry);
+      is_new_plan = true;
+    } else {
+      entry_ptr = it->second.get();
+    }
   }
 
-  // Test barrier before creating executor to check if communicators work
-  printf("[DEBUG] Testing barrier before executor creation...\n");
-  fflush(stdout);
+  // Use std::call_once to ensure only one thread creates the executor
+  std::call_once(entry_ptr->flag, [&]() {
+    // Determine if we're in SPMD mode
+    bool is_spmd = comm_handler.num_devices_per_process > 1;
+    NVTE_CHECK(is_spmd == (comm_handler.num_devices_per_process == comm_handler.tp_size),
+               "SPMD mode is only supported when num_devices_per_process == tp_size, got num_devices_per_process=",
+               comm_handler.num_devices_per_process, ", tp_size=", comm_handler.tp_size);
 
-  try {
-    comm_handler.barrier_func(nullptr);  // Test the barrier function
-    printf("[DEBUG] Barrier test completed successfully\n");
-    fflush(stdout);
-  } catch (const std::exception& e) {
-    printf("[DEBUG] Barrier test failed: %s\n", e.what());
-    fflush(stdout);
+    // empty constructor + bootstrap, called once per process
+    auto executor = std::make_shared<CommOverlapP2PBase>(
+        comm_handler.get_global_rank(), comm_handler.num_total_devices,
+        comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
+        comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size, comm_handler.allgather_func, comm_handler.barrier_func);
+
+    entry_ptr->executor_ptr = executor;
+  });
+
+  // All threads call initialize when this is a new plan (but not when reusing cached plan)
+  if (is_new_plan && product(buffer_shape) > 0) {
+    entry_ptr->executor_ptr->buffer_and_stream_initialize(
+        buffer_shape, dtype, get_nvte_collective_op(collective_op), cgemm_config.num_max_streams,
+        1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
+        cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
+        false /*atomic_gemm*/, cgemm_config.aggregate_ag, 
+        comm_handler.num_devices_per_process > 1 /*is_spmd*/);
   }
 
-  std::unique_ptr<CommOverlapP2PBase> executor;
-  // Determine if we're in SPMD mode
-  bool is_spmd = comm_handler.num_devices_per_process > 1;
-  NVTE_CHECK(is_spmd == (comm_handler.num_devices_per_process == comm_handler.tp_size),
-             "SPMD mode is only supported when num_devices_per_process == tp_size, got num_devices_per_process=",
-             comm_handler.num_devices_per_process, ", tp_size=", comm_handler.tp_size);
-
-  executor = std::make_unique<CommOverlapP2PBase>(
-      buffer_shape, dtype, comm_handler.get_global_rank(), comm_handler.num_total_devices,
-      comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
-      comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size,
-      comm_handler.allgather_func, comm_handler.barrier_func, get_nvte_collective_op(collective_op),
-      cgemm_config.num_max_streams, 1 /*comm_cga_size*/, cgemm_config.gemm_priority,
-      cgemm_config.comm_priority, cgemm_config.num_comm_sm, true /*set_sm_margin*/,
-      cgemm_config.use_ce, false /*atomic_gemm*/, cgemm_config.aggregate_ag, is_spmd,
-      is_bootstrap);
-
-  CommOverlapCore *executor_ptr = executor.get();
-  plan_map[plan_id] = std::move(executor);
-  return executor_ptr;
+  return entry_ptr->executor_ptr;
 }
 
 void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {

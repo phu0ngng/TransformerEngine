@@ -946,6 +946,26 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
   }
 }
 
+CommOverlapP2PBase::CommOverlapP2PBase(int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
+                                       int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle)
+    : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
+                      allgather_handle, barrier_handle, tp_size, NVTE_COMM_OVERLAP_MAX_STREAMS, 1,
+                      0, 0, 1, false, false, false, false) {
+}
+
+void CommOverlapP2PBase::buffer_and_stream_initialize(
+  std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                                    CommOverlapType comm_type, int num_max_streams,
+                                    int comm_cga_size, int gemm_priority, int comm_priority,
+                                    int num_comm_sm, bool set_sm_margin, bool use_ce,
+                                    bool atomic_gemm, bool aggregate, bool spmd) {
+  // initialize the core attributes
+  CommOverlapCore::initialize(_tp_size, num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
+
+  // initialize the p2p attributes and register the buffer
+  initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
+}
+
 void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                                     CommOverlapType comm_type, bool aggregate) {
   printf("[DEBUG] CommOverlapP2PBase::initialize started\n");
