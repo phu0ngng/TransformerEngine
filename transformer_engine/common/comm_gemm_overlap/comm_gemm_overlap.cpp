@@ -48,7 +48,7 @@ bool ubuf_built_with_mpi() {
 CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode,
                                  int numnodes, int tp_size, ExtAllgatherOp allgather_handle,
                                  ExtBarrierOp barrier_handle, bool spmd)
-    : _spmd(spmd) {
+    : _spmd(spmd), _tp_size(tp_size) {
   // TODO: replace this _comm_created with call_once
   // Initialize userbuf communicator (once per process)
   if (!_comm_created) {
