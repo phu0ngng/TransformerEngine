@@ -120,9 +120,7 @@ int CommOverlapCore::get_device_index() {
 }
 
 int CommOverlapCore::get_current_ub_reg() {
-  if (_per_device_ub_reg.empty()) {
-    return -1;  // Return error value instead of crashing
-  }
+  NVTE_CHECK(!_per_device_ub_reg.empty());
 
   int device_idx = get_device_index();
   if (device_idx < 0 || device_idx >= static_cast<int>(_per_device_ub_reg.size())) {
@@ -323,7 +321,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     printf("[DEBUG] Allocated counter for device %d\n", current_device);
     fflush(stdout);
   }
-  
+
   // Create resources for current device only (no device switching, vectors already resized above)
   // Create communication stream
   NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&_per_device_stream_comm[device_idx], cudaStreamNonBlocking, _comm_priority));
@@ -957,8 +955,8 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     _is_p2p = true;
     _is_reduce_scatter = comm_type == CommOverlapType::RS;
     _aggregate = aggregate;
-    
-    printf("[DEBUG] P2P: Initialized shared state - _is_reduce_scatter=%d, _aggregate=%d (instance-level)\n", 
+
+    printf("[DEBUG] P2P: Initialized shared state - _is_reduce_scatter=%d, _aggregate=%d (instance-level)\n",
            _is_reduce_scatter, _aggregate);
     fflush(stdout);
   });
@@ -972,7 +970,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   fflush(stdout);
   size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
   int buffer_chunk_bytes = buffer_bytes / _tp_size;
-  
+
   // Calculate num_ubuf_chunks locally (same for all devices)
   int num_ubuf_chunks = _tp_size;
   if (_is_reduce_scatter) {
@@ -981,7 +979,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     buffer_bytes = buffer_bytes / _tp_size * (_tp_size * 2 - 1);
     num_ubuf_chunks = _tp_size * 2 - 1;
   }
-  
+
   // Set member variable once per executor instance (thread-safe)
   std::call_once(_num_chunks_flag, [this, num_ubuf_chunks]() {
     _num_ubuf_chunks = num_ubuf_chunks;
