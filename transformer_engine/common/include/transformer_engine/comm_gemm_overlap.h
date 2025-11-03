@@ -12,6 +12,7 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include <functional>
+#include <mutex>
 
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
@@ -75,6 +76,9 @@ class CommOverlapCore {
   // Protected unified per-device storage (derived classes need access for initialization)
   std::vector<int> _per_device_ub_reg;
   std::vector<TensorWrapper> _per_device_ubuf;
+  
+  // Instance-level once_flag for thread-safe vector initialization
+  std::once_flag _resize_core_vectors_flag;
 
   // Protected device-aware accessor methods (derived classes can use these)
   int get_current_ub_reg();
@@ -282,6 +286,12 @@ class CommOverlapP2PBase : public CommOverlapCore {
   std::vector<cudaStream_t> _per_device_stream_recv;  // [device] - per-device recv stream
   std::vector<cudaEvent_t> _per_device_stop_send;  // [device] - per-device send event
   std::vector<cudaEvent_t> _per_device_stop_recv;  // [device] - per-device recv event
+  
+  // Instance-level once_flags for thread-safe initialization
+  std::once_flag _shared_state_flag;
+  std::once_flag _num_chunks_flag;
+  std::once_flag _resize_ubuf_flag;
+  std::once_flag _resize_streams_flag;
 
  private:
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,

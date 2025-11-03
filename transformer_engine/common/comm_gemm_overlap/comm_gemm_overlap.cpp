@@ -245,10 +245,9 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
   printf("[DEBUG] CommOverlapCore::initialize: current_device=%d (set by XLA)\n", current_device);
   fflush(stdout);
 
-  // Thread-safe initialization of per-device vectors
+  // Thread-safe initialization of per-device vectors (instance-level, once per executor)
   int num_devices = _spmd ? _ub_comm->nvsize : 1;
-  static std::once_flag resize_flag;
-  std::call_once(resize_flag, [this, num_devices, atomic_gemm]() {
+  std::call_once(_resize_core_vectors_flag, [this, num_devices, atomic_gemm]() {
     _per_device_stream_compute.resize(num_devices);
     _per_device_stream_comm.resize(num_devices);
     _per_device_start_compute.resize(num_devices);
@@ -259,7 +258,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     if (atomic_gemm) {
       _per_device_counter.resize(num_devices);
     }
-    printf("[DEBUG] Resized per-device vectors to %d devices (thread-safe)\n", num_devices);
+    printf("[DEBUG] Resized per-device vectors to %d devices (thread-safe, instance-level)\n", num_devices);
     fflush(stdout);
   });
 
@@ -953,14 +952,13 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   printf("[DEBUG] CommOverlapP2PBase::initialize started\n");
   fflush(stdout);
 
-  // Initialize shared state once (thread-safe)
-  static std::once_flag shared_state_flag;
-  std::call_once(shared_state_flag, [this, comm_type, aggregate]() {
+  // Initialize shared state once per executor instance (thread-safe)
+  std::call_once(_shared_state_flag, [this, comm_type, aggregate]() {
     _is_p2p = true;
     _is_reduce_scatter = comm_type == CommOverlapType::RS;
     _aggregate = aggregate;
     
-    printf("[DEBUG] P2P: Initialized shared state - _is_reduce_scatter=%d, _aggregate=%d\n", 
+    printf("[DEBUG] P2P: Initialized shared state - _is_reduce_scatter=%d, _aggregate=%d (instance-level)\n", 
            _is_reduce_scatter, _aggregate);
     fflush(stdout);
   });
@@ -984,11 +982,10 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     num_ubuf_chunks = _tp_size * 2 - 1;
   }
   
-  // Set member variable once (thread-safe)
-  static std::once_flag num_chunks_flag;
-  std::call_once(num_chunks_flag, [this, num_ubuf_chunks]() {
+  // Set member variable once per executor instance (thread-safe)
+  std::call_once(_num_chunks_flag, [this, num_ubuf_chunks]() {
     _num_ubuf_chunks = num_ubuf_chunks;
-    printf("[DEBUG] P2P: Set _num_ubuf_chunks=%d (thread-safe)\n", _num_ubuf_chunks);
+    printf("[DEBUG] P2P: Set _num_ubuf_chunks=%d (thread-safe, instance-level)\n", _num_ubuf_chunks);
     fflush(stdout);
   });
 
@@ -1001,14 +998,13 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   printf("[DEBUG] P2P: device_idx=%d, current device context\n", device_idx);
   fflush(stdout);
 
-  // Thread-safe resize of per-device vectors
+  // Thread-safe resize of per-device vectors (instance-level)
   int num_devices = _spmd ? _ub_comm->nvsize : 1;
-  static std::once_flag resize_ubuf_flag;
-  std::call_once(resize_ubuf_flag, [this, num_devices]() {
+  std::call_once(_resize_ubuf_flag, [this, num_devices]() {
     _per_device_ub_reg.resize(num_devices);
     _per_device_ubuf.resize(num_devices);
     _per_device_ubufs.resize(num_devices);
-    printf("[DEBUG] P2P: Resized per-device vectors to %d (thread-safe)\n", num_devices);
+    printf("[DEBUG] P2P: Resized per-device vectors to %d (thread-safe, instance-level)\n", num_devices);
     fflush(stdout);
   });
 
@@ -1106,15 +1102,14 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     fflush(stdout);
   }
 
-  // Thread-safe resize of per-device stream vectors
-  static std::once_flag resize_streams_flag;
-  std::call_once(resize_streams_flag, [this]() {
+  // Thread-safe resize of per-device stream vectors (instance-level)
+  std::call_once(_resize_streams_flag, [this]() {
     int nvsize = _ub_comm->nvsize;
     _per_device_stream_send.resize(nvsize);
     _per_device_stream_recv.resize(nvsize);
     _per_device_stop_send.resize(nvsize);
     _per_device_stop_recv.resize(nvsize);
-    printf("[DEBUG] P2P: Resized per-device stream vectors to %d (thread-safe)\n", nvsize);
+    printf("[DEBUG] P2P: Resized per-device stream vectors to %d (thread-safe, instance-level)\n", nvsize);
     fflush(stdout);
   });
 
