@@ -281,7 +281,9 @@ void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
 
   NVTE_CHECK_NCCL(
       ncclAllReduce(_device_barriers[device_idx], _device_barriers[device_idx], 1, ncclInt, ncclSum, tp_comm, nullptr));
-  cudaDeviceSynchronize();
+  if (num_devices_per_process == 1) { // only sync with host when no spmd
+    cudaDeviceSynchronize();
+  }
 }
 
 void CommunicatorHandler::nccl_allgather_impl(void *output_buf, size_t output_bytes,
