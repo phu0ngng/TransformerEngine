@@ -831,14 +831,6 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   if (comm->free_region >= NVTE_MAX_REGIONS) return -1;
   int hndl = comm->free_region;
 
-  // Allocate per-device peer_ptr array for current device
-  int device_idx = spmd ? comm->get_current_nvrank() : 0;
-  if (!comm->peer_ptr[hndl][device_idx]) {
-    comm->peer_ptr[hndl][device_idx] = reinterpret_cast<void **>(malloc(sizeof(void *) * (comm->nvsize)));
-    printf("[DEBUG] Allocated peer_ptr array for region %d, device %d\n", hndl, device_idx);
-    fflush(stdout);
-  }
-
   size_t aligned_size = bytes;
   comm->memflags[hndl] = 0;
   comm->mem_dealloc[hndl] = alloc;
@@ -850,7 +842,8 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     int current_device;
     NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-    printf("[DEBUG] SPMD runtime: Operating on device %d\n", current_device);
+    int device_idx = comm->get_current_nvrank();  // Get device index in SPMD mode
+    printf("[DEBUG] SPMD runtime: Operating on device %d (device_idx=%d)\n", current_device, device_idx);
     fflush(stdout);
 
     if (alloc) {
