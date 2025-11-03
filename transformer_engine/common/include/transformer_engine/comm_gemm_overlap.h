@@ -90,9 +90,9 @@ class CommOverlapCore {
   int get_device_index();  // Helper to get device index for vector access
   std::pair<int, int> get_device_aware_rank_and_tp_id();
 
- private:
+ protected:
 
-  // Private initialization method
+  // Protected initialization method
   void initialize(int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
                   int gemm_priority, int comm_priority, int num_comm_sm, bool set_sm_margin,
                   bool use_ce, bool atomic_gemm);
@@ -104,7 +104,12 @@ class CommOverlapCore {
                   int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
                   int num_splits, int num_max_streams, int comm_cga_size, int gemm_priority,
                   int comm_priority, int num_comm_sm, bool set_sm_margin, bool use_ce,
-                  bool atomic_gemm, bool spmd = false, bool is_bootstrap = false);
+                  bool atomic_gemm);
+
+  // bootstrap only constructor
+  CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
+                  int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
+                  bool spmd);
 
   virtual ~CommOverlapCore();
 
@@ -274,7 +279,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
   std::vector<TensorWrapper>& get_current_ubufs();       // Get current device's chunk array
   std::vector<cudaStream_t>& get_current_stream_send();  // Get current device's send streams
-  cudaStream_t get_current_stream_recv();                // Get current device's recv stream  
+  cudaStream_t get_current_stream_recv();                // Get current device's recv stream
   cudaEvent_t get_current_stop_send();                   // Get current device's stop_send event
   cudaEvent_t get_current_stop_recv();                   // Get current device's stop_recv event
 
@@ -291,15 +296,15 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
   // bootstrap only constructor
   CommOverlapP2PBase(int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
-                     int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle);
+                     int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
+                     bool spmd);
 
   // stream and buffer initialization
   void buffer_and_stream_initialize(std::vector<size_t> &buffer_shape, DType buffer_dtype,
                   CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
                   int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
                   int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
-                  bool atomic_gemm = false, bool aggregate = false, bool spmd = false,
-                  );
+                  bool atomic_gemm = false, bool aggregate = false);
 
   virtual ~CommOverlapP2PBase();
 

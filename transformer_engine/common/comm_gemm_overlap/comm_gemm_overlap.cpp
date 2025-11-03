@@ -47,11 +47,9 @@ bool ubuf_built_with_mpi() {
 
 CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode,
                                  int numnodes, int tp_size, ExtAllgatherOp allgather_handle,
-                                 ExtBarrierOp barrier_handle, int num_splits, int num_max_streams,
-                                 int comm_cga_size, int gemm_priority, int comm_priority,
-                                 int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                 bool atomic_gemm, bool spmd, bool is_bootstrap)
+                                 ExtBarrierOp barrier_handle, bool spmd)
     : _spmd(spmd) {
+  // TODO: replace this _comm_created with call_once
   // Initialize userbuf communicator (once per process)
   if (!_comm_created) {
     if (myrank == 0) {
@@ -65,19 +63,18 @@ CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numl
 #endif
     _comm_created = true;
   }
+}
 
-  if (!is_bootstrap) {
-    // Runtime: Each device thread initializes its own resources
-    printf("[DEBUG] CommOverlapCore: Runtime mode - calling initialize()\n");
-    fflush(stdout);
-
-    initialize(tp_size, num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority,
-               num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
-  } else {
-    // Bootstrap: Skip initialize, just set up communicator
-    printf("[DEBUG] CommOverlapCore: Bootstrap mode - skipping initialize()\n");
-    fflush(stdout);
-  }
+CommOverlapCore::CommOverlapCore(int myrank, int numranks, int mylocal, int numlocal, int mynode,
+                                 int numnodes, int tp_size, ExtAllgatherOp allgather_handle,
+                                 ExtBarrierOp barrier_handle, int num_splits, int num_max_streams,
+                                 int comm_cga_size, int gemm_priority, int comm_priority,
+                                 int num_comm_sm, bool set_sm_margin, bool use_ce,
+                                 bool atomic_gemm):
+  CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size, allgather_handle, barrier_handle, false)
+{
+  initialize(tp_size, num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority,
+             num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
 }
 
 std::pair<int, int> CommOverlapCore::get_device_aware_rank_and_tp_id() {
@@ -930,37 +927,29 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
                                        CommOverlapType comm_type, int num_max_streams,
                                        int comm_cga_size, int gemm_priority, int comm_priority,
                                        int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                       bool atomic_gemm, bool aggregate, bool spmd,
-                                       bool is_bootstrap)
+                                       bool atomic_gemm, bool aggregate)
     : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
-                      allgather_handle, barrier_handle, tp_size, num_max_streams, comm_cga_size,
+                      allgather_handle, barrier_handle, tp_size /*num_splits*/,
+                      num_max_streams, comm_cga_size,
                       gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
-                      atomic_gemm, spmd) {
-  if (!is_bootstrap) {
-    // Runtime: Each device thread initializes its own P2P resources
+                      atomic_gemm) {
     initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
-  } else {
-    // Bootstrap: Skip P2P initialization (only Core initialization needed)
-    printf("[DEBUG] P2PBase: Bootstrap mode - skipping P2P initialization\n");
-    fflush(stdout);
-  }
 }
 
 CommOverlapP2PBase::CommOverlapP2PBase(int myrank, int numranks, int mylocal, int numlocal, int mynode, int numnodes,
-                                       int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle)
+                                       int tp_size, ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle, bool spmd)
     : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
-                      allgather_handle, barrier_handle, tp_size, NVTE_COMM_OVERLAP_MAX_STREAMS, 1,
-                      0, 0, 1, false, false, false, false) {
-}
+                      allgather_handle, barrier_handle, spmd)
+{}
 
 void CommOverlapP2PBase::buffer_and_stream_initialize(
   std::vector<size_t> &buffer_shape, DType buffer_dtype,
                                     CommOverlapType comm_type, int num_max_streams,
                                     int comm_cga_size, int gemm_priority, int comm_priority,
                                     int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                    bool atomic_gemm, bool aggregate, bool spmd) {
+                                    bool atomic_gemm, bool aggregate){
   // initialize the core attributes
-  CommOverlapCore::initialize(_tp_size, num_splits, num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
+  CommOverlapCore::initialize(_tp_size, _tp_size /*num_splits*/, num_max_streams, comm_cga_size, gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce, atomic_gemm);
 
   // initialize the p2p attributes and register the buffer
   initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
@@ -1169,20 +1158,20 @@ void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapp
   printf("[DEBUG] copy_into_buffer: Entry - device=%d, local_chunk=%d, rowwise=%d\n",
          current_device, local_chunk, rowwise);
   fflush(stdout);
-  
+
   // Check element size
   const size_t element_size = source.element_size();
   printf("[DEBUG] copy_into_buffer: source.element_size()=%zu\n", element_size);
   fflush(stdout);
-  
+
   printf("[DEBUG] copy_into_buffer: Calling get_current_ubuf()...\n");
   fflush(stdout);
-  
+
   size_t ubuf_element_size = get_current_ubuf().element_size();
-  
+
   printf("[DEBUG] copy_into_buffer: ubuf_element_size=%zu\n", ubuf_element_size);
   fflush(stdout);
-  
+
   NVTE_CHECK(ubuf_element_size == element_size,
              "Tried to copy data into a Userbuffers buffer but dtypes are not compatible ",
              "(source dtype has ", element_size, " bytes, UB dtype has ", ubuf_element_size,
@@ -1194,7 +1183,7 @@ void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapp
   // Input data
   const size_t source_size = source.numel();
   const void *src_ptr = (rowwise) ? source.dptr() : source.columnwise_dptr();
-  
+
   printf("[DEBUG] copy_into_buffer: source_size=%zu, src_ptr=%p\n", source_size, src_ptr);
   fflush(stdout);
 
@@ -1203,7 +1192,7 @@ void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapp
   if (local_chunk) {
     printf("[DEBUG] copy_into_buffer: Local chunk mode, accessing ubufs[%d]...\n", _tp_id);
     fflush(stdout);
-    
+
     size_t chunk_numel = get_current_ubufs()[_tp_id].numel();
     NVTE_CHECK(chunk_numel == source_size,
                "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
@@ -1212,7 +1201,7 @@ void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapp
   } else {
     printf("[DEBUG] copy_into_buffer: Full buffer mode...\n");
     fflush(stdout);
-    
+
     NVTE_CHECK(get_current_ubuf().numel() == source_size,
                "Tried to copy an invalid tensor into a Userbuffers buffer ",
                "(source_size=", source_size, ", ubuf_size=", get_current_ubuf().numel(), ")");
@@ -1225,7 +1214,7 @@ void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapp
   // Copy data
   NVTE_CHECK_CUDA(cudaMemcpyAsync(dst_ptr, src_ptr, source_size * element_size,
                                   cudaMemcpyDeviceToDevice, stream));
-                                  
+
   printf("[DEBUG] copy_into_buffer: cudaMemcpyAsync completed successfully\n");
   fflush(stdout);
 }
