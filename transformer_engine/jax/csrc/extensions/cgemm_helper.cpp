@@ -249,6 +249,17 @@ std::shared_ptr<CommOverlapP2PBase> CollectiveGemmPlanRegistry::get_executor(std
         cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
         false /*atomic_gemm*/, cgemm_config.aggregate_ag);
     
+    // In SPMD mode, synchronize all devices after buffer registration
+    // This ensures all peer_ptr entries are set before any P2P communication starts
+    if (comm_handler.num_devices_per_process > 1) {
+      printf("[DEBUG] CGEMM: SPMD mode - calling barrier after buffer_and_stream_initialize (device=%d)\n",
+             current_device);
+      fflush(stdout);
+      comm_handler.barrier_func(comm_handler.tp_comms[current_device]);
+      printf("[DEBUG] CGEMM: SPMD barrier completed (device=%d)\n", current_device);
+      fflush(stdout);
+    }
+    
     // Mark plan as no longer new (after all threads have had a chance to initialize)
     // Note: This happens after buffer initialization, so all threads in the first batch
     // will see is_new_plan=true and call buffer_and_stream_initialize
