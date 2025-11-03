@@ -9,14 +9,15 @@
 
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <unordered_map>
-#include <mutex>
 
 #include "../extensions.h"
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
@@ -178,7 +179,8 @@ class CollectiveGemmPlanRegistry {
 
   struct PlanEntry { 
     std::once_flag flag; 
-    std::shared_ptr<CommOverlapP2PBase> executor_ptr; 
+    std::shared_ptr<CommOverlapP2PBase> executor_ptr;
+    std::atomic<bool> is_new_plan{true};  
   };
   std::mutex _mutex;
 

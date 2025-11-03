@@ -206,7 +206,6 @@ std::shared_ptr<CommOverlapP2PBase> CollectiveGemmPlanRegistry::get_executor(std
 
   // Get or create PlanEntry for this plan_id
   PlanEntry* entry_ptr = nullptr;
-  bool is_new_plan = false;
   {
     std::lock_guard<std::mutex> lock(_mutex);
     auto it = _plan_map.find(plan_id);
@@ -215,11 +214,13 @@ std::shared_ptr<CommOverlapP2PBase> CollectiveGemmPlanRegistry::get_executor(std
       auto new_entry = std::make_unique<PlanEntry>();
       entry_ptr = new_entry.get();
       _plan_map[plan_id] = std::move(new_entry);
-      is_new_plan = true;
     } else {
       entry_ptr = it->second.get();
     }
   }
+
+  // Check if this is a new plan (shared across all threads for this plan)
+  bool is_new_plan = entry_ptr->is_new_plan.load(std::memory_order_acquire);
 
   // Use std::call_once to ensure only one thread creates the executor
   std::call_once(entry_ptr->flag, [&]() {
@@ -240,13 +241,18 @@ std::shared_ptr<CommOverlapP2PBase> CollectiveGemmPlanRegistry::get_executor(std
     entry_ptr->executor_ptr = executor;
   });
 
-  // All threads call initialize when this is a new plan (but not when reusing cached plan)
+  // All threads call buffer_and_stream_initialize when this is a new plan
   if (is_new_plan && product(buffer_shape) > 0) {
     entry_ptr->executor_ptr->buffer_and_stream_initialize(
         buffer_shape, dtype, get_nvte_collective_op(collective_op), cgemm_config.num_max_streams,
         1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
         cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
         false /*atomic_gemm*/, cgemm_config.aggregate_ag);
+    
+    // Mark plan as no longer new (after all threads have had a chance to initialize)
+    // Note: This happens after buffer initialization, so all threads in the first batch
+    // will see is_new_plan=true and call buffer_and_stream_initialize
+    entry_ptr->is_new_plan.store(false, std::memory_order_release);
   }
 
   return entry_ptr->executor_ptr;
