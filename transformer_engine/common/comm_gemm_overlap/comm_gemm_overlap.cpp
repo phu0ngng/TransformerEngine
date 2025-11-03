@@ -899,9 +899,9 @@ void CommOverlapBase::bulk_overlap_external_ag(cudaStream_t send_stream, cudaStr
   int comm_bytes_per_rank = comm_bytes / _tp_size;
 
   // We use the reference to the overlap_gemm to get the stream to send an receive on to ensure the kernels don't finish until the previous gemm is flush
-  userbuffers_send_all(get_current_ub_reg(), 0, get_current_ub_reg(), 0, comm_bytes_per_rank, _tp_id, _tp_size, _rank,
+  userbuffers_send_all(get_current_ub_reg(), 0, get_current_ub_reg(), 0, comm_bytes_per_rank, get_tp_id(), _tp_size, get_rank(),
                        _ub_comm, send_stream);
-  userbuffers_recv_all(get_current_ub_reg(), 0, get_current_ub_reg(), 0, comm_bytes_per_rank, _tp_id, _tp_size, _rank,
+  userbuffers_recv_all(get_current_ub_reg(), 0, get_current_ub_reg(), 0, comm_bytes_per_rank, get_tp_id(), _tp_size, get_rank(),
                        _ub_comm, recv_stream);
 
   // We sync with the internal comm stream so the destructor can wait for the comm stream to finish before freeing the ubuf
@@ -1041,7 +1041,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   printf("[DEBUG] P2P: Created %d tensor chunks for device %d\n", _num_ubuf_chunks, device_idx);
   fflush(stdout);
 
-  printf("[DEBUG] P2P: Computing rank topology (_rank=%d, _tp_size=%d)...\n", _rank, _tp_size);
+  printf("[DEBUG] P2P: Computing rank topology (_rank=%d, _tp_size=%d)...\n", get_rank(), _tp_size);
   fflush(stdout);
 
   _rank_round_tp = (_rank / _tp_size) * _tp_size;
@@ -1052,7 +1052,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
          _rank_round_tp, _next_rank, _prev_rank);
   fflush(stdout);
 
-  _self_chunk_id = _tp_id;
+  _self_chunk_id = get_tp_id();
 
   printf("[DEBUG] P2P: self_chunk_id=%d\n", _self_chunk_id);
   fflush(stdout);
@@ -1190,14 +1190,16 @@ void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapp
   // Userbuffers data
   void *dst_ptr;
   if (local_chunk) {
-    printf("[DEBUG] copy_into_buffer: Local chunk mode, accessing ubufs[%d]...\n", _tp_id);
+    // Get device-aware tp_id (important in SPMD mode where each device has different tp_id)
+    int tp_id = get_tp_id();
+    printf("[DEBUG] copy_into_buffer: Local chunk mode, accessing ubufs[%d]...\n", tp_id);
     fflush(stdout);
 
-    size_t chunk_numel = get_current_ubufs()[_tp_id].numel();
+    size_t chunk_numel = get_current_ubufs()[tp_id].numel();
     NVTE_CHECK(chunk_numel == source_size,
                "Tried to copy an invalid tensor into a local chunk of a Userbuffers buffer ",
                "(source_size=", source_size, ", local_ubuf_size=", chunk_numel, ")");
-    dst_ptr = get_current_ubufs()[_tp_id].dptr();
+    dst_ptr = get_current_ubufs()[tp_id].dptr();
   } else {
     printf("[DEBUG] copy_into_buffer: Full buffer mode...\n");
     fflush(stdout);
@@ -1349,7 +1351,7 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
   int current_device;
   NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
   printf("[DEBUG] split_overlap_ag: Entry - current_device=%d, _rank=%d, _tp_id=%d, _spmd=%d\n",
-         current_device, _rank, _tp_id, _spmd);
+         current_device, get_rank(), get_tp_id(), _spmd);
   printf("[DEBUG] split_overlap_ag: CUDA resources - streams.size()=%zu, events.size()=%zu\n",
          _per_device_stream_compute.size(), _per_device_start_compute.size());
   fflush(stdout);
@@ -1405,11 +1407,12 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
     size_t output_chunk_size = 2 * n_chunk * m;
 
     // Initial 1X input chunk exchange between neighboring peers
-    int send_chunk_id = _tp_id;
-    int recv_chunk_id = (_tp_id % 2 == 0) ? _tp_id + 1 : _tp_id - 1;
+    int tp_id = get_tp_id();
+    int send_chunk_id = tp_id;
+    int recv_chunk_id = (tp_id % 2 == 0) ? tp_id + 1 : tp_id - 1;
     int send_offset = comm_bytes * send_chunk_id;
     int recv_offset = comm_bytes * recv_chunk_id;
-    int peer_rank = (_tp_id % 2 == 0) ? _next_rank : _prev_rank;
+    int peer_rank = (tp_id % 2 == 0) ? _next_rank : _prev_rank;
     userbuffers_send(get_current_ub_reg(), send_offset, get_current_ub_reg(), send_offset, comm_bytes, _ub_comm, peer_rank,
                      get_current_stream_send()[0]);
     userbuffers_recv(get_current_ub_reg(), recv_offset, get_current_ub_reg(), recv_offset, comm_bytes, _ub_comm, peer_rank, get_current_stream_recv());
@@ -1417,9 +1420,9 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(get_current_stream_send()[0], get_current_stop_recv(), 0));
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(get_current_stream_compute()[0], get_current_stop_recv(), 0));
 
-    int local_rank_round2 = (_tp_id % 2 == 0) ? _tp_id : _tp_id - 1;
-    const int next_rank = (_tp_size + _tp_id + 2) % _tp_size + _rank_round_tp;
-    const int prev_rank = (_tp_size + _tp_id - 2) % _tp_size + _rank_round_tp;
+    int local_rank_round2 = (tp_id % 2 == 0) ? tp_id : tp_id - 1;
+    const int next_rank = (_tp_size + tp_id + 2) % _tp_size + _rank_round_tp;
+    const int prev_rank = (_tp_size + tp_id - 2) % _tp_size + _rank_round_tp;
 
     // Ring exchange of 2X inputs chunks
     for (int i = 0; i < num_steps; i++) {
@@ -1470,8 +1473,9 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
       // GEMM chunk The initial input chunk is stored _ubuf[rank]. This is to
       // have the AG output in all ranks to be contiguous after the ring
       // exchanges
-      int send_chunk_id = (_tp_size + _tp_id - i) % _tp_size;
-      int recv_chunk_id = (_tp_size + _tp_id - i - 1) % _tp_size;
+      int tp_id = get_tp_id();
+      int send_chunk_id = (_tp_size + tp_id - i) % _tp_size;
+      int recv_chunk_id = (_tp_size + tp_id - i - 1) % _tp_size;
       int send_offset = comm_bytes * send_chunk_id;
       int recv_offset = comm_bytes * recv_chunk_id;
 
@@ -1560,8 +1564,9 @@ void CommOverlapP2PBase::atomic_gemm_overlap_rs(
     int recv_chunk_id = send_chunk_id + _tp_size;
     int send_offset = comm_bytes * send_chunk_id;
     int recv_offset = comm_bytes * recv_chunk_id;
-    int send_rank = (_tp_size + _tp_id - i) % _tp_size + _rank_round_tp;
-    int recv_rank = (_tp_id + i) % _tp_size + _rank_round_tp;
+    int tp_id = get_tp_id();
+    int send_rank = (_tp_size + tp_id - i) % _tp_size + _rank_round_tp;
+    int recv_rank = (tp_id + i) % _tp_size + _rank_round_tp;
 
     consumer(counter_ptr, send_chunk_id, get_current_stream_recv());
     userbuffers_send(get_current_ub_reg(), send_offset, get_current_ub_reg(), recv_offset, comm_bytes, _ub_comm, send_rank, get_current_stream_recv());
@@ -1623,7 +1628,8 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
   for (int i = 0; i < _tp_size; i++) {
     // GEMM chunk
     int stream_id = i % get_current_stream_compute().size();
-    int input_b_chunk_id = (_tp_id + i + 1) % _tp_size;
+    int tp_id = get_tp_id();
+    int input_b_chunk_id = (tp_id + i + 1) % _tp_size;
 
     auto input_b_chunk = get_tensor_chunk(B, input_b_chunk_id * input_chunk_size, {n_chunk, k});
     auto output_chunk = get_buffer_chunk_by_id(D, i);
@@ -1640,8 +1646,8 @@ void CommOverlapP2PBase::split_overlap_rs(const TensorWrapper &A, bool transa,
       int prev_stream_id = (i - 1) % get_current_stream_compute().size();
       int send_offset = comm_bytes * (i - 1);
       int recv_offset = comm_bytes * (i - 1 + _tp_size);
-      int send_rank = (_tp_id + i) % _tp_size + _rank_round_tp;
-      int recv_rank = (_tp_size + _tp_id - i) % _tp_size + _rank_round_tp;
+      int send_rank = (tp_id + i) % _tp_size + _rank_round_tp;
+      int recv_rank = (_tp_size + tp_id - i) % _tp_size + _rank_round_tp;
       NVTE_CHECK_CUDA(cudaEventRecord(get_current_start_comm(), get_current_stream_compute()[prev_stream_id]));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(get_current_stream_send()[prev_stream_id], get_current_start_comm(), 0));
       NVTE_CHECK_CUDA(cudaStreamWaitEvent(get_current_stream_recv(), get_current_start_comm(), 0));

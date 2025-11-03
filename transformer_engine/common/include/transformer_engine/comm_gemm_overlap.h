@@ -89,6 +89,16 @@ class CommOverlapCore {
   cudaEvent_t get_current_comm_launch_event();
   int get_device_index();  // Helper to get device index for vector access
   std::pair<int, int> get_device_aware_rank_and_tp_id();
+  
+  // Helper to get current rank (device-aware in SPMD mode)
+  int get_rank() { 
+    return _spmd ? get_device_aware_rank_and_tp_id().first : _rank;
+  }
+  
+  // Helper to get current tp_id (device-aware in SPMD mode)
+  int get_tp_id() {
+    return _spmd ? get_device_aware_rank_and_tp_id().second : _tp_id;
+  }
 
  protected:
 
