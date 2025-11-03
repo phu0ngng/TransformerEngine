@@ -169,7 +169,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
 
   // Bootstrap UB via creating a dummy CommOverlapP2PBase object
   auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(
-    std::vector<size_t>{}, DType::kBFloat16,
+    std::vector<size_t>{0, 0}, DType::kBFloat16,
     JAXX_Collective_Op::ALL_GATHER);
 }
 
