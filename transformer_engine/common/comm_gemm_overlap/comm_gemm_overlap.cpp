@@ -245,13 +245,23 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
   printf("[DEBUG] CommOverlapCore::initialize: current_device=%d (set by XLA)\n", current_device);
   fflush(stdout);
 
-  // Initialize per-device vectors (once, first thread to arrive)
-  if (_per_device_stream_compute.empty()) {
-    int num_devices = _spmd ? _ub_comm->nvsize : 1;
+  // Thread-safe initialization of per-device vectors
+  int num_devices = _spmd ? _ub_comm->nvsize : 1;
+  static std::once_flag resize_flag;
+  std::call_once(resize_flag, [this, num_devices, atomic_gemm]() {
     _per_device_stream_compute.resize(num_devices);
-    printf("[DEBUG] Resized per_device_stream_compute to %d devices\n", num_devices);
+    _per_device_stream_comm.resize(num_devices);
+    _per_device_start_compute.resize(num_devices);
+    _per_device_stop_compute.resize(num_devices);
+    _per_device_start_comm.resize(num_devices);
+    _per_device_stop_comm.resize(num_devices);
+    _per_device_comm_launch_event.resize(num_devices);
+    if (atomic_gemm) {
+      _per_device_counter.resize(num_devices);
+    }
+    printf("[DEBUG] Resized per-device vectors to %d devices (thread-safe)\n", num_devices);
     fflush(stdout);
-  }
+  });
 
   // Create streams for current device only
   int device_idx = _spmd ? current_device : 0;
@@ -302,13 +312,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     printf("[DEBUG] Allocating counter for current device...\n");
     fflush(stdout);
 
-    // Resize vector if needed (first thread)
-    if (_per_device_counter.empty()) {
-      int num_devices = _spmd ? _ub_comm->nvsize : 1;
-      _per_device_counter.resize(num_devices);
-    }
-
-    // Allocate counter for current device only
+    // Allocate counter for current device only (vectors already resized above)
     void *counter_ptr;
     size_t counter_bytes = _num_splits * 2 * sizeof(int32_t);
     NVTE_CHECK_CUDA(cudaMalloc(&counter_ptr, counter_bytes));
@@ -320,19 +324,8 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     printf("[DEBUG] Allocated counter for device %d\n", current_device);
     fflush(stdout);
   }
-  // CUDA event and comm stream creation (per-device)
-  // Resize vectors if needed (first thread)
-  if (_per_device_stream_comm.empty()) {
-    int num_devices = _spmd ? _ub_comm->nvsize : 1;
-    _per_device_stream_comm.resize(num_devices);
-    _per_device_start_compute.resize(num_devices);
-    _per_device_stop_compute.resize(num_devices);
-    _per_device_start_comm.resize(num_devices);
-    _per_device_stop_comm.resize(num_devices);
-    _per_device_comm_launch_event.resize(num_devices);
-  }
-
-  // Create resources for current device only (no device switching)
+  
+  // Create resources for current device only (no device switching, vectors already resized above)
   // Create communication stream
   NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&_per_device_stream_comm[device_idx], cudaStreamNonBlocking, _comm_priority));
 
@@ -960,12 +953,17 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   printf("[DEBUG] CommOverlapP2PBase::initialize started\n");
   fflush(stdout);
 
-  _is_p2p = true;
-  _is_reduce_scatter = comm_type == CommOverlapType::RS;
-  _aggregate = aggregate;
-
-  printf("[DEBUG] P2P: _is_reduce_scatter=%d, _aggregate=%d\n", _is_reduce_scatter, _aggregate);
-  fflush(stdout);
+  // Initialize shared state once (thread-safe)
+  static std::once_flag shared_state_flag;
+  std::call_once(shared_state_flag, [this, comm_type, aggregate]() {
+    _is_p2p = true;
+    _is_reduce_scatter = comm_type == CommOverlapType::RS;
+    _aggregate = aggregate;
+    
+    printf("[DEBUG] P2P: Initialized shared state - _is_reduce_scatter=%d, _aggregate=%d\n", 
+           _is_reduce_scatter, _aggregate);
+    fflush(stdout);
+  });
 
   // Create workspace tensor with userbuffer
   NVTE_CHECK(buffer_shape.size() == 2, "Userbuffer shape must be 2-dimensional!");
@@ -976,13 +974,23 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   fflush(stdout);
   size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
   int buffer_chunk_bytes = buffer_bytes / _tp_size;
-  _num_ubuf_chunks = _tp_size;
+  
+  // Calculate num_ubuf_chunks locally (same for all devices)
+  int num_ubuf_chunks = _tp_size;
   if (_is_reduce_scatter) {
     // GEMM + RS overlap: Allocate `2 x tp_size - 1` buffers to hold recieved GEMM chunk
     // outputs for reduction at the end of the pipelining.
     buffer_bytes = buffer_bytes / _tp_size * (_tp_size * 2 - 1);
-    _num_ubuf_chunks = _tp_size * 2 - 1;
+    num_ubuf_chunks = _tp_size * 2 - 1;
   }
+  
+  // Set member variable once (thread-safe)
+  static std::once_flag num_chunks_flag;
+  std::call_once(num_chunks_flag, [this, num_ubuf_chunks]() {
+    _num_ubuf_chunks = num_ubuf_chunks;
+    printf("[DEBUG] P2P: Set _num_ubuf_chunks=%d (thread-safe)\n", _num_ubuf_chunks);
+    fflush(stdout);
+  });
 
   printf("[DEBUG] P2P: Runtime initialization - registering buffer for current device...\n");
   fflush(stdout);
@@ -993,12 +1001,16 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   printf("[DEBUG] P2P: device_idx=%d, current device context\n", device_idx);
   fflush(stdout);
 
-  // Ensure per-device vectors are sized (should be done in bootstrap)
-  printf("[DEBUG] P2P: Resizing per-device vectors to %d\n", _spmd ? _ub_comm->nvsize : 1);
-  fflush(stdout);
+  // Thread-safe resize of per-device vectors
   int num_devices = _spmd ? _ub_comm->nvsize : 1;
-  _per_device_ub_reg.resize(num_devices);
-  _per_device_ubuf.resize(num_devices);
+  static std::once_flag resize_ubuf_flag;
+  std::call_once(resize_ubuf_flag, [this, num_devices]() {
+    _per_device_ub_reg.resize(num_devices);
+    _per_device_ubuf.resize(num_devices);
+    _per_device_ubufs.resize(num_devices);
+    printf("[DEBUG] P2P: Resized per-device vectors to %d (thread-safe)\n", num_devices);
+    fflush(stdout);
+  });
 
   // Register buffer for current device only (runtime per-thread)
   void *buf_ptr;
@@ -1008,7 +1020,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   _per_device_ub_reg[device_idx] = register_user_buffer_collective(&buf_ptr, buffer_bytes, _ub_comm, true, _spmd);
   _per_device_ubuf[device_idx] = std::move(TensorWrapper(
       buf_ptr,
-      std::vector<size_t>{buffer_shape[0] / _tp_size * _num_ubuf_chunks, buffer_shape[1]},
+      std::vector<size_t>{buffer_shape[0] / _tp_size * num_ubuf_chunks, buffer_shape[1]},
       buffer_dtype));
 
   printf("[DEBUG] P2P: Runtime registered buffer for device %d (handle=%d, ptr=%p)\n",
@@ -1023,22 +1035,19 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   fflush(stdout);
 
 
-  printf("[DEBUG] P2P: Creating tensor chunks (_num_ubuf_chunks=%d)...\n", _num_ubuf_chunks);
+  printf("[DEBUG] P2P: Creating tensor chunks (num_ubuf_chunks=%d)...\n", num_ubuf_chunks);
   fflush(stdout);
 
-  // Initialize per-device ubufs vector
-  _per_device_ubufs.resize(num_devices);
-
-  // Create tensor chunks for current device
+  // Create tensor chunks for current device (vectors already resized above)
   char *ubuf_byte_ptr = reinterpret_cast<char *>(get_current_ubuf().dptr());
-  for (int i = 0; i < _num_ubuf_chunks; i++) {
+  for (int i = 0; i < num_ubuf_chunks; i++) {
     _per_device_ubufs[device_idx].push_back(TensorWrapper(reinterpret_cast<void *>(ubuf_byte_ptr),
                                    std::vector<size_t>{buffer_shape[0] / _tp_size, buffer_shape[1]},
                                    buffer_dtype));
     ubuf_byte_ptr += buffer_chunk_bytes;
   }
 
-  printf("[DEBUG] P2P: Created %d tensor chunks for device %d\n", _num_ubuf_chunks, device_idx);
+  printf("[DEBUG] P2P: Created %d tensor chunks for device %d\n", num_ubuf_chunks, device_idx);
   fflush(stdout);
 
   printf("[DEBUG] P2P: Computing rank topology (_rank=%d, _tp_size=%d)...\n", get_rank(), _tp_size);
@@ -1097,11 +1106,17 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     fflush(stdout);
   }
 
-  // Initialize per-device vectors
-  _per_device_stream_send.resize(_ub_comm->nvsize);
-  _per_device_stream_recv.resize(_ub_comm->nvsize);
-  _per_device_stop_send.resize(_ub_comm->nvsize);
-  _per_device_stop_recv.resize(_ub_comm->nvsize);
+  // Thread-safe resize of per-device stream vectors
+  static std::once_flag resize_streams_flag;
+  std::call_once(resize_streams_flag, [this]() {
+    int nvsize = _ub_comm->nvsize;
+    _per_device_stream_send.resize(nvsize);
+    _per_device_stream_recv.resize(nvsize);
+    _per_device_stop_send.resize(nvsize);
+    _per_device_stop_recv.resize(nvsize);
+    printf("[DEBUG] P2P: Resized per-device stream vectors to %d (thread-safe)\n", nvsize);
+    fflush(stdout);
+  });
 
   // Create streams for current device only
   for (int i = 0; i < get_current_stream_compute().size(); i++) {
