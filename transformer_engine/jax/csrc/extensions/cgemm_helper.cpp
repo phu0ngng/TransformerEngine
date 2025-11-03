@@ -170,8 +170,7 @@ void CommunicatorHandler::init(int num_total_devices, int num_devices_per_proces
   // Bootstrap UB via creating a dummy CommOverlapP2PBase object
   auto _ = CollectiveGemmPlanRegistry::getInstance().get_executor(
     std::vector<size_t>{}, DType::kBFloat16,
-    JAXX_Collective_Op::ALL_GATHER,
-  );
+    JAXX_Collective_Op::ALL_GATHER);
 }
 
 void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_process, int process_id,
@@ -234,7 +233,9 @@ std::shared_ptr<CommOverlapP2PBase> CollectiveGemmPlanRegistry::get_executor(std
     auto executor = std::make_shared<CommOverlapP2PBase>(
         comm_handler.get_global_rank(), comm_handler.num_total_devices,
         comm_handler.get_local_device_id_within_tp_domain(), comm_handler.tp_size,
-        comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size, comm_handler.allgather_func, comm_handler.barrier_func);
+        comm_handler.get_tp_domain_id(), comm_handler.get_tp_num_domains(), comm_handler.tp_size,
+        comm_handler.allgather_func, comm_handler.barrier_func,
+        comm_handler.num_devices_per_process > 1 /*is_spmd*/);
 
     entry_ptr->executor_ptr = executor;
   });
@@ -245,8 +246,7 @@ std::shared_ptr<CommOverlapP2PBase> CollectiveGemmPlanRegistry::get_executor(std
         buffer_shape, dtype, get_nvte_collective_op(collective_op), cgemm_config.num_max_streams,
         1 /*comm_cga_size*/, cgemm_config.gemm_priority, cgemm_config.comm_priority,
         cgemm_config.num_comm_sm, true /*set_sm_margin*/, cgemm_config.use_ce,
-        false /*atomic_gemm*/, cgemm_config.aggregate_ag, 
-        comm_handler.num_devices_per_process > 1 /*is_spmd*/);
+        false /*atomic_gemm*/, cgemm_config.aggregate_ag);
   }
 
   return entry_ptr->executor_ptr;
