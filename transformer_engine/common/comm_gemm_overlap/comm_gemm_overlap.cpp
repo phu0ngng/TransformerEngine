@@ -1027,6 +1027,11 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
       printf("[DEBUG] P2P Barrier: Device %d passed barrier\n", device_idx);
       fflush(stdout);
     }
+    
+    // Synchronize to flush any pending errors after barrier
+    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+    printf("[DEBUG] P2P Barrier: Device %d sync after barrier completed\n", device_idx);
+    fflush(stdout);
   }
   
   printf("[DEBUG] P2P initialize done: device=%d, rank=%d, tp_id=%d, next=%d, prev=%d\n",
@@ -1118,8 +1123,12 @@ void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapp
   NVTE_CHECK_CUDA(cudaMemcpyAsync(dst_ptr, src_ptr, source_size * element_size,
                                   cudaMemcpyDeviceToDevice, stream));
 
-  // printf("[DEBUG] copy_into_buffer: cudaMemcpyAsync completed successfully\n");
-  // fflush(stdout);
+  // Synchronize to catch any async errors immediately in SPMD mode
+  if (_spmd) {
+    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+    printf("[DEBUG] copy_into_buffer SPMD: Sync after copy, device=%d\n", current_device);
+    fflush(stdout);
+  }
 }
 
 TensorWrapper CommOverlapP2PBase::get_buffer_chunk_by_id(const TensorWrapper &source,
