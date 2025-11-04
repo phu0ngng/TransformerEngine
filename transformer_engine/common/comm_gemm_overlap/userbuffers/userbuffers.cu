@@ -2341,18 +2341,28 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     int arg5 = signalonly ? 0 : bytes / 16;
     
     int current_send_id = comm->get_current_send_id()[peer];
-    printf("[DEBUG] userbuffers_send: myrank=%d, peer=%d, send_id=%d->%d, flagptr=%p, srcptr=%p, dstptr=%p, bytes=%zu\n",
-           comm->get_current_myrank(), peer, current_send_id, current_send_id + 1, flagptr, srcptr, dstptr, bytes);
+    printf("[DEBUG] userbuffers_send: myrank=%d, peer=%d, send_id=%d->%d, flagptr=%p, srcptr=%p, dstptr=%p, bytes=%zu, arg5=%d\n",
+           comm->get_current_myrank(), peer, current_send_id, current_send_id + 1, flagptr, srcptr, dstptr, bytes, arg5);
     fflush(stdout);
+    
+    // Validate pointers before launch
+    if (!srcptr || !dstptr || !flagptr) {
+      printf("[ERROR] userbuffers_send: NULL pointer detected! srcptr=%p, dstptr=%p, flagptr=%p\n",
+             srcptr, dstptr, flagptr);
+      fflush(stdout);
+      return;
+    }
     
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
                           reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
                           reinterpret_cast<void *>(&arg5)};
-    NVTE_CHECK_CUDA(
-        cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsend), kernelArgs));
     
-    printf("[DEBUG] userbuffers_send: Kernel launched successfully\n");
-    fflush(stdout);
+    cudaError_t launch_err = cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsend), kernelArgs);
+    if (launch_err != cudaSuccess) {
+      printf("[ERROR] userbuffers_send: Kernel launch failed with error: %s\n", cudaGetErrorString(launch_err));
+      fflush(stdout);
+    }
+    NVTE_CHECK_CUDA(launch_err);
   }
 }
 
