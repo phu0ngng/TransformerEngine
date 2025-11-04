@@ -2309,6 +2309,10 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
                       const int peer, cudaStream_t stream) {
   int peerlocal = peer % comm->nvsize;
   void *flagptr = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 0);
+  
+  printf("[DEBUG] userbuffers_send: myrank=%d->peer=%d, peer_ptr[0][%d]=%p, flagptr=%p\n",
+         comm->get_current_myrank(), peer, peerlocal, comm->peer_ptr[0][peerlocal], flagptr);
+  fflush(stdout);
   // void *ce_send_start_ptr = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 1);
   // void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 2);
   bool signalonly = (bytes / 16 == 0) || (comm->use_ce != 0);
