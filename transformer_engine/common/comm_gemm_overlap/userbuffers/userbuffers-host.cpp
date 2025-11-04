@@ -837,44 +837,28 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
   if (spmd) {
     // SPMD runtime mode: Single device allocation (called per-thread at runtime)
-    printf("[DEBUG] SPMD runtime register_user_buffer_collective: Current device buffer allocation\n");
-    fflush(stdout);
-
     int current_device;
     NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-    int device_idx = comm->get_current_nvrank();  // Get device index in SPMD mode
-    printf("[DEBUG] SPMD runtime: Operating on device %d (device_idx=%d)\n", current_device, device_idx);
-    fflush(stdout);
+    int device_idx = comm->get_current_nvrank();
 
     if (alloc) {
-      printf("[DEBUG] SPMD runtime: cudaMalloc on device %d (%zu bytes)...\n", current_device, bytes);
-      fflush(stdout);
-
       NVTE_CHECK_CUDA(cudaMalloc(gpubuff, bytes));
       NVTE_CHECK_CUDA(cudaMemset(*gpubuff, 0, bytes));
-
-      printf("[DEBUG] SPMD runtime: Allocated buffer at %p on device %d\n", *gpubuff, current_device);
-      fflush(stdout);
     }
 
     // Set mem_ptr for current device
     comm->per_device_mem_ptr[hndl][device_idx] = *gpubuff;
 
-    // Set peer pointer in shared 2D peer_ptr array (visible to all threads)
+    // Set peer pointer in shared peer_ptr array (visible to all threads)
     int my_idx = comm->get_current_nvrank();
     comm->peer_ptr[hndl][my_idx] = *gpubuff;
 
-    printf("[DEBUG] SPMD runtime: Set per_device_mem_ptr[%d][%d]=%p\n", hndl, device_idx, *gpubuff);
-    printf("[DEBUG] SPMD runtime: Set shared peer_ptr[%d][%d]=%p (visible to all devices)\n", hndl, my_idx, *gpubuff);
+    printf("[DEBUG] SPMD register_ub: dev=%d, hndl=%d, ptr=%p, peer_ptr[%d][%d] set\n",
+           current_device, hndl, *gpubuff, hndl, my_idx);
     fflush(stdout);
 
-    // Set memory flags and increment region
+    // Set memory flags
     comm->memflags[hndl] = NVTE_UB_MEM_ALLOCATED;
-
-    // Note: Don't increment free_region here as it's shared across threads
-    // Return current handle
-    printf("[DEBUG] SPMD runtime: register_user_buffer_collective completed for handle %d\n", hndl);
-    fflush(stdout);
 
     return hndl;
   }

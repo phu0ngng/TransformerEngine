@@ -240,8 +240,6 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
   // Get current device (set by XLA at runtime)
   int current_device;
   NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-  printf("[DEBUG] CommOverlapCore::initialize: current_device=%d (set by XLA)\n", current_device);
-  fflush(stdout);
 
   // Thread-safe initialization of per-device vectors (instance-level, once per executor)
   int num_devices = _spmd ? _ub_comm->nvsize : 1;
@@ -256,8 +254,6 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     if (atomic_gemm) {
       _per_device_counter.resize(num_devices);
     }
-    printf("[DEBUG] Resized per-device vectors to %d devices (thread-safe, instance-level)\n", num_devices);
-    fflush(stdout);
   });
 
   // Create streams for current device only
@@ -268,48 +264,20 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     _per_device_stream_compute[device_idx].push_back(std::move(stream));
   }
 
-  printf("[DEBUG] Created %d compute streams for device %d\n",
-         static_cast<int>(_per_device_stream_compute[device_idx].size()), current_device);
-  fflush(stdout);
-
   _num_splits = num_splits;
   _tp_size = tp_size;
 
   // Get device-aware rank and TP ID in single call
   std::tie(_rank, _tp_id) = get_device_aware_rank_and_tp_id();
 
-  printf("[DEBUG] CommOverlapCore: _rank=%d, _tp_size=%d, _tp_id=%d (device-aware)\n",
-         _rank, _tp_size, _tp_id);
-  fflush(stdout);
-
-  printf("[DEBUG] CommOverlapCore: Checking per-device vectors...\n");
-  printf("[DEBUG] _per_device_ub_reg.size()=%zu, _per_device_ubuf.size()=%zu\n",
-         _per_device_ub_reg.size(), _per_device_ubuf.size());
-  if (!_per_device_ub_reg.empty()) {
-    printf("[DEBUG] _per_device_ub_reg[0]=%d\n", _per_device_ub_reg[0]);
-  }
-  if (!_per_device_ubuf.empty()) {
-    printf("[DEBUG] _per_device_ubuf[0].dptr()=%p\n", _per_device_ubuf[0].dptr());
-  }
-  fflush(stdout);
-
-  printf("[DEBUG] About to get SM count...\n");
-  fflush(stdout);
-
   // Set the number of SMs for GEMM with margin
   int sm_count = transformer_engine::cuda::sm_count();
-
-  printf("[DEBUG] SM count retrieved: %d\n", sm_count);
-  fflush(stdout);
   _math_sms = (set_sm_margin) ? sm_count - num_comm_sm : sm_count;
   _math_sms -= transformer_engine::getenv<int>("NVTE_EXT_MARGIN_SM", 0);
 
   _atomic_gemm = atomic_gemm;
   if (_atomic_gemm) {
-    printf("[DEBUG] Allocating counter for current device...\n");
-    fflush(stdout);
-
-    // Allocate counter for current device only (vectors already resized above)
+    // Allocate counter for current device only
     void *counter_ptr;
     size_t counter_bytes = _num_splits * 2 * sizeof(int32_t);
     NVTE_CHECK_CUDA(cudaMalloc(&counter_ptr, counter_bytes));
@@ -317,13 +285,9 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     NVTE_CHECK_CUDA(cudaMemset(counter_ptr, 1, counter_bytes / 2));
     _per_device_counter[device_idx] = TensorWrapper(counter_ptr,
         std::vector<size_t>{static_cast<size_t>(_num_splits * 2)}, DType::kInt32);
-
-    printf("[DEBUG] Allocated counter for device %d\n", current_device);
-    fflush(stdout);
   }
-
-  // Create resources for current device only (no device switching, vectors already resized above)
-  // Create communication stream
+  
+  // Create resources for current device only
   NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&_per_device_stream_comm[device_idx], cudaStreamNonBlocking, _comm_priority));
 
   // Create events
@@ -332,9 +296,6 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_start_comm[device_idx], 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_stop_comm[device_idx], 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_comm_launch_event[device_idx], cudaEventDisableTiming));
-
-  printf("[DEBUG] Created CUDA stream and events for device %d (no context switch)\n", current_device);
-  fflush(stdout);
 
   /*
     Defining the launcher order between the communication and GEMM kernels
@@ -947,27 +908,15 @@ void CommOverlapP2PBase::buffer_and_stream_initialize(
 
 void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
                                     CommOverlapType comm_type, bool aggregate) {
-  printf("[DEBUG] CommOverlapP2PBase::initialize started\n");
-  fflush(stdout);
-
   // Initialize shared state once per executor instance (thread-safe)
   std::call_once(_shared_state_flag, [this, comm_type, aggregate]() {
     _is_p2p = true;
     _is_reduce_scatter = comm_type == CommOverlapType::RS;
     _aggregate = aggregate;
-
-    printf("[DEBUG] P2P: Initialized shared state - _is_reduce_scatter=%d, _aggregate=%d (instance-level)\n",
-           _is_reduce_scatter, _aggregate);
-    fflush(stdout);
   });
 
   // Create workspace tensor with userbuffer
   NVTE_CHECK(buffer_shape.size() == 2, "Userbuffer shape must be 2-dimensional!");
-
-  printf("[DEBUG] P2P: Buffer shape validated: [%zu, %zu], dtype=%d, element_size=%zu\n",
-         buffer_shape[0], buffer_shape[1], static_cast<int>(buffer_dtype),
-         typeToSize(buffer_dtype));
-  fflush(stdout);
   size_t buffer_bytes = get_buffer_size_bytes(buffer_shape[0], buffer_shape[1], buffer_dtype);
   int buffer_chunk_bytes = buffer_bytes / _tp_size;
 
@@ -983,18 +932,10 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   // Set member variable once per executor instance (thread-safe)
   std::call_once(_num_chunks_flag, [this, num_ubuf_chunks]() {
     _num_ubuf_chunks = num_ubuf_chunks;
-    printf("[DEBUG] P2P: Set _num_ubuf_chunks=%d (thread-safe, instance-level)\n", _num_ubuf_chunks);
-    fflush(stdout);
   });
-
-  printf("[DEBUG] P2P: Runtime initialization - registering buffer for current device...\n");
-  fflush(stdout);
 
   // Runtime: Each device thread registers its own buffer
   int device_idx = get_device_index();
-
-  printf("[DEBUG] P2P: device_idx=%d, current device context\n", device_idx);
-  fflush(stdout);
 
   // Thread-safe resize of per-device vectors (instance-level)
   int num_devices = _spmd ? _ub_comm->nvsize : 1;
@@ -1002,14 +943,10 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     _per_device_ub_reg.resize(num_devices);
     _per_device_ubuf.resize(num_devices);
     _per_device_ubufs.resize(num_devices);
-    printf("[DEBUG] P2P: Resized per-device vectors to %d (thread-safe, instance-level)\n", num_devices);
-    fflush(stdout);
   });
 
   // Register buffer for current device only (runtime per-thread)
   void *buf_ptr;
-  printf("[DEBUG] P2P: Calling register_user_buffer_collective with spmd=%d\n", _spmd);
-  fflush(stdout);
 
   _per_device_ub_reg[device_idx] = register_user_buffer_collective(&buf_ptr, buffer_bytes, _ub_comm, true, _spmd);
   _per_device_ubuf[device_idx] = std::move(TensorWrapper(
@@ -1017,22 +954,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
       std::vector<size_t>{buffer_shape[0] / _tp_size * num_ubuf_chunks, buffer_shape[1]},
       buffer_dtype));
 
-  printf("[DEBUG] P2P: Runtime registered buffer for device %d (handle=%d, ptr=%p)\n",
-         device_idx, _per_device_ub_reg[device_idx], buf_ptr);
-  fflush(stdout);
-
-  printf("[DEBUG] P2P: Using device index %d buffer (handle %d) at %p\n",
-         device_idx, _per_device_ub_reg[device_idx], buf_ptr);
-  fflush(stdout);
-
-  printf("[DEBUG] P2P: Updating buffer with P2P-specific shape...\n");
-  fflush(stdout);
-
-
-  printf("[DEBUG] P2P: Creating tensor chunks (num_ubuf_chunks=%d)...\n", num_ubuf_chunks);
-  fflush(stdout);
-
-  // Create tensor chunks for current device (vectors already resized above)
+  // Create tensor chunks for current device
   char *ubuf_byte_ptr = reinterpret_cast<char *>(get_current_ubuf().dptr());
   for (int i = 0; i < num_ubuf_chunks; i++) {
     _per_device_ubufs[device_idx].push_back(TensorWrapper(reinterpret_cast<void *>(ubuf_byte_ptr),
@@ -1041,55 +963,21 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     ubuf_byte_ptr += buffer_chunk_bytes;
   }
 
-  printf("[DEBUG] P2P: Created %d tensor chunks for device %d\n", num_ubuf_chunks, device_idx);
-  fflush(stdout);
-
-  printf("[DEBUG] P2P: Rank topology will be calculated dynamically per device\n");
-  fflush(stdout);
-
   _self_chunk_id = get_tp_id();
 
-  printf("[DEBUG] P2P: self_chunk_id=%d\n", _self_chunk_id);
-  fflush(stdout);
   if (_atomic_gemm && !_is_reduce_scatter) {
-    printf("[DEBUG] P2P: Entering atomic_gemm block (_atomic_gemm=%d, _is_reduce_scatter=%d)\n",
-           _atomic_gemm, _is_reduce_scatter);
-    fflush(stdout);
-
-    printf("[DEBUG] P2P: Getting env NVTE_AG_P2P_MULTI_ATOMIC...\n");
-    fflush(stdout);
-
     _use_multiatomic_ag = getenv<bool>("NVTE_AG_P2P_MULTI_ATOMIC");
 
-    printf("[DEBUG] P2P: _use_multiatomic_ag=%d\n", _use_multiatomic_ag);
-    fflush(stdout);
-
     if (_use_multiatomic_ag) {
-      printf("[DEBUG] P2P: Setting up multiatomic AG...\n");
-      fflush(stdout);
-
       _use_ce = 0;
       _ub_comm->push = 1;
       if (_rank == 0) {
         printf("!!userbuffers_sendrecv_multi_atomic_shuffle\n");
       }
-
-      printf("[DEBUG] P2P: Multiatomic AG setup done\n");
-      fflush(stdout);
     }
 
-    printf("[DEBUG] P2P: Setting _self_chunk_id to 0...\n");
-    fflush(stdout);
-
     _self_chunk_id = 0;
-
-    printf("[DEBUG] P2P: About to memset counter (ptr=%p)...\n", get_current_counter().dptr());
-    fflush(stdout);
-
     NVTE_CHECK_CUDA(cudaMemset(get_current_counter().dptr(), 0, sizeof(int32_t)));
-
-    printf("[DEBUG] P2P: Memset counter completed\n");
-    fflush(stdout);
   }
 
   // Thread-safe resize of per-device stream vectors (instance-level)
@@ -1099,8 +987,6 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     _per_device_stream_recv.resize(nvsize);
     _per_device_stop_send.resize(nvsize);
     _per_device_stop_recv.resize(nvsize);
-    printf("[DEBUG] P2P: Resized per-device stream vectors to %d (thread-safe, instance-level)\n", nvsize);
-    fflush(stdout);
   });
 
   // Create streams for current device only
@@ -1108,29 +994,19 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     cudaStream_t stream;
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
     get_current_stream_send().push_back(std::move(stream));
-    printf("[DEBUG] P2P: Created send stream %d for device %d\n", i, device_idx);
-    fflush(stdout);
   }
-
-  printf("[DEBUG] P2P: Creating recv stream for device %d...\n", device_idx);
-  fflush(stdout);
 
   NVTE_CHECK_CUDA(
       cudaStreamCreateWithPriority(&_per_device_stream_recv[device_idx], cudaStreamNonBlocking, _comm_priority));
 
-  printf("[DEBUG] P2P: Creating send/recv events for device %d...\n", device_idx);
-  fflush(stdout);
-
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_stop_send[device_idx], 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_stop_recv[device_idx], 0));
 
-  printf("[DEBUG] P2P: CommOverlapP2PBase::initialize completed successfully\n");
-  fflush(stdout);
-
-  printf("[DEBUG] P2P: All initialization steps completed successfully\n");
-  fflush(stdout);
-
   cudaDeviceSynchronize();
+  
+  printf("[DEBUG] P2P initialize: device=%d, rank=%d, tp_id=%d, next_rank=%d, prev_rank=%d\n",
+         device_idx, get_rank(), get_tp_id(), get_next_rank(), get_prev_rank());
+  fflush(stdout);
 }
 
 CommOverlapP2PBase::~CommOverlapP2PBase() {

@@ -2323,32 +2323,8 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
   } else {
     void *mem_ptr_base = comm->get_current_mem_ptr(srchandler);
     void *srcptr = reinterpret_cast<char *>(mem_ptr_base) + srcoffset;
-
-    printf("[DEBUG] userbuffers_send: Accessing peer_ptr[%d][%d]\n", dsthandler, peerlocal);
-    printf("[DEBUG] userbuffers_send: peer_ptr[%d].size()=%zu\n", dsthandler, comm->peer_ptr[dsthandler].size());
-    fflush(stdout);
-    
     void *peer_buf = comm->peer_ptr[dsthandler][peerlocal];
     void *dstptr = reinterpret_cast<char *>(peer_buf) + dstoffset;
-    
-    printf("[DEBUG] userbuffers_send: srchandler=%d, dsthandler=%d, peer=%d, peerlocal=%d\n",
-           srchandler, dsthandler, peer, peerlocal);
-    printf("[DEBUG] userbuffers_send: mem_ptr_base=%p, srcptr=%p, peer_buf=%p, dstptr=%p, bytes=%zu\n",
-           mem_ptr_base, srcptr, peer_buf, dstptr, bytes);
-    
-    if (!peer_buf || peer_buf == nullptr) {
-      printf("[ERROR] userbuffers_send: peer_buf is NULL for peer %d!\n", peerlocal);
-      fflush(stdout);
-      return;
-    }
-    
-    fflush(stdout);
-
-    if (!srcptr || !dstptr) {
-      printf("[ERROR] userbuffers_send: NULL pointer! srcptr=%p, dstptr=%p\n", srcptr, dstptr);
-      fflush(stdout);
-      return;
-    }
 
     if (comm->use_ce) {
       // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
@@ -2359,6 +2335,12 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     int *arg1 = &comm->get_current_send_id()[peer], *arg2 = reinterpret_cast<int *>(flagptr);
     int4 *arg3 = reinterpret_cast<int4 *>(srcptr), *arg4 = reinterpret_cast<int4 *>(dstptr);
     int arg5 = signalonly ? 0 : bytes / 16;
+    
+    int current_send_id = comm->get_current_send_id()[peer];
+    printf("[DEBUG] userbuffers_send: myrank=%d, peer=%d, current_send_id=%d (will increment to %d), flagptr=%p\n",
+           comm->get_current_myrank(), peer, current_send_id, current_send_id + 1, flagptr);
+    fflush(stdout);
+    
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
                           reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
                           reinterpret_cast<void *>(&arg5)};
