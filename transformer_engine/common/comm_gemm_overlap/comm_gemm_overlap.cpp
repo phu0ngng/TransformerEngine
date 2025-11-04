@@ -10,6 +10,7 @@
 
 #include <cassert>
 #include <numeric>
+#include <thread>
 
 #include "common/common.h"
 #include "common/util/cuda_driver.h"
@@ -1003,17 +1004,17 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_stop_recv[device_idx], 0));
 
   cudaDeviceSynchronize();
-  
+
   // In SPMD mode, barrier to ensure ALL devices finish before ANY proceeds
   if (_spmd) {
     int count = _init_barrier_count.fetch_add(1, std::memory_order_acq_rel) + 1;
     printf("[DEBUG] P2P Barrier: Device %d reached barrier, count=%d/%d\n", device_idx, count, _ub_comm->nvsize);
     fflush(stdout);
-    
+
     if (count == _ub_comm->nvsize) {
       // Last device: increment free_region and release barrier
       _ub_comm->free_region++;
-      printf("[DEBUG] P2P Barrier: Last device (%d), free_region=%d, releasing barrier\n", 
+      printf("[DEBUG] P2P Barrier: Last device (%d), free_region=%d, releasing barrier\n",
              device_idx, _ub_comm->free_region);
       fflush(stdout);
       _init_barrier_done.store(true, std::memory_order_release);
@@ -1028,7 +1029,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
       fflush(stdout);
     }
   }
-  
+
   printf("[DEBUG] P2P initialize done: device=%d, rank=%d, tp_id=%d, next=%d, prev=%d\n",
          device_idx, get_rank(), get_tp_id(), get_next_rank(), get_prev_rank());
   fflush(stdout);
