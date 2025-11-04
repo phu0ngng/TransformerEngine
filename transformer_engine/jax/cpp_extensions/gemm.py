@@ -199,7 +199,7 @@ def collective_gemm_bootstrap(
     compute_stream_priority=0,
     communication_stream_priority=0,
     num_sm_for_communication=2,
-    use_ce=False,
+    use_ce=True,
     aggregate_all_gather=False,
 ):
     """Initialize NCCL communicators for Collective GEMM operations.
