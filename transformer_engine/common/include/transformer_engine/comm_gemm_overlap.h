@@ -103,6 +103,21 @@ class CommOverlapCore {
   int get_tp_id() {
     return _spmd ? get_device_aware_rank_and_tp_id().second : _tp_id;
   }
+  
+  // Helper to get rank_round_tp (calculated dynamically)
+  int get_rank_round_tp() {
+    return (get_rank() / _tp_size) * _tp_size;
+  }
+  
+  // Helper to get next_rank (calculated dynamically)
+  int get_next_rank() {
+    return (_tp_size + get_rank() + 1) % _tp_size + get_rank_round_tp();
+  }
+  
+  // Helper to get prev_rank (calculated dynamically)
+  int get_prev_rank() {
+    return (_tp_size + get_rank() - 1) % _tp_size + get_rank_round_tp();
+  }
 
  protected:
 
@@ -276,9 +291,6 @@ class CommOverlapP2PBase : public CommOverlapCore {
   bool _is_reduce_scatter{false};
   bool _use_multiatomic_ag{false};
   bool _aggregate;
-  int _next_rank;
-  int _prev_rank;
-  int _rank_round_tp;
   int _num_ubuf_chunks;
   int _self_chunk_id;
   std::vector<std::vector<TensorWrapper>> _per_device_ubufs;  // [device][chunk] - per-device chunks
