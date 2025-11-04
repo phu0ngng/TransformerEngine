@@ -1004,6 +1004,16 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
 
   cudaDeviceSynchronize();
   
+  // In SPMD mode, increment free_region once after all devices have registered
+  // All devices use the same handle/region, so only increment once per executor
+  if (_spmd) {
+    std::call_once(_increment_region_flag, [this]() {
+      _ub_comm->free_region++;
+      printf("[DEBUG] P2P: Incremented free_region to %d (once per executor)\n", _ub_comm->free_region);
+      fflush(stdout);
+    });
+  }
+  
   printf("[DEBUG] P2P initialize: device=%d, rank=%d, tp_id=%d, next_rank=%d, prev_rank=%d\n",
          device_idx, get_rank(), get_tp_id(), get_next_rank(), get_prev_rank());
   fflush(stdout);
