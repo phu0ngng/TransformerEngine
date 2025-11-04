@@ -2352,23 +2352,29 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     printf("[DEBUG] userbuffers_send: Pointers calculated - srcptr=%p, dstptr=%p\n", srcptr, dstptr);
     fflush(stdout);
     
-    // In SPMD mode, verify P2P access is enabled before peer memory operations
-    if (comm->is_spmd && peerlocal != comm->get_current_nvrank()) {
-      int current_dev, peer_dev;
+    // In SPMD mode, use cudaMemcpyPeerAsync for explicit device-to-device copy
+    // This avoids issues with system-wide atomics to peer memory
+    if (comm->is_spmd) {
+      int current_dev;
       NVTE_CHECK_CUDA(cudaGetDevice(&current_dev));
-      peer_dev = peerlocal;  // In SPMD, peerlocal is the device ID
+      int peer_dev = peerlocal;  // In SPMD, peerlocal is the device ID
       
-      int can_access;
-      cudaError_t peer_check = cudaDeviceCanAccessPeer(&can_access, current_dev, peer_dev);
-      if (peer_check != cudaSuccess || !can_access) {
-        printf("[ERROR] userbuffers_send: P2P not available from device %d to device %d (can_access=%d, err=%s)\n",
-               current_dev, peer_dev, can_access, cudaGetErrorString(peer_check));
-        fflush(stdout);
-        NVTE_ERROR("P2P access required but not available");
-      }
-      
-      printf("[DEBUG] userbuffers_send: P2P access verified: dev %d -> dev %d\n", current_dev, peer_dev);
+      printf("[DEBUG] userbuffers_send SPMD: Using cudaMemcpyPeerAsync from dev %d to dev %d\n", 
+             current_dev, peer_dev);
       fflush(stdout);
+      
+      // Use cudaMemcpyPeerAsync for data transfer
+      NVTE_CHECK_CUDA(cudaMemcpyPeerAsync(dstptr, peer_dev, srcptr, current_dev, bytes, stream));
+      
+      // Increment send counter locally
+      comm->get_current_send_id()[peer]++;
+      
+      printf("[DEBUG] userbuffers_send SPMD: Copy completed, send_id incremented to %d\n",
+             comm->get_current_send_id()[peer]);
+      fflush(stdout);
+      
+      // Early return - skip the atomic kernel launch for SPMD
+      return;
     }
 
     if (comm->use_ce) {
