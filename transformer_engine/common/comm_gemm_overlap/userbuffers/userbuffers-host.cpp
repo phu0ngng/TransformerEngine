@@ -836,7 +836,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
   comm->mem_dealloc[hndl] = alloc;
 
   if (spmd) {
-    // SPMD runtime mode: Single device allocation (called per-thread at runtime)
+    // SPMD runtime mode: All devices register to same region, each device sets its own entry
     int current_device;
     NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
     int device_idx = comm->get_current_nvrank();
@@ -860,6 +860,7 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
     // Set memory flags
     comm->memflags[hndl] = NVTE_UB_MEM_ALLOCATED;
 
+    // Return handle (all devices use same handle, free_region incremented at the end)
     return hndl;
   }
 

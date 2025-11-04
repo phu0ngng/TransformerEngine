@@ -304,6 +304,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
   std::once_flag _num_chunks_flag;
   std::once_flag _resize_ubuf_flag;
   std::once_flag _resize_streams_flag;
+  std::once_flag _increment_region_flag;
 
  private:
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
