@@ -13,6 +13,7 @@
 
 #include <functional>
 #include <mutex>
+#include <atomic>
 
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
@@ -305,6 +306,10 @@ class CommOverlapP2PBase : public CommOverlapCore {
   std::once_flag _resize_ubuf_flag;
   std::once_flag _resize_streams_flag;
   std::once_flag _increment_region_flag;
+  
+  // Instance-level barrier for SPMD multi-threading synchronization
+  std::atomic<int> _init_barrier_count{0};
+  std::atomic<bool> _init_barrier_done{false};
 
  private:
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
