@@ -274,7 +274,7 @@ void CommunicatorHandler::nccl_device_barrier_impl(ExtComm) {
 
   // For single process multiple devices, no barrier needed (all devices in same process)
   bool is_multi_device_per_process = (num_devices_per_process > 1 && num_devices_per_process == tp_size);
-  if (is_multi_device_per_process) return;
+  // if (is_multi_device_per_process) return;
 
   int device_idx = get_local_device_idx_for_current_device();
   ncclComm_t tp_comm = tp_comms[device_idx];
