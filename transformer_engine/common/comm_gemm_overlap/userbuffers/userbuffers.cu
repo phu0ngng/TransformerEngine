@@ -2320,15 +2320,37 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
   assert(INTRANODE(peer));
 
   if (!(comm->launch_mode & NVTE_LAUNCH_GPU)) return;
+  
+  printf("[DEBUG] userbuffers_send: After launch_mode check, push=%d\n", comm->push);
+  fflush(stdout);
+  
   if (comm->push == 0) {
     kuserbuffers_pullsend<<<1, 1, 0, stream>>>(comm->get_current_myrank(), peer, &(comm->get_current_send_id()[peer]),
                                                reinterpret_cast<int *>(flagptr));
     NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
+    printf("[DEBUG] userbuffers_send: Getting mem_ptr for srchandler=%d\n", srchandler);
+    fflush(stdout);
+    
     void *mem_ptr_base = comm->get_current_mem_ptr(srchandler);
+    
+    printf("[DEBUG] userbuffers_send: mem_ptr_base=%p, calculating srcptr with offset=%zu\n", mem_ptr_base, srcoffset);
+    fflush(stdout);
+    
     void *srcptr = reinterpret_cast<char *>(mem_ptr_base) + srcoffset;
+    
+    printf("[DEBUG] userbuffers_send: Getting peer_ptr[%d][%d]\n", dsthandler, peerlocal);
+    fflush(stdout);
+    
     void *peer_buf = comm->peer_ptr[dsthandler][peerlocal];
+    
+    printf("[DEBUG] userbuffers_send: peer_buf=%p, calculating dstptr with offset=%zu\n", peer_buf, dstoffset);
+    fflush(stdout);
+    
     void *dstptr = reinterpret_cast<char *>(peer_buf) + dstoffset;
+    
+    printf("[DEBUG] userbuffers_send: Pointers calculated - srcptr=%p, dstptr=%p\n", srcptr, dstptr);
+    fflush(stdout);
 
     if (comm->use_ce) {
       // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
