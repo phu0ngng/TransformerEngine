@@ -484,7 +484,41 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
 #define LOCALSIZE 4 * (NVTE_REG0_OFFSET(*comm) + NVTE_REG0_FLAGS + NVTE_REG0_COMMBUFFER * NBUF)
   // peer pointers + op flags + comm buffer
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-  register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, true, spmd);
+  
+  if (spmd) {
+    // SPMD: Allocate gpu_ptrs for all devices (handle 0)
+    printf("[DEBUG] SPMD Bootstrap: Allocating gpu_ptrs (region 0) for all %d devices\n", numlocal);
+    fflush(stdout);
+    
+    int original_device;
+    NVTE_CHECK_CUDA(cudaGetDevice(&original_device));
+    
+    for (int dev_idx = 0; dev_idx < numlocal; dev_idx++) {
+      NVTE_CHECK_CUDA(cudaSetDevice(dev_idx));
+      
+      void *dev_gpu_ptrs;
+      NVTE_CHECK_CUDA(cudaMalloc(&dev_gpu_ptrs, LOCALSIZE));
+      NVTE_CHECK_CUDA(cudaMemset(dev_gpu_ptrs, 0, LOCALSIZE));
+      
+      (*comm)->peer_ptr[0][dev_idx] = dev_gpu_ptrs;
+      (*comm)->per_device_mem_ptr[0][dev_idx] = dev_gpu_ptrs;
+      
+      printf("[DEBUG] SPMD Bootstrap: Device %d gpu_ptrs=%p, peer_ptr[0][%d] set\n",
+             dev_idx, dev_gpu_ptrs, dev_idx);
+      fflush(stdout);
+    }
+    
+    NVTE_CHECK_CUDA(cudaSetDevice(original_device));
+    (*comm)->gpu_ptrs = (*comm)->peer_ptr[0][0];  // For backward compat
+    (*comm)->memflags[0] = NVTE_UB_MEM_ALLOCATED;
+    (*comm)->free_region = 1;  // gpu_ptrs used region 0
+    
+    printf("[DEBUG] SPMD Bootstrap: All gpu_ptrs allocated, free_region=%d\n", (*comm)->free_region);
+    fflush(stdout);
+  } else {
+    // Non-SPMD: Single allocation
+    register_user_buffer_collective(&((*comm)->gpu_ptrs), LOCALSIZE, *comm, true, spmd);
+  }
 
   // Define GPU page constants before use
 #define GPU_PAGE_SHIFT 16
