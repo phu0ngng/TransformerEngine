@@ -2315,9 +2315,6 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
   int peerlocal = peer % comm->nvsize;
   void *flagptr = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 0);
 
-  printf("[DEBUG] userbuffers_send: myrank=%d->peer=%d, peer_ptr[0][%d]=%p, flagptr=%p\n",
-         comm->get_current_myrank(), peer, peerlocal, comm->peer_ptr[0][peerlocal], flagptr);
-  fflush(stdout);
   // void *ce_send_start_ptr = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 1);
   // void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 2);
   bool signalonly = (bytes / 16 == 0) || (comm->use_ce != 0);
@@ -2334,28 +2331,10 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
     //                                            reinterpret_cast<int *>(flagptr));
     // NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
-    printf("[DEBUG] userbuffers_send: Getting mem_ptr for srchandler=%d\n", srchandler);
-    fflush(stdout);
-
     void *mem_ptr_base = comm->get_current_mem_ptr(srchandler);
-
-    printf("[DEBUG] userbuffers_send: mem_ptr_base=%p, calculating srcptr with offset=%zu\n", mem_ptr_base, srcoffset);
-    fflush(stdout);
-
     void *srcptr = reinterpret_cast<char *>(mem_ptr_base) + srcoffset;
-
-    printf("[DEBUG] userbuffers_send: Getting peer_ptr[%d][%d]\n", dsthandler, peerlocal);
-    fflush(stdout);
-
     void *peer_buf = comm->peer_ptr[dsthandler][peerlocal];
-
-    printf("[DEBUG] userbuffers_send: peer_buf=%p, calculating dstptr with offset=%zu\n", peer_buf, dstoffset);
-    fflush(stdout);
-
     void *dstptr = reinterpret_cast<char *>(peer_buf) + dstoffset;
-
-    printf("[DEBUG] userbuffers_send: Pointers calculated - srcptr=%p, dstptr=%p\n", srcptr, dstptr);
-    fflush(stdout);
   //
   //   // In SPMD mode, use cudaMemcpyPeerAsync for explicit device-to-device copy
   //   // This avoids issues with system-wide atomics to peer memory
@@ -2363,17 +2342,17 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
       int current_dev = comm->get_current_mydev();
       int peer_dev = peerlocal;
 
-      // Copy data from current device to peer device  
+      // Copy data from current device to peer device
       NVTE_CHECK_CUDA(cudaMemcpyPeerAsync(dstptr, peer_dev, srcptr, current_dev, bytes, stream));
-      
+
       // Atomically increment the flag in peer device's memory to signal completion
       // Use regular atomicAdd (not atomicAdd_system) to avoid system-wide coherence issues
       kuserbuffers_increment_flag<<<1, 1, 0, stream>>>(reinterpret_cast<int*>(flagptr));
       NVTE_CHECK_CUDA(cudaGetLastError());
-      
-      printf("[DEBUG] userbuffers_send SPMD: dev %d->%d, bytes=%zu, flag incremented at %p\n",
-             current_dev, peer_dev, bytes, flagptr);
-      fflush(stdout);
+
+      // printf("[DEBUG] userbuffers_send SPMD: dev %d->%d, bytes=%zu, flag incremented at %p\n",
+      //        current_dev, peer_dev, bytes, flagptr);
+      // fflush(stdout);
 
       return;
     }

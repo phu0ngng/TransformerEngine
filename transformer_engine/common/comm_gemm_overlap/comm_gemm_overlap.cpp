@@ -84,9 +84,9 @@ std::pair<int, int> CommOverlapCore::get_device_aware_rank_and_tp_id() {
     int current_device;
     NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
 
-    NVTE_CHECK(current_device >= 0 && current_device < static_cast<int>(_ub_comm->device_to_tp_rank.size()),
-               "SPMD: Current device ", current_device, " is out of range [0, ", _ub_comm->device_to_tp_rank.size(), ")");
-
+    // NVTE_CHECK(current_device >= 0 && current_device < static_cast<int>(_ub_comm->device_to_tp_rank.size()),
+    //            "SPMD: Current device ", current_device, " is out of range [0, ", _ub_comm->device_to_tp_rank.size(), ")");
+    //
     int rank = current_device;  // Global rank = device ID
     int tp_id = _ub_comm->device_to_tp_rank[current_device];  // TP rank within TP domain
 
@@ -301,7 +301,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
   cudaDeviceProp deviceProp;
   NVTE_CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, 0));
   // comm_launch_event is now created per-device in the loop above
-  printf("[DEBUG] CommOverlapCore::initialize completed\n");
+  // printf("[DEBUG] CommOverlapCore::initialize completed\n");
   fflush(stdout);
 }
 
@@ -487,8 +487,8 @@ void CommOverlapBase::initialize(const std::vector<size_t> &buffer_shape, DType 
   NVTE_CHECK(!_spmd, "Unsupported!");
   if (_spmd) {
     // SPMD mode: Register buffers for all devices
-    printf("[DEBUG] SPMD: Registering buffers for all devices in CommOverlapCore\n");
-    fflush(stdout);
+    // printf("[DEBUG] SPMD: Registering buffers for all devices in CommOverlapCore\n");
+    // fflush(stdout);
 
     _per_device_ub_reg.resize(_ub_comm->nvsize);
     _per_device_ubuf.resize(_ub_comm->nvsize);
@@ -504,16 +504,16 @@ void CommOverlapBase::initialize(const std::vector<size_t> &buffer_shape, DType 
       _per_device_ub_reg[dev_idx] = register_user_buffer_collective(&buffer_ptr, buffer_bytes, _ub_comm, true, true);
       _per_device_ubuf[dev_idx] = std::move(TensorWrapper(buffer_ptr, buffer_shape, buffer_dtype));
 
-      printf("[DEBUG] SPMD: Device %d registered UBuf handle %d at %p\n",
-             dev_idx, _per_device_ub_reg[dev_idx], buffer_ptr);
-      fflush(stdout);
+      // printf("[DEBUG] SPMD: Device %d registered UBuf handle %d at %p\n",
+      //        dev_idx, _per_device_ub_reg[dev_idx], buffer_ptr);
+      // fflush(stdout);
     }
 
     // Restore original device
     NVTE_CHECK_CUDA(cudaSetDevice(original_device));
 
-    printf("[DEBUG] SPMD: All device buffers registered successfully\n");
-    fflush(stdout);
+    // printf("[DEBUG] SPMD: All device buffers registered successfully\n");
+    // fflush(stdout);
   } else {
     // Multi-process mode: Single buffer registration (vector size = 1)
     _per_device_ub_reg.resize(1);
@@ -999,36 +999,36 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   // In SPMD mode, barrier to ensure ALL devices finish before ANY proceeds
   if (_spmd) {
     int count = _init_barrier_count.fetch_add(1, std::memory_order_acq_rel) + 1;
-    printf("[DEBUG] P2P Barrier: Device %d reached barrier, count=%d/%d\n", device_idx, count, _ub_comm->nvsize);
-    fflush(stdout);
+    // printf("[DEBUG] P2P Barrier: Device %d reached barrier, count=%d/%d\n", device_idx, count, _ub_comm->nvsize);
+    // fflush(stdout);
 
     if (count == _ub_comm->nvsize) {
       // Last device: increment free_region and release barrier
       _ub_comm->free_region++;
-      printf("[DEBUG] P2P Barrier: Last device (%d), free_region=%d, releasing barrier\n",
-             device_idx, _ub_comm->free_region);
-      fflush(stdout);
+      // printf("[DEBUG] P2P Barrier: Last device (%d), free_region=%d, releasing barrier\n",
+      //        device_idx, _ub_comm->free_region);
+      // fflush(stdout);
       _init_barrier_done.store(true, std::memory_order_release);
     } else {
       // Wait for all devices to finish registration
-      printf("[DEBUG] P2P Barrier: Device %d waiting... (%d/%d ready)\n", device_idx, count, _ub_comm->nvsize);
-      fflush(stdout);
+      // printf("[DEBUG] P2P Barrier: Device %d waiting... (%d/%d ready)\n", device_idx, count, _ub_comm->nvsize);
+      // fflush(stdout);
       while (!_init_barrier_done.load(std::memory_order_acquire)) {
         std::this_thread::yield();
       }
-      printf("[DEBUG] P2P Barrier: Device %d passed barrier\n", device_idx);
-      fflush(stdout);
+      // printf("[DEBUG] P2P Barrier: Device %d passed barrier\n", device_idx);
+      // fflush(stdout);
     }
 
     // Synchronize to flush any pending errors after barrier
-    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-    printf("[DEBUG] P2P Barrier: Device %d sync after barrier completed\n", device_idx);
-    fflush(stdout);
+    // NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+    // printf("[DEBUG] P2P Barrier: Device %d sync after barrier completed\n", device_idx);
+    // fflush(stdout);
   }
 
-  printf("[DEBUG] P2P initialize done: device=%d, rank=%d, tp_id=%d, next=%d, prev=%d\n",
-         device_idx, get_rank(), get_tp_id(), get_next_rank(), get_prev_rank());
-  fflush(stdout);
+  // printf("[DEBUG] P2P initialize done: device=%d, rank=%d, tp_id=%d, next=%d, prev=%d\n",
+  //        device_idx, get_rank(), get_tp_id(), get_next_rank(), get_prev_rank());
+  // fflush(stdout);
 }
 
 CommOverlapP2PBase::~CommOverlapP2PBase() {
@@ -1116,11 +1116,11 @@ void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapp
                                   cudaMemcpyDeviceToDevice, stream));
 
   // Synchronize to catch any async errors immediately in SPMD mode
-  if (_spmd) {
-    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
-    printf("[DEBUG] copy_into_buffer SPMD: Sync after copy, device=%d\n", current_device);
-    fflush(stdout);
-  }
+  // if (_spmd) {
+  //   NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+  //   printf("[DEBUG] copy_into_buffer SPMD: Sync after copy, device=%d\n", current_device);
+  //   fflush(stdout);
+  // }
 }
 
 TensorWrapper CommOverlapP2PBase::get_buffer_chunk_by_id(const TensorWrapper &source,
@@ -1250,13 +1250,13 @@ void CommOverlapP2PBase::split_overlap_ag(const TensorWrapper &A, bool transa,
                                           bool use_split_accumulator, TensorWrapper &B_copy,
                                           cudaStream_t stream_main) {
   // Verify device context at function entry
-  int current_device;
-  NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-  printf("[DEBUG] split_overlap_ag: Entry - current_device=%d, _rank=%d, _tp_id=%d, _spmd=%d\n",
-         current_device, get_rank(), get_tp_id(), _spmd);
-  printf("[DEBUG] split_overlap_ag: CUDA resources - streams.size()=%zu, events.size()=%zu\n",
-         _per_device_stream_compute.size(), _per_device_start_compute.size());
-  fflush(stdout);
+  // int current_device;
+  // NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
+  // printf("[DEBUG] split_overlap_ag: Entry - current_device=%d, _rank=%d, _tp_id=%d, _spmd=%d\n",
+  //        current_device, get_rank(), get_tp_id(), _spmd);
+  // printf("[DEBUG] split_overlap_ag: CUDA resources - streams.size()=%zu, events.size()=%zu\n",
+  //        _per_device_stream_compute.size(), _per_device_start_compute.size());
+  // fflush(stdout);
 
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
