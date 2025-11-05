@@ -90,20 +90,11 @@ std::pair<int, int> CommOverlapCore::get_device_aware_rank_and_tp_id() {
     int rank = current_device;  // Global rank = device ID
     int tp_id = _ub_comm->device_to_tp_rank[current_device];  // TP rank within TP domain
 
-    printf("[DEBUG] SPMD get_device_aware_rank_and_tp_id: current_device=%d → rank=%d, tp_id=%d\n",
-           current_device, rank, tp_id);
-    fflush(stdout);
-
     return std::make_pair(rank, tp_id);
   } else {
     // Multi-process mode: Original logic
     int rank = _ub_comm->myrank;
     int tp_id = rank % _tp_size;
-
-    printf("[DEBUG] Multi-process get_device_aware_rank_and_tp_id: myrank=%d → rank=%d, tp_id=%d\n",
-           rank, rank, tp_id);
-    fflush(stdout);
-
     return std::make_pair(rank, tp_id);
   }
 }
@@ -1028,7 +1019,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
       printf("[DEBUG] P2P Barrier: Device %d passed barrier\n", device_idx);
       fflush(stdout);
     }
-    
+
     // Synchronize to flush any pending errors after barrier
     NVTE_CHECK_CUDA(cudaDeviceSynchronize());
     printf("[DEBUG] P2P Barrier: Device %d sync after barrier completed\n", device_idx);

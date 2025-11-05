@@ -2320,10 +2320,10 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
   assert(INTRANODE(peer));
 
   if (!(comm->launch_mode & NVTE_LAUNCH_GPU)) return;
-
-  printf("[DEBUG] userbuffers_send: After launch_mode check, push=%d\n", comm->push);
-  fflush(stdout);
-
+  //
+  // printf("[DEBUG] userbuffers_send: After launch_mode check, push=%d\n", comm->push);
+  // fflush(stdout);
+  //
   if (comm->push == 0) {
     // kuserbuffers_pullsend<<<1, 1, 0, stream>>>(comm->get_current_myrank(), peer, &(comm->get_current_send_id()[peer]),
     //                                            reinterpret_cast<int *>(flagptr));
@@ -2351,65 +2351,49 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
 
     printf("[DEBUG] userbuffers_send: Pointers calculated - srcptr=%p, dstptr=%p\n", srcptr, dstptr);
     fflush(stdout);
-
-    // In SPMD mode, use cudaMemcpyPeerAsync for explicit device-to-device copy
-    // This avoids issues with system-wide atomics to peer memory
+  //
+  //   // In SPMD mode, use cudaMemcpyPeerAsync for explicit device-to-device copy
+  //   // This avoids issues with system-wide atomics to peer memory
     if (comm->is_spmd) {
-      int current_dev;
-      NVTE_CHECK_CUDA(cudaGetDevice(&current_dev));
-      int peer_dev = peerlocal;  // In SPMD, peerlocal is the device ID
-
-      printf("[DEBUG] userbuffers_send SPMD: Using cudaMemcpyPeerAsync from dev %d to dev %d\n",
-             current_dev, peer_dev);
-      fflush(stdout);
 
       // Use cudaMemcpyPeerAsync for data transfer
-      // NVTE_CHECK_CUDA(cudaMemcpyPeerAsync(dstptr, peer_dev, srcptr, current_dev, bytes, stream));
-
-      // Increment send counter locally
-      comm->get_current_send_id()[peer]++;
-
-      printf("[DEBUG] userbuffers_send SPMD: Copy completed, send_id incremented to %d\n",
-             comm->get_current_send_id()[peer]);
+      NVTE_CHECK_CUDA(cudaMemcpyPeerAsync(dstptr, peerlocal, srcptr, comm->get_current_mydev() , bytes, stream));
+      // atomicAdd_system(flagptr, 1);
+      printf("[DEBUG] userbuffers_send SPMD: Copy completed\n");
       fflush(stdout);
 
       // Early return - skip the atomic kernel launch for SPMD
       return;
     }
-
-    if (comm->use_ce) {
-      // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
-      NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
-      // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
-    }
-    SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
-    int *arg1 = &comm->get_current_send_id()[peer], *arg2 = reinterpret_cast<int *>(flagptr);
-    int4 *arg3 = reinterpret_cast<int4 *>(srcptr), *arg4 = reinterpret_cast<int4 *>(dstptr);
-    int arg5 = signalonly ? 0 : bytes / 16;
-
-    int current_send_id = comm->get_current_send_id()[peer];
-    printf("[DEBUG] userbuffers_send: myrank=%d, peer=%d, send_id=%d->%d, flagptr=%p, srcptr=%p, dstptr=%p, bytes=%zu, arg5=%d\n",
-           comm->get_current_myrank(), peer, current_send_id, current_send_id + 1, flagptr, srcptr, dstptr, bytes, arg5);
-    fflush(stdout);
-
-    // Validate pointers before launch
-    if (!srcptr || !dstptr || !flagptr) {
-      printf("[ERROR] userbuffers_send: NULL pointer detected! srcptr=%p, dstptr=%p, flagptr=%p\n",
-             srcptr, dstptr, flagptr);
-      fflush(stdout);
-      return;
-    }
-
-    void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
-                          reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
-                          reinterpret_cast<void *>(&arg5)};
-
-    // cudaError_t launch_err = cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsend), kernelArgs);
-    // if (launch_err != cudaSuccess) {
-    //   printf("[ERROR] userbuffers_send: Kernel launch failed with error: %s\n", cudaGetErrorString(launch_err));
-    //   fflush(stdout);
-    // }
-    // NVTE_CHECK_CUDA(launch_err);
+  //
+  //   if (comm->use_ce) {
+  //     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_start_ptr));
+  //     NVTE_CHECK_CUDA(cudaMemcpyAsync(dstptr, srcptr, bytes, cudaMemcpyDeviceToDevice, stream));
+  //     // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
+  //   }
+  //   SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
+  //   int *arg1 = &comm->get_current_send_id()[peer], *arg2 = reinterpret_cast<int *>(flagptr);
+  //   int4 *arg3 = reinterpret_cast<int4 *>(srcptr), *arg4 = reinterpret_cast<int4 *>(dstptr);
+  //   int arg5 = signalonly ? 0 : bytes / 16;
+  //
+  //   // Validate pointers before launch
+  //   if (!srcptr || !dstptr || !flagptr) {
+  //     printf("[ERROR] userbuffers_send: NULL pointer detected! srcptr=%p, dstptr=%p, flagptr=%p\n",
+  //            srcptr, dstptr, flagptr);
+  //     fflush(stdout);
+  //     return;
+  //   }
+  //
+  //   void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
+  //                         reinterpret_cast<void *>(&arg3), reinterpret_cast<void *>(&arg4),
+  //                         reinterpret_cast<void *>(&arg5)};
+  //
+  //   // cudaError_t launch_err = cudaLaunchKernelExC(&cfg, reinterpret_cast<void *>(kuserbuffers_pushsend), kernelArgs);
+  //   // if (launch_err != cudaSuccess) {
+  //   //   printf("[ERROR] userbuffers_send: Kernel launch failed with error: %s\n", cudaGetErrorString(launch_err));
+  //   //   fflush(stdout);
+  //   // }
+  //   // NVTE_CHECK_CUDA(launch_err);
   }
 }
 
