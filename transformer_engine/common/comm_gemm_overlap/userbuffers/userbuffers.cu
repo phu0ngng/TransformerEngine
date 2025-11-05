@@ -2060,6 +2060,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
 #define CHECK_CE(ce_start, ce_end) \
   ((ce_start) != nullptr && (ce_end) != nullptr && *(ce_start) != *(ce_end))
 
+// Simple kernel to atomically increment a flag (for SPMD mode)
+__global__ void kuserbuffers_increment_flag(int *flag_ptr) {
+  atomicAdd(flag_ptr, 1);
+}
+
 __global__ void kuserbuffers_pushrecv(int myrank, int peer, int nvrank, int nvpeer, int *recv_id,
                                       int *flagptr, int adder, uint64_t ub_timeout,
                                       int *ce_start_ptr, int *ce_end_ptr) {
@@ -2355,14 +2360,21 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
   //   // In SPMD mode, use cudaMemcpyPeerAsync for explicit device-to-device copy
   //   // This avoids issues with system-wide atomics to peer memory
     if (comm->is_spmd) {
+      int current_dev = comm->get_current_mydev();
+      int peer_dev = peerlocal;
 
-      // Use cudaMemcpyPeerAsync for data transfer
-      NVTE_CHECK_CUDA(cudaMemcpyPeerAsync(dstptr, peerlocal, srcptr, comm->get_current_mydev() , bytes, stream));
-      // atomicAdd_system(flagptr, 1);
-      printf("[DEBUG] userbuffers_send SPMD: Copy completed\n");
+      // Copy data from current device to peer device  
+      NVTE_CHECK_CUDA(cudaMemcpyPeerAsync(dstptr, peer_dev, srcptr, current_dev, bytes, stream));
+      
+      // Atomically increment the flag in peer device's memory to signal completion
+      // Use regular atomicAdd (not atomicAdd_system) to avoid system-wide coherence issues
+      kuserbuffers_increment_flag<<<1, 1, 0, stream>>>(reinterpret_cast<int*>(flagptr));
+      NVTE_CHECK_CUDA(cudaGetLastError());
+      
+      printf("[DEBUG] userbuffers_send SPMD: dev %d->%d, bytes=%zu, flag incremented at %p\n",
+             current_dev, peer_dev, bytes, flagptr);
       fflush(stdout);
 
-      // Early return - skip the atomic kernel launch for SPMD
       return;
     }
   //
