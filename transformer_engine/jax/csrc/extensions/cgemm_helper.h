@@ -156,7 +156,7 @@ class CommunicatorHandler {
 
   bool _initialize = false;
   std::vector<int*> _device_barriers;
-  
+
   // Static member for cleanup file path
   static std::string _nccl_id_file_path;
 };
@@ -165,8 +165,11 @@ class CommunicatorHandler {
 class CollectiveGemmPlanRegistry {
  public:
   static CollectiveGemmPlanRegistry &getInstance() {
-    static CollectiveGemmPlanRegistry instance;
-    return instance;
+    // static CollectiveGemmPlanRegistry instance;
+    // return instance;
+    // TODO: temporary war for segfault at teardown
+    static CollectiveGemmPlanRegistry *instance = new CollectiveGemmPlanRegistry();
+    return *instance;
   }
 
   std::shared_ptr<CommOverlapP2PBase> get_executor(std::vector<size_t> buffer_shape, DType dtype,
@@ -177,10 +180,10 @@ class CollectiveGemmPlanRegistry {
   CollectiveGemmPlanRegistry(const CollectiveGemmPlanRegistry &) = delete;
   CollectiveGemmPlanRegistry &operator=(const CollectiveGemmPlanRegistry &) = delete;
 
-  struct PlanEntry { 
-    std::once_flag flag; 
+  struct PlanEntry {
+    std::once_flag flag;
     std::shared_ptr<CommOverlapP2PBase> executor_ptr;
-    std::atomic<bool> is_new_plan{true};  
+    std::atomic<bool> is_new_plan{true};
   };
   std::mutex _mutex;
 
