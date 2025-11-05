@@ -306,52 +306,68 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
 }
 
 CommOverlapCore::~CommOverlapCore() {
-  // Clean up per-device CUDA resources in a single loop
-  for (size_t dev_idx = 0; dev_idx < _per_device_stream_compute.size(); dev_idx++) {
-    // Clean up streams
-    for (size_t i = 0; i < _per_device_stream_compute[dev_idx].size(); i++) {
-      cudaStreamSynchronize(_per_device_stream_compute[dev_idx][i]);
-      cudaStreamDestroy(_per_device_stream_compute[dev_idx][i]);
+  // Each thread cleans up only its own device resources
+  int device_idx = _spmd ? get_device_index() : 0;
+  
+  printf("[DEBUG] CommOverlapCore destructor: device_idx=%d starting cleanup\n", device_idx);
+  fflush(stdout);
+  
+  // Clean up streams for this device only
+  if (device_idx < _per_device_stream_compute.size()) {
+    for (size_t i = 0; i < _per_device_stream_compute[device_idx].size(); i++) {
+      cudaStreamSynchronize(_per_device_stream_compute[device_idx][i]);
+      cudaStreamDestroy(_per_device_stream_compute[device_idx][i]);
     }
-
-    // Clean up communication stream
-    if (_per_device_stream_comm[dev_idx]) {
-      cudaStreamSynchronize(_per_device_stream_comm[dev_idx]);
-      cudaStreamDestroy(_per_device_stream_comm[dev_idx]);
-    }
-
-    // Clean up events
-    if (_per_device_stop_comm[dev_idx]) cudaEventDestroy(_per_device_stop_comm[dev_idx]);
-    if (_per_device_start_comm[dev_idx]) cudaEventDestroy(_per_device_start_comm[dev_idx]);
-    if (_per_device_stop_compute[dev_idx]) cudaEventDestroy(_per_device_stop_compute[dev_idx]);
-    if (_per_device_start_compute[dev_idx]) cudaEventDestroy(_per_device_start_compute[dev_idx]);
-    if (_per_device_comm_launch_event[dev_idx]) cudaEventDestroy(_per_device_comm_launch_event[dev_idx]);
   }
 
-  // Clean up per-device counters
-  for (size_t dev_idx = 0; dev_idx < _per_device_counter.size(); dev_idx++) {
-    if (_per_device_counter[dev_idx].dptr()) {
-      cudaFree(_per_device_counter[dev_idx].dptr());
-    }
+  // Clean up communication stream for this device
+  if (device_idx < _per_device_stream_comm.size() && _per_device_stream_comm[device_idx]) {
+    cudaStreamSynchronize(_per_device_stream_comm[device_idx]);
+    cudaStreamDestroy(_per_device_stream_comm[device_idx]);
+  }
+
+  // Clean up events for this device
+  if (device_idx < _per_device_stop_comm.size() && _per_device_stop_comm[device_idx]) 
+    cudaEventDestroy(_per_device_stop_comm[device_idx]);
+  if (device_idx < _per_device_start_comm.size() && _per_device_start_comm[device_idx]) 
+    cudaEventDestroy(_per_device_start_comm[device_idx]);
+  if (device_idx < _per_device_stop_compute.size() && _per_device_stop_compute[device_idx]) 
+    cudaEventDestroy(_per_device_stop_compute[device_idx]);
+  if (device_idx < _per_device_start_compute.size() && _per_device_start_compute[device_idx]) 
+    cudaEventDestroy(_per_device_start_compute[device_idx]);
+  if (device_idx < _per_device_comm_launch_event.size() && _per_device_comm_launch_event[device_idx]) 
+    cudaEventDestroy(_per_device_comm_launch_event[device_idx]);
+
+  // Clean up counter for this device
+  if (device_idx < _per_device_counter.size() && _per_device_counter[device_idx].dptr()) {
+    cudaFree(_per_device_counter[device_idx].dptr());
   }
 
   auto error = cudaGetLastError();
   if (error != cudaSuccess) {
-    NVTE_WARN("Error detected while destroying communicator: ", cudaGetErrorString(error));
+    NVTE_WARN("Error detected while destroying device ", device_idx, " resources: ", cudaGetErrorString(error));
   }
 
+  // Destroy communicator only once (static, shared across all instances)
   if (_comm_created) {
-    try {
+    std::call_once(_cleanup_flag, [this]() {
+      try {
 #ifdef NVTE_UB_WITH_MPI
-      destroy_communicator_mpi(_ub_comm);
+        destroy_communicator_mpi(_ub_comm);
 #else
-      destroy_communicator(_ub_comm);
+        destroy_communicator(_ub_comm);
 #endif
-    } catch (const std::exception &e) {
-      NVTE_WARN("Error destroying communicator, cleanup may be incomplete:\n", e.what());
-    }
-    _comm_created = false;
+      } catch (const std::exception &e) {
+        NVTE_WARN("Error destroying communicator:\n", e.what());
+      }
+      _comm_created = false;
+      printf("[DEBUG] Communicator destroyed\n");
+      fflush(stdout);
+    });
   }
+  
+  printf("[DEBUG] CommOverlapCore destructor: device_idx=%d cleanup done\n", device_idx);
+  fflush(stdout);
 }
 
 TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, size_t chunk_offset,

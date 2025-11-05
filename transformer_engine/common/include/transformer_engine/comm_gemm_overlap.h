@@ -78,8 +78,9 @@ class CommOverlapCore {
   std::vector<int> _per_device_ub_reg;
   std::vector<TensorWrapper> _per_device_ubuf;
   
-  // Instance-level once_flag for thread-safe vector initialization
+  // Instance-level once_flags for thread-safe initialization/cleanup
   std::once_flag _resize_core_vectors_flag;
+  std::once_flag _cleanup_flag;
 
   // Protected device-aware accessor methods (derived classes can use these)
   int get_current_ub_reg();
