@@ -160,12 +160,15 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         os.environ["NVTE_JAX_ALL_REDUCE_IN_FP32"] = "1"
 
     def tearDown(self):
+        print("[DEBUG] Python tearDown ENTRY")
         os.environ.pop("NVTE_JAX_ALL_REDUCE_IN_FP32", None)
+        print("[DEBUG] Python tearDown EXIT")
 
     def test_te_bf16_all_gather_with_dp(self):
         """Test Collective GEMM with AllGather"""
         self.args.collective_type = "all_gather"
         run_gemm_tests(self.args, self.mesh)
+        print("[DEBUG] Python test_te_bf16_all_gather_with_dp completed successfully")
 
     # def test_te_bf16_reduce_scatter_with_dp(self):
     #     """Test Collective GEMM with ReduceScatter"""

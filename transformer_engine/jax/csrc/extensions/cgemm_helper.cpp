@@ -177,6 +177,15 @@ void InitializeCgemmCommunicator(int num_total_devices, int num_devices_per_proc
                                  int tp_size, int num_max_streams, int gemm_priority,
                                  int comm_priority, int num_comm_sm, bool use_ce,
                                  bool aggregate_ag) {
+  static bool atexit_registered = false;
+  if (!atexit_registered) {
+    std::atexit([]() {
+      printf("[DEBUG] Program exit handler called\n");
+      fflush(stdout);
+    });
+    atexit_registered = true;
+  }
+  
   auto &config = CgemmConfig::get(false);
   config.init(num_max_streams, gemm_priority, comm_priority, num_comm_sm, use_ce, aggregate_ag);
   auto &handler = CommunicatorHandler::get(false);
