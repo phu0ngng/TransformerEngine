@@ -790,68 +790,68 @@ int create_communicator_mpi(communicator **comm) {
 
 void destroy_communicator(communicator *comm) {
   // Clear memory allocated in register_user_buffer_collective calls
-  for (int hndl = comm->free_region - 1; hndl >= 0; hndl--) {
-    if (comm->use_mc && comm->mem_dealloc[hndl]) {
-      // Unbind the local device buffer from the Multicast handle
-      CUdevice dev;
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &dev, comm->get_current_mydev());
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastUnbind, comm->mc_handle, dev, comm->uc_offsets[hndl],
-                                  comm->mem_size[hndl]);
-
-      // Unmap memory addresses and release handles for both peer and own buffers
-      for (int rank = 0; rank < comm->nvsize; rank++) {
-        NVTE_CALL_CHECK_CUDA_DRIVER(cuMemUnmap,
-                                    reinterpret_cast<CUdeviceptr>(comm->get_peer_ptr(hndl, rank)),
-                                    comm->mem_size[hndl]);
-        NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->uchandles[hndl][rank]);
-      }
-      free(reinterpret_cast<void *>(comm->uchandles[hndl]));
-
-      // Free memory reserved for buffer allocations
-      NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressFree, comm->ucbase_ptr[hndl],
-                                  static_cast<size_t>(comm->mem_size[hndl] * comm->nvsize));
-    } else {
-    for (int rank = 0; rank < comm->nvsize; rank++) {
-      if (rank != comm->get_current_nvrank()) {
-        NVTE_CHECK_CUDA(cudaIpcCloseMemHandle(comm->get_peer_ptr(hndl, rank)));
-      } else if (comm->mem_dealloc[hndl]) {
-          NVTE_CHECK_CUDA(cudaFree(comm->get_peer_ptr(hndl, rank)));
-        }
-        // else {
-          // comm->get_peer_ptr(hndl, rank) = nullptr;  // remove reference to external buffer
-        // }
-      }
-    }
-    // peer_ptr is now std::vector, no need to free
-    // Clear per-device mem_ptr
-    for (size_t dev_idx = 0; dev_idx < comm->per_device_mem_ptr[hndl].size(); dev_idx++) {
-      comm->per_device_mem_ptr[hndl][dev_idx] = nullptr;
-    }
-  }
-  // Clear memory allocated in the communicator constructor
-  // Clean up unified per-device communication arrays
-  // printf("[DEBUG] Cleaning up per-device communication arrays (%zu devices)\n", comm->per_device_send_id.size());
-  // fflush(stdout);
-
-  // TODO: clean need to be call once per process
-  // for (size_t dev_idx = 0; dev_idx < comm->per_device_send_id.size(); dev_idx++) {
-  //   if (comm->per_device_send_id[dev_idx]) {
-  //     NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_send_id[dev_idx])));
+  // for (int hndl = comm->free_region - 1; hndl >= 0; hndl--) {
+  //   if (comm->use_mc && comm->mem_dealloc[hndl]) {
+  //     // Unbind the local device buffer from the Multicast handle
+  //     CUdevice dev;
+  //     NVTE_CALL_CHECK_CUDA_DRIVER(cuDeviceGet, &dev, comm->get_current_mydev());
+  //     NVTE_CALL_CHECK_CUDA_DRIVER(cuMulticastUnbind, comm->mc_handle, dev, comm->uc_offsets[hndl],
+  //                                 comm->mem_size[hndl]);
+  //
+  //     // Unmap memory addresses and release handles for both peer and own buffers
+  //     for (int rank = 0; rank < comm->nvsize; rank++) {
+  //       NVTE_CALL_CHECK_CUDA_DRIVER(cuMemUnmap,
+  //                                   reinterpret_cast<CUdeviceptr>(comm->get_peer_ptr(hndl, rank)),
+  //                                   comm->mem_size[hndl]);
+  //       NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->uchandles[hndl][rank]);
+  //     }
+  //     free(reinterpret_cast<void *>(comm->uchandles[hndl]));
+  //
+  //     // Free memory reserved for buffer allocations
+  //     NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressFree, comm->ucbase_ptr[hndl],
+  //                                 static_cast<size_t>(comm->mem_size[hndl] * comm->nvsize));
+  //   } else {
+  //   for (int rank = 0; rank < comm->nvsize; rank++) {
+  //     if (rank != comm->get_current_nvrank()) {
+  //       NVTE_CHECK_CUDA(cudaIpcCloseMemHandle(comm->get_peer_ptr(hndl, rank)));
+  //     } else if (comm->mem_dealloc[hndl]) {
+  //         NVTE_CHECK_CUDA(cudaFree(comm->get_peer_ptr(hndl, rank)));
+  //       }
+  //       // else {
+  //         // comm->get_peer_ptr(hndl, rank) = nullptr;  // remove reference to external buffer
+  //       // }
+  //     }
   //   }
-  //   if (comm->per_device_recv_id[dev_idx]) {
-  //     NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_recv_id[dev_idx])));
-  //   }
-  //   if (comm->per_device_flags_baseptr[dev_idx]) {
-  //     NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_flags_baseptr[dev_idx])));
+  //   // peer_ptr is now std::vector, no need to free
+  //   // Clear per-device mem_ptr
+  //   for (size_t dev_idx = 0; dev_idx < comm->per_device_mem_ptr[hndl].size(); dev_idx++) {
+  //     comm->per_device_mem_ptr[hndl][dev_idx] = nullptr;
   //   }
   // }
-  if (comm->use_mc) {
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemUnmap, reinterpret_cast<CUdeviceptr>(comm->mc_baseptr),
-                                comm->mc_maxsize);
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressFree, comm->mc_baseptr, comm->mc_maxsize);
-    NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->mc_handle);
-  }
-  delete comm;
+  // // Clear memory allocated in the communicator constructor
+  // // Clean up unified per-device communication arrays
+  // // printf("[DEBUG] Cleaning up per-device communication arrays (%zu devices)\n", comm->per_device_send_id.size());
+  // // fflush(stdout);
+  //
+  // // TODO: clean need to be call once per process
+  // // for (size_t dev_idx = 0; dev_idx < comm->per_device_send_id.size(); dev_idx++) {
+  // //   if (comm->per_device_send_id[dev_idx]) {
+  // //     NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_send_id[dev_idx])));
+  // //   }
+  // //   if (comm->per_device_recv_id[dev_idx]) {
+  // //     NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_recv_id[dev_idx])));
+  // //   }
+  // //   if (comm->per_device_flags_baseptr[dev_idx]) {
+  // //     NVTE_CHECK_CUDA(cudaFree(reinterpret_cast<void *>(comm->per_device_flags_baseptr[dev_idx])));
+  // //   }
+  // // }
+  // if (comm->use_mc) {
+  //   NVTE_CALL_CHECK_CUDA_DRIVER(cuMemUnmap, reinterpret_cast<CUdeviceptr>(comm->mc_baseptr),
+  //                               comm->mc_maxsize);
+  //   NVTE_CALL_CHECK_CUDA_DRIVER(cuMemAddressFree, comm->mc_baseptr, comm->mc_maxsize);
+  //   NVTE_CALL_CHECK_CUDA_DRIVER(cuMemRelease, comm->mc_handle);
+  // }
+  // delete comm;
 }
 
 void destroy_communicator_mpi(communicator *comm) {
