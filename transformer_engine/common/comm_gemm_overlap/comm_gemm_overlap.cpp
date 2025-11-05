@@ -308,10 +308,10 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
 CommOverlapCore::~CommOverlapCore() {
   // Each thread cleans up only its own device resources
   int device_idx = _spmd ? get_device_index() : 0;
-  
+
   printf("[DEBUG] CommOverlapCore destructor: device_idx=%d starting cleanup\n", device_idx);
   fflush(stdout);
-  
+
   // Clean up streams for this device only
   if (device_idx < _per_device_stream_compute.size()) {
     for (size_t i = 0; i < _per_device_stream_compute[device_idx].size(); i++) {
@@ -327,15 +327,15 @@ CommOverlapCore::~CommOverlapCore() {
   }
 
   // Clean up events for this device
-  if (device_idx < _per_device_stop_comm.size() && _per_device_stop_comm[device_idx]) 
+  if (device_idx < _per_device_stop_comm.size() && _per_device_stop_comm[device_idx])
     cudaEventDestroy(_per_device_stop_comm[device_idx]);
-  if (device_idx < _per_device_start_comm.size() && _per_device_start_comm[device_idx]) 
+  if (device_idx < _per_device_start_comm.size() && _per_device_start_comm[device_idx])
     cudaEventDestroy(_per_device_start_comm[device_idx]);
-  if (device_idx < _per_device_stop_compute.size() && _per_device_stop_compute[device_idx]) 
+  if (device_idx < _per_device_stop_compute.size() && _per_device_stop_compute[device_idx])
     cudaEventDestroy(_per_device_stop_compute[device_idx]);
-  if (device_idx < _per_device_start_compute.size() && _per_device_start_compute[device_idx]) 
+  if (device_idx < _per_device_start_compute.size() && _per_device_start_compute[device_idx])
     cudaEventDestroy(_per_device_start_compute[device_idx]);
-  if (device_idx < _per_device_comm_launch_event.size() && _per_device_comm_launch_event[device_idx]) 
+  if (device_idx < _per_device_comm_launch_event.size() && _per_device_comm_launch_event[device_idx])
     cudaEventDestroy(_per_device_comm_launch_event[device_idx]);
 
   // Clean up counter for this device
@@ -365,7 +365,7 @@ CommOverlapCore::~CommOverlapCore() {
       fflush(stdout);
     });
   }
-  
+
   printf("[DEBUG] CommOverlapCore destructor: device_idx=%d cleanup done\n", device_idx);
   fflush(stdout);
 }
@@ -1010,7 +1010,7 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_stop_send[device_idx], 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_per_device_stop_recv[device_idx], 0));
 
-  cudaDeviceSynchronize();
+  // cudaDeviceSynchronize();
 
   // In SPMD mode, barrier to ensure ALL devices finish before ANY proceeds
   if (_spmd) {

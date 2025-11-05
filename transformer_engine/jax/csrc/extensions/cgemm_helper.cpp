@@ -334,21 +334,21 @@ CommunicatorHandler::CommunicatorHandler() {
 }
 
 CommunicatorHandler::~CommunicatorHandler() {
-  if (_initialize && !tp_comms.empty()) {
-    for (auto &comm : tp_comms) {
-      if (comm != nullptr) {
-        ncclCommDestroy(comm);
-      }
-    }
-  }
-  // Clean up multiple device barriers
-  for (int* barrier : _device_barriers) {
-    if (barrier) cudaFree(barrier);
-  }
-  _device_barriers.clear();
-
-  // Clean up static files (thread-safe)
-  cleanup_nccl_files();
+  // if (_initialize && !tp_comms.empty()) {
+  //   for (auto &comm : tp_comms) {
+  //     if (comm != nullptr) {
+  //       ncclCommDestroy(comm);
+  //     }
+  //   }
+  // }
+  // // Clean up multiple device barriers
+  // for (int* barrier : _device_barriers) {
+  //   if (barrier) cudaFree(barrier);
+  // }
+  // _device_barriers.clear();
+  //
+  // // Clean up static files (thread-safe)
+  // cleanup_nccl_files();
 }
 
 }  // namespace jax
