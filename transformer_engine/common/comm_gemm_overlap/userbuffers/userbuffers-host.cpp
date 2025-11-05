@@ -211,6 +211,25 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
   cudaDeviceProp device_prop;
   NVTE_CHECK_CUDA(cudaGetDevice(&cur_dev));
   NVTE_CHECK_CUDA(cudaGetDeviceCount(&ndev));
+  bool peer_access_available = false;
+  for (int i = 0; i < ndev; i++) {
+    if (i != cur_dev) {
+      int can_access_peer;
+      cudaError_t peer_result = cudaDeviceCanAccessPeer(&can_access_peer, cur_dev, i);
+      if (peer_result == cudaSuccess && can_access_peer) {
+        peer_access_available = true;
+        break;
+      }
+    }
+  }
+  if (!peer_access_available) {
+    NVTE_ERROR(
+        "No peer-to-peer access available between GPUs. This platform does not support the "
+        "GPU-to-GPU "
+        "communication required for multi-GPU userbuffers. Consider using single-GPU mode.");
+    return 1;
+  }
+}
 
   if (spmd) {
     // SPMD mode: Initialize all devices in this process during bootstrap
@@ -247,33 +266,25 @@ int create_communicator_grouped2(communicator **comm, int myrank, int numranks, 
     NVTE_CHECK_CUDA(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, 0));
     (*comm)->ub_timeout = 1000ull * device_clock * sec_timeout;
 
-    // Enable peer-to-peer access between all devices
-    // printf("[DEBUG] SPMD: Enabling P2P access between all %d devices...\n", numlocal);
-    // fflush(stdout);
-
-    for (int src_dev = 0; src_dev < numlocal; src_dev++) {
-      NVTE_CHECK_CUDA(cudaSetDevice(src_dev));
-      for (int dst_dev = 0; dst_dev < numlocal; dst_dev++) {
-        if (src_dev != dst_dev) {
-          int can_access;
-          // TODO: error check here
-          NVTE_CHECK_CUDA(cudaDeviceCanAccessPeer(&can_access, src_dev, dst_dev));
-          if (can_access) {
+    // Enable peer-to-peer access between all devices (once per program)
+    static std::once_flag p2p_enable_flag;
+    std::call_once(p2p_enable_flag, [numlocal]() {
+      printf("[DEBUG] SPMD: Enabling P2P access between all %d devices (once per program)\n", numlocal);
+      fflush(stdout);
+      
+      for (int src_dev = 0; src_dev < numlocal; src_dev++) {
+        NVTE_CHECK_CUDA(cudaSetDevice(src_dev));
+        for (int dst_dev = 0; dst_dev < numlocal; dst_dev++) {
+          if (src_dev != dst_dev) {
             cudaError_t err = cudaDeviceEnablePeerAccess(dst_dev, 0);
-            if (err == cudaSuccess) {
-              printf("[DEBUG] SPMD: Enabled P2P access from device %d to device %d\n", src_dev, dst_dev);
-            } else if (err == cudaErrorPeerAccessAlreadyEnabled) {
-              printf("[DEBUG] SPMD: P2P already enabled from device %d to device %d\n", src_dev, dst_dev);
-            } else {
-              printf("[WARNING] SPMD: Failed to enable P2P from device %d to device %d: %s\n",
-                     src_dev, dst_dev, cudaGetErrorString(err));
+            if (err != cudaSuccess && err != cudaErrorPeerAccessAlreadyEnabled) {
+              NVTE_ERROR("SPMD: Failed to enable P2P from device ", src_dev, " to device ", dst_dev, 
+                         ": ", cudaGetErrorString(err));
             }
-          } else {
-            printf("[WARNING] SPMD: Device %d cannot access device %d (no P2P support)\n", src_dev, dst_dev);
           }
         }
       }
-    }
+    });
 
     // Restore original device context
     NVTE_CHECK_CUDA(cudaSetDevice(cur_dev));
@@ -1085,31 +1096,6 @@ int register_user_buffer_collective(void **gpubuff, size_t bytes, communicator *
 
     // Check for NVLINK support before attempting IPC operations
     if (comm->nvsize > 1) {
-      int current_device;
-      NVTE_CHECK_CUDA(cudaGetDevice(&current_device));
-      cudaDeviceProp deviceProp;
-      NVTE_CHECK_CUDA(cudaGetDeviceProperties(&deviceProp, current_device));
-      bool peer_access_available = false;
-      for (int i = 0; i < comm->nvsize; i++) {
-        if (i != comm->get_current_nvrank()) {
-          int can_access_peer;
-          cudaError_t peer_result = cudaDeviceCanAccessPeer(&can_access_peer, current_device, i);
-          if (peer_result == cudaSuccess && can_access_peer) {
-            peer_access_available = true;
-            break;
-          }
-        }
-      }
-      if (!peer_access_available) {
-        free(tmp);
-        NVTE_ERROR(
-            "No peer-to-peer access available between GPUs. This platform does not support the "
-            "GPU-to-GPU "
-            "communication required for multi-GPU userbuffers. Consider using single-GPU mode.");
-        return 1;
-      }
-    }
-
       for (int i = 0; i < comm->nvsize; i++) {
         if (i != comm->get_current_nvrank()) {
           NVTE_CHECK_CUDA(cudaIpcOpenMemHandle(&(comm->peer_ptr[hndl][i]), tmp[i],
