@@ -821,11 +821,23 @@ class GemmPrimitive(BasePrimitive):
             out_bdims = (lhs_bdims,)
             bias_bdims = (None,)  # Bias is broadcast
             pre_gelu_bdims = (lhs_bdims,)  # Pre-GeLU output is batched like GEMM output
+            
+            # Adjust contracting_dims to account for batch dimension
+            # Dimensions after the batch dim need to be shifted
+            lhs_contracting, rhs_contracting = contracting_dims
+            adj_lhs_contracting = tuple(
+                dim + (1 if dim >= lhs_bdims else 0) for dim in lhs_contracting
+            )
+            adj_rhs_contracting = tuple(
+                dim + (1 if dim >= rhs_bdims else 0) for dim in rhs_contracting
+            )
+            adj_contracting_dims = (adj_lhs_contracting, adj_rhs_contracting)
         elif lhs_bdims is None and rhs_bdims is None:
             # No batching
             out_bdims = (None,)
             bias_bdims = (None,)
             pre_gelu_bdims = (None,)
+            adj_contracting_dims = contracting_dims
         else:
             raise ValueError(
                 f"Batched GEMM requires both operands to be batched or both unbatched, "
@@ -838,7 +850,7 @@ class GemmPrimitive(BasePrimitive):
             GemmPrimitive.outer_primitive.bind(
                 *batched_args,
                 out_dtype=out_dtype,
-                contracting_dims=contracting_dims,
+                contracting_dims=adj_contracting_dims,
                 scaling_mode=scaling_mode,
                 fuse_bias=fuse_bias,
                 fuse_gelu=fuse_gelu,
