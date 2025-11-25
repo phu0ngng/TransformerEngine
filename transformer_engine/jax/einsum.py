@@ -213,8 +213,22 @@ def einsum(
     gemm_info = _einsum_to_gemm_info(equation, *operands)
     contracting_dims = gemm_info['contracting_dims']
     batch_dims = gemm_info['batch_dims']
-
+    
     lhs, rhs = operands
+    
+    # Validate that this is NN layout (required by dense)
+    # For NN: lhs last dim must contract, rhs last dim must NOT contract
+    lhs_ndim = len(gemm_info['lhs_spec'])
+    rhs_ndim = len(gemm_info['rhs_spec'])
+    lhs_last_contracts = (lhs_ndim - 1) in contracting_dims[0]
+    rhs_last_contracts = (rhs_ndim - 1) in contracting_dims[1]
+    
+    if not lhs_last_contracts or rhs_last_contracts:
+        raise ValueError(
+            f"Einsum equation '{equation}' does not correspond to NN layout. "
+            f"TE dense requires last dimension of LHS to contract and last dimension of RHS to not contract. "
+            f"Got lhs_contracting={contracting_dims[0]}, rhs_contracting={contracting_dims[1]}"
+        )
 
     # Determine if we have per-batch quantizers
     has_batch_dims = bool(batch_dims[0] or batch_dims[1])
@@ -224,13 +238,29 @@ def einsum(
 
     # Create vmapped dense function for batch dimensions
     if has_batch_dims:
+        # Adjust contracting dims after removing batch dimensions
+        # When we vmap, batch dimensions are removed, so we need to adjust indices
+        lhs_batch_sorted = sorted(batch_dims[0])
+        rhs_batch_sorted = sorted(batch_dims[1])
+        
+        # Compute adjusted contracting dims (after batch dims are removed by vmap)
+        adj_lhs_contracting = tuple(
+            dim - sum(1 for b in lhs_batch_sorted if b < dim)
+            for dim in contracting_dims[0]
+        )
+        adj_rhs_contracting = tuple(
+            dim - sum(1 for b in rhs_batch_sorted if b < dim)
+            for dim in contracting_dims[1]
+        )
+        adj_contracting_dims = (adj_lhs_contracting, adj_rhs_contracting)
+        
         # Per-batch quantizers: vmap over quantizer_sets
         # Assume first batch dimension corresponds to quantizer dimension (e.g., experts)
         def dense_with_quantizer(lhs_single, rhs_single, quantizer):
             """Dense with explicit quantizer argument for vmapping."""
             return dense(
                 lhs_single, rhs_single, None,
-                contracting_dims=contracting_dims,
+                contracting_dims=adj_contracting_dims,
                 transpose_batch_sequence=False,
                 input_axes=operand_axes[0],
                 kernel_axes=operand_axes[1],
