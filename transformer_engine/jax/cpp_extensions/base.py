@@ -238,12 +238,15 @@ class BasePrimitive(metaclass=ABCMeta):
             all_results.append(result_i)
         
         # Transpose: from list of tuples to tuple of lists
-        # all_results = [(out0_0, out1_0), (out0_1, out1_1), ...]
-        # transposed = ([out0_0, out0_1, ...], [out1_0, out1_1, ...])
+        # all_results = [(out0_0, out1_0, ...), (out0_1, out1_1, ...), ...]
+        # transposed = ([out0_0, out0_1, ...], [out1_0, out1_1, ...], ...)
         transposed = tuple(zip(*all_results))
         
-        # Stack each output along axis 0
-        stacked_results = tuple(jnp.stack(out_list, axis=0) for out_list in transposed)
+        # Stack each output along axis 0 (standard vmap convention)
+        # This creates the batch dimension at position 0 for all outputs
+        stacked_results = tuple(jnp.stack(list(out_list), axis=0) for out_list in transposed)
+        
+        # All outputs are batched at dimension 0
         out_bdims = tuple(0 for _ in stacked_results)
         
         return stacked_results, out_bdims
