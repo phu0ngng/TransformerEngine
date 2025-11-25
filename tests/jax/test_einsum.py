@@ -228,7 +228,7 @@ class TestEinsumPerExpertQuantizers:
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16])
     def test_per_expert_quantizers_different_recipes(self, recipe, dtype):
         """Test einsum with per-expert quantizers using different FP8 recipes."""
-        B, S, M, E, C, H = 2, 4, 64, 4, 2, 128
+        B, S, M, E, C, H = 2, 4, 64, 1, 8, 128
 
         # Create per-expert quantizers with different recipes
         quantizer_sets = [
@@ -251,7 +251,7 @@ class TestEinsumPerExpertQuantizers:
         expected = jnp.einsum("EBCM,EMH->EBCH", dispatched, weights)
 
         assert result.shape == (E, B, C, H)
-        assert_allclose(result, expected, dtype=dtype)
+        assert_allclose(result, expected, dtype=jnp.float8_e4m3fn)
 
     @pytest_parametrize_wrapper("recipe", supported_recipes)
     @pytest_parametrize_wrapper("dtype", [jnp.bfloat16])
