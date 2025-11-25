@@ -278,13 +278,9 @@ def einsum(
             f"Got lhs_contracting={contracting_dims[0]}, rhs_contracting={contracting_dims[1]}"
         )
 
-    # Determine if we have per-batch quantizers
-    has_batch_dims = bool(batch_dims[0] or batch_dims[1])
-
-    if quantizer_sets is None:
-        quantizer_sets = [noop_quantizer_set] * len(operands)
-
     # Create vmapped dense function for batch dimensions
+    has_batch_dims = bool(batch_dims[0] or batch_dims[1])
+    
     if has_batch_dims:
         # Adjust contracting dims after removing batch dimensions
         # When we vmap, batch dimensions are removed, so we need to adjust indices
