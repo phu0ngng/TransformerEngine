@@ -300,7 +300,7 @@ def einsum(
         
         # Per-batch quantizers: vmap over quantizer_sets
         # Assume first batch dimension corresponds to quantizer dimension (e.g., experts)
-        def dense_with_quantizer(lhs_single, rhs_single, quantizer):
+        def dense_with_quantizer(lhs_single, rhs_single, quantizer_set):
             """Dense with explicit quantizer argument for vmapping."""
             return dense(
                 lhs_single, rhs_single, None,
@@ -309,38 +309,24 @@ def einsum(
                 input_axes=operand_axes[0],
                 kernel_axes=operand_axes[1],
                 output_axes=output_axes,
-                quantizer_set=quantizer,
+                quantizer_set=quantizer_set,
             )
 
         # Apply vmap for all batch dimensions
-        # Expert dimension (if exists at position 0) vmaps over quantizers
-        # Other batch dimensions broadcast quantizer
+        # All batch dimensions vmap over quantizers (quantizer array has same batch structure)
         vmapped_func = dense_with_quantizer
         
         for idx, (lhs_dim, rhs_dim) in enumerate(zip(sorted(batch_dims[0]), sorted(batch_dims[1]))):
-            # Check if this dimension is the quantizer dimension
-            is_quantizer_vmap = (
-                (lhs_dim == quantizer_dim_lhs or rhs_dim == quantizer_dim_rhs)
-                and has_quantizer_dim
-            )
+            # Adjust dimensions for previously applied vmaps
+            adj_lhs = lhs_dim - idx
+            adj_rhs = rhs_dim - idx
+            adj_quantizer = 0  # Quantizer array always at position 0 after each vmap
             
-            if is_quantizer_vmap:
-                # Quantizer dimension: vmap over quantizers
-                vmapped_func = jax.vmap(
-                    vmapped_func,
-                    in_axes=(lhs_dim, rhs_dim, 0),  # vmap over quantizers
-                    out_axes=0
-                )
-            else:
-                # Regular batch dimension: broadcast quantizer
-                # Adjust dimensions for previously applied vmaps
-                adj_lhs = lhs_dim - idx
-                adj_rhs = rhs_dim - idx
-                vmapped_func = jax.vmap(
-                    vmapped_func,
-                    in_axes=(adj_lhs, adj_rhs, None),
-                    out_axes=0
-                )
+            vmapped_func = jax.vmap(
+                vmapped_func,
+                in_axes=(adj_lhs, adj_rhs, adj_quantizer),
+                out_axes=0
+            )
         
         output = vmapped_func(lhs, rhs, quantizer_sets)
     else:
