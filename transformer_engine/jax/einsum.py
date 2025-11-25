@@ -22,7 +22,7 @@ Limitations:
     - **Single batch dimension**: Only one batch dimension supported
     - **2-operand only**: Only supports binary operations
     - **Explicit quantizer_dim**: Required when quantizer_sets is provided
-
+    
     For operations that don't meet these requirements (e.g., routing operations
     like "BSM,BSEC->EBCM"), use jnp.einsum instead.
 
@@ -41,19 +41,19 @@ Example - MoE Forward Pass with Per-Expert FP8:
         ) for _ in range(num_experts)
     ]
 
-    # MoE pipeline with per-expert quantization
-    # 1. Dispatch: BSM,BSEC -> EBCM
+    # MoE pipeline with per-expert quantization,
+    # 1. Dispatch: BSM,BSEC -> EBCM (no quantization - routing operation, thus using jnp.einsum)
     dispatched = jnp.einsum("BSM,BSEC->EBCM", tokens, routing)
-
+    
     # 2. MLP Up: EBCM,EMH -> EBCH (per-expert quantization)
     hidden = einsum("EBCM,EMH->EBCH", dispatched, expert_up_weights,
                    quantizer_sets=expert_quantizers, quantizer_dim='E')
-
+    
     # 3. MLP Down: EBCH,EHM -> EBCM (per-expert quantization)
     expert_out = einsum("EBCH,EHM->EBCM", hidden, expert_down_weights,
                        quantizer_sets=expert_quantizers, quantizer_dim='E')
-
-    # 4. Output: EBCM,BSEC -> BSM (no quantization - routing operation)
+    
+    # 4. Combine: EBCM,BSEC -> BSM (no quantization - routing operation, thus using jnp.einsum)
     output = jnp.einsum("EBCM,BSEC->BSM", expert_out, routing)
     ```
 
@@ -64,7 +64,7 @@ Implementation Details:
     3. Creating a vmapped version of TE's dense layer over the batch dimension
     4. Vmapping over quantizer_sets to provide per-batch (e.g., per-expert) quantization
     5. Leveraging dense's existing VJP for automatic differentiation
-
+    
     This design reuses TE's well-tested dense layer infrastructure while enabling
     per-expert quantization for MoE models with minimal code complexity.
 """
@@ -93,20 +93,20 @@ def _parse_einsum_input(equation: str, *operands) -> Tuple[str, List[str], str]:
         Tuple of (equation, input_specs, output_spec)
     """
     # Remove spaces
-    equation = equation.replace(" ", "")
+    equation = equation.replace(' ', '')
 
-    if "->" in equation:
-        inputs_str, output_str = equation.split("->")
-        input_specs = inputs_str.split(",")
+    if '->' in equation:
+        inputs_str, output_str = equation.split('->')
+        input_specs = inputs_str.split(',')
     else:
         # Implicit output mode
         inputs_str = equation
-        input_specs = inputs_str.split(",")
+        input_specs = inputs_str.split(',')
         # Compute implicit output
         all_indices = set()
         for spec in input_specs:
             all_indices.update(spec)
-        output_str = "".join(sorted(all_indices))
+        output_str = ''.join(sorted(all_indices))
 
     return equation, input_specs, output_str
 
@@ -163,13 +163,13 @@ def _einsum_to_gemm_info(equation: str, *operands):
     )
 
     return {
-        "lhs_idx": 0,
-        "rhs_idx": 1,
-        "lhs_spec": lhs_spec,
-        "rhs_spec": rhs_spec,
-        "output_spec": output_spec,
-        "contracting_dims": (lhs_contracting, rhs_contracting),
-        "batch_dims": (lhs_batch, rhs_batch),
+        'lhs_idx': 0,
+        'rhs_idx': 1,
+        'lhs_spec': lhs_spec,
+        'rhs_spec': rhs_spec,
+        'output_spec': output_spec,
+        'contracting_dims': (lhs_contracting, rhs_contracting),
+        'batch_dims': (lhs_batch, rhs_batch),
     }
 
 
@@ -216,42 +216,44 @@ def einsum(
     """
     if operand_axes is None:
         operand_axes = [None] * len(operands)
-
+    
     if len(operands) != 2:
         raise NotImplementedError("Only 2-operand einsum currently supported")
-
+    
     # Parse einsum to get GEMM info
     gemm_info = _einsum_to_gemm_info(equation, *operands)
-    contracting_dims = gemm_info["contracting_dims"]
-    batch_dims = gemm_info["batch_dims"]
-    lhs_spec = gemm_info["lhs_spec"]
-    rhs_spec = gemm_info["rhs_spec"]
-
+    contracting_dims = gemm_info['contracting_dims']
+    batch_dims = gemm_info['batch_dims']
+    lhs_spec = gemm_info['lhs_spec']
+    rhs_spec = gemm_info['rhs_spec']
+    
     lhs, rhs = operands
-
+    
     # Validate quantizer_dim is provided when quantizer_sets is given
     if quantizer_sets is not None and quantizer_dim is None:
         raise ValueError(
             "quantizer_dim must be specified when quantizer_sets is provided. "
             "This explicitly indicates which dimension the quantizers correspond to."
         )
-
+    
     # Find quantizer dimension
     quantizer_dim_lhs = None
     quantizer_dim_rhs = None
-
+    
     if quantizer_dim is not None:
         # Find position of quantizer_dim in lhs and rhs specs
         if quantizer_dim in lhs_spec:
             quantizer_dim_lhs = lhs_spec.index(quantizer_dim)
         if quantizer_dim in rhs_spec:
             quantizer_dim_rhs = rhs_spec.index(quantizer_dim)
-
+        
         if quantizer_dim_lhs is None and quantizer_dim_rhs is None:
-            raise ValueError(f"quantizer_dim '{quantizer_dim}' not found in equation '{equation}'")
-
+            raise ValueError(
+                f"quantizer_dim '{quantizer_dim}' not found in equation '{equation}'"
+            )
+    
     has_quantizer_dim = quantizer_dim_lhs is not None or quantizer_dim_rhs is not None
-
+    
     # Determine expected quantizer_sets length based on quantizer_dim
     if quantizer_dim is not None:
         if quantizer_dim_lhs is not None:
@@ -259,9 +261,12 @@ def einsum(
         else:
             expected_length = rhs.shape[quantizer_dim_rhs]
     else:
-        # No quantizer_dim specified (and quantizer_sets must be None due to check above)
-        expected_length = 1
-
+        # No quantizer_dim: determine from batch dimension
+        if has_batch_dims:
+            expected_length = lhs.shape[batch_dims[0][0]]
+        else:
+            expected_length = 1
+    
     # Validate and initialize quantizer_sets
     if quantizer_sets is None:
         quantizer_sets = [noop_quantizer_set] * expected_length
@@ -270,84 +275,82 @@ def einsum(
     elif len(quantizer_sets) != expected_length:
         raise ValueError(
             f"quantizer_sets length ({len(quantizer_sets)}) must match "
-            f"dimension '{quantizer_dim}' size ({expected_length})"
+            f"{'dimension ' + repr(quantizer_dim) if quantizer_dim else 'batch dimension'} "
+            f"size ({expected_length})"
         )
-
+    
     # Validate that this is NN layout (required by dense)
     # For NN: lhs last dim must contract, rhs last dim must NOT contract
-    lhs_ndim = len(gemm_info["lhs_spec"])
-    rhs_ndim = len(gemm_info["rhs_spec"])
+    lhs_ndim = len(gemm_info['lhs_spec'])
+    rhs_ndim = len(gemm_info['rhs_spec'])
     lhs_last_contracts = (lhs_ndim - 1) in contracting_dims[0]
     rhs_last_contracts = (rhs_ndim - 1) in contracting_dims[1]
-
+    
     if not lhs_last_contracts or rhs_last_contracts:
         raise ValueError(
-            "TE einsum only supports NN layout (non-transposed matrix multiplication). Equation"
-            f" '{equation}' is not NN layout:\n  - LHS '{gemm_info['lhs_spec']}': last dimension"
-            f" must contract (got contracting_dims={contracting_dims[0]})\n  - RHS"
-            f" '{gemm_info['rhs_spec']}': last dimension must NOT contract (got"
-            f" contracting_dims={contracting_dims[1]})\nFor non-NN layouts (e.g., routing"
-            " operations), use jnp.einsum instead."
+            f"TE einsum only supports NN layout (non-transposed matrix multiplication). "
+            f"Equation '{equation}' is not NN layout:\n"
+            f"  - LHS '{gemm_info['lhs_spec']}': last dimension must contract (got contracting_dims={contracting_dims[0]})\n"
+            f"  - RHS '{gemm_info['rhs_spec']}': last dimension must NOT contract (got contracting_dims={contracting_dims[1]})\n"
+            f"For non-NN layouts (e.g., routing operations), use jnp.einsum instead."
         )
 
     # Create vmapped dense function for batch dimensions
     has_batch_dims = bool(batch_dims[0] or batch_dims[1])
-
+    
     if has_batch_dims:
         # Validate single batch dimension (MoE use case)
         if len(batch_dims[0]) != 1 or len(batch_dims[1]) != 1:
             raise NotImplementedError(
-                "Only single batch dimension is currently supported. "
+                f"Only single batch dimension is currently supported. "
                 f"Got {len(batch_dims[0])} batch dims in lhs and {len(batch_dims[1])} in rhs. "
                 f"Equation: '{equation}'"
             )
-
+        
         lhs_batch_dim = batch_dims[0][0]
         rhs_batch_dim = batch_dims[1][0]
-
+        
         # Adjust contracting dims for the unbatched shapes seen by Python code
         # (primitives will see batched shapes, but Python validation sees unbatched)
         adj_lhs_contracting = tuple(
-            dim - (1 if dim > lhs_batch_dim else 0) for dim in contracting_dims[0]
+            dim - (1 if dim > lhs_batch_dim else 0)
+            for dim in contracting_dims[0]
         )
         adj_rhs_contracting = tuple(
-            dim - (1 if dim > rhs_batch_dim else 0) for dim in contracting_dims[1]
+            dim - (1 if dim > rhs_batch_dim else 0)
+            for dim in contracting_dims[1]
         )
         adj_contracting_dims = (adj_lhs_contracting, adj_rhs_contracting)
-
-        if has_quantizer_dim:
-            # Stack quantizers into a pytree structure that vmap can handle
-            # QuantizerSet is already a pytree, so we can stack them
-            stacked_quantizers = tree_util.tree_map(lambda *args: jnp.stack(args), *quantizer_sets)
-
-            # Vmap over quantizers
-            def dense_with_quantizer(lhs_single, rhs_single, quantizer_set):
-                """Dense with explicit quantizer argument for vmapping."""
-                return dense(
-                    lhs_single,
-                    rhs_single,
-                    None,
-                    contracting_dims=adj_contracting_dims,  # Adjusted for unbatched shapes
-                    transpose_batch_sequence=False,
-                    input_axes=operand_axes[0],
-                    kernel_axes=operand_axes[1],
-                    output_axes=output_axes,
-                    quantizer_set=quantizer_set,
-                )
-
-            vmapped_func = jax.vmap(
-                dense_with_quantizer,
-                in_axes=(lhs_batch_dim, rhs_batch_dim, 0),  # vmap over stacked quantizers
-                out_axes=0,
+        
+        # Stack quantizers into a pytree structure that vmap can handle
+        # QuantizerSet is already a pytree, so we can stack them
+        # For BF16 without quantizer_dim, this will be a stack of noop_quantizer_sets
+        stacked_quantizers = tree_util.tree_map(lambda *args: jnp.stack(args), *quantizer_sets)
+        
+        # Vmap over quantizers (or repeated noop quantizers for BF16)
+        def dense_with_quantizer(lhs_single, rhs_single, quantizer_set):
+            """Dense with explicit quantizer argument for vmapping."""
+            return dense(
+                lhs_single, rhs_single, None,
+                contracting_dims=adj_contracting_dims,  # Adjusted for unbatched shapes
+                transpose_batch_sequence=False,
+                input_axes=operand_axes[0],
+                kernel_axes=operand_axes[1],
+                output_axes=output_axes,
+                quantizer_set=quantizer_set,
             )
-            output = vmapped_func(lhs, rhs, stacked_quantizers)
+        
+        vmapped_func = jax.vmap(
+            dense_with_quantizer,
+            in_axes=(lhs_batch_dim, rhs_batch_dim, 0),  # vmap over stacked quantizers
+            out_axes=0
+        )
+        output = vmapped_func(lhs, rhs, stacked_quantizers)
     else:
         # No batch dimensions - direct dense call
         # quantizer_set length already validated to be 1
         output = dense(
-            lhs,
-            rhs,
-            None,
+            lhs, rhs, None,
             contracting_dims=contracting_dims,
             transpose_batch_sequence=False,
             input_axes=operand_axes[0],
@@ -355,5 +358,5 @@ def einsum(
             output_axes=output_axes,
             quantizer_set=quantizer_sets[0],
         )
-
+    
     return output
