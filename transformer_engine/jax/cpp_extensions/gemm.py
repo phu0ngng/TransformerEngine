@@ -812,23 +812,36 @@ class GemmPrimitive(BasePrimitive):
         lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
         # Validate batch dimensions
-        if (lhs_bdims is not None or rhs_bdims is not None):
+        if lhs_bdims is not None or rhs_bdims is not None:
             assert lhs_bdims == rhs_bdims, (
-                f"Batched GEMM requires matching batch dimensions, "
+                "Batched GEMM requires matching batch dimensions, "
                 f"got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims}"
             )
-        
+
         # Determine number of outputs based on fuse flags
         num_outputs = 1
         if fuse_bias and grad:
             num_outputs = 2
         if fuse_gelu and not grad:
             num_outputs = 3
-        
+
         # Use general batcher from BasePrimitive
         return GemmPrimitive.batcher_impl(
-            batched_args, batch_dims,
-            static_kwargs={'out_dtype': out_dtype, 'contracting_dims': contracting_dims, 'scaling_mode': scaling_mode, 'fuse_bias': fuse_bias, 'fuse_gelu': fuse_gelu, 'grad': grad, 'use_split_accumulator': use_split_accumulator, 'collective_op': collective_op, 'transpose_batch_sequence': transpose_batch_sequence, 'sequence_dim': sequence_dim, 'is_outer': is_outer},
+            batched_args,
+            batch_dims,
+            static_kwargs={
+                "out_dtype": out_dtype,
+                "contracting_dims": contracting_dims,
+                "scaling_mode": scaling_mode,
+                "fuse_bias": fuse_bias,
+                "fuse_gelu": fuse_gelu,
+                "grad": grad,
+                "use_split_accumulator": use_split_accumulator,
+                "collective_op": collective_op,
+                "transpose_batch_sequence": transpose_batch_sequence,
+                "sequence_dim": sequence_dim,
+                "is_outer": is_outer,
+            },
             num_outputs=num_outputs,
         )
 

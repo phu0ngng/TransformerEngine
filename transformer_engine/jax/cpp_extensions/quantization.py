@@ -365,23 +365,23 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         del is_outer
         check_valid_batch_dims(batch_dims)
         assert BaseDBiasQuantizePrimitive.outer_primitive is not None
-        
+
         # Quantization returns 6 outputs:
         # (data, transposed_data, scale, scale_inv, amax, dbias)
         num_outputs = 6
-        
+
         return BaseDBiasQuantizePrimitive.batcher_impl(
             batched_args,
             batch_dims,
             static_kwargs={
-                'out_dtype': out_dtype,
-                'scaling_mode': scaling_mode,
-                'q_layout': q_layout,
-                'flatten_axis': flatten_axis,
-                'scale_dtype': scale_dtype,
-                'is_dbias': is_dbias,
-                'stochastic_rounding': stochastic_rounding,
-                'use_rht': use_rht,
+                "out_dtype": out_dtype,
+                "scaling_mode": scaling_mode,
+                "q_layout": q_layout,
+                "flatten_axis": flatten_axis,
+                "scale_dtype": scale_dtype,
+                "is_dbias": is_dbias,
+                "stochastic_rounding": stochastic_rounding,
+                "use_rht": use_rht,
             },
             num_outputs=num_outputs,
         )

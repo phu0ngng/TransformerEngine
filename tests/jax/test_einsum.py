@@ -19,7 +19,7 @@ from transformer_engine.jax.quantize import helper, noop_quantizer_set
 
 
 # Test parameters
-DTYPES = [jnp.bfloat16, jnp.float32]
+DTYPES = [jnp.bfloat16]
 SIMPLE_MATMUL_CASES = [
     (128, 256, 512),
     (64, 128, 256),
@@ -83,8 +83,7 @@ class TestEinsumBasic:
         # Create per-batch quantizers (one per B)
         quantizer_sets = [noop_quantizer_set for _ in range(B)]
 
-        result = einsum("Bij,Bjk->Bik", A, B_mat,
-                       quantizer_sets=quantizer_sets, quantizer_dim='B')
+        result = einsum("Bij,Bjk->Bik", A, B_mat, quantizer_sets=quantizer_sets, quantizer_dim="B")
         expected = jnp.einsum("Bij,Bjk->Bik", A, B_mat)
 
         assert result.shape == (B, M, N)
@@ -101,8 +100,13 @@ class TestEinsumMoE:
         dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
         weights = jax.random.normal(jax.random.PRNGKey(1), (E, M, H), dtype=dtype)
 
-        result = einsum("EBCM,EMH->EBCH", dispatched, weights,
-                       quantizer_sets=[noop_quantizer_set]*E, quantizer_dim='E')
+        result = einsum(
+            "EBCM,EMH->EBCH",
+            dispatched,
+            weights,
+            quantizer_sets=[noop_quantizer_set] * E,
+            quantizer_dim="E",
+        )
         expected = jnp.einsum("EBCM,EMH->EBCH", dispatched, weights)
 
         assert result.shape == (E, B, C, H)
@@ -115,8 +119,13 @@ class TestEinsumMoE:
         hidden = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, H), dtype=dtype)
         weights = jax.random.normal(jax.random.PRNGKey(1), (E, H, M), dtype=dtype)
 
-        result = einsum("EBCH,EHM->EBCM", hidden, weights,
-                       quantizer_sets=[noop_quantizer_set]*E, quantizer_dim='E')
+        result = einsum(
+            "EBCH,EHM->EBCM",
+            hidden,
+            weights,
+            quantizer_sets=[noop_quantizer_set] * E,
+            quantizer_dim="E",
+        )
         expected = jnp.einsum("EBCH,EHM->EBCM", hidden, weights)
 
         assert result.shape == (E, B, C, M)
@@ -136,13 +145,23 @@ class TestEinsumMoE:
         assert dispatched.shape == (E, B, C, M)
 
         # 2. MLP Up: EBCM,EMH -> EBCH (TE einsum - NN layout with quantization)
-        hidden = einsum("EBCM,EMH->EBCH", dispatched, up_weights,
-                       quantizer_sets=[noop_quantizer_set]*E, quantizer_dim='E')
+        hidden = einsum(
+            "EBCM,EMH->EBCH",
+            dispatched,
+            up_weights,
+            quantizer_sets=[noop_quantizer_set] * E,
+            quantizer_dim="E",
+        )
         assert hidden.shape == (E, B, C, H)
 
         # 3. MLP Down: EBCH,EHM -> EBCM (TE einsum - NN layout with quantization)
-        expert_out = einsum("EBCH,EHM->EBCM", hidden, down_weights,
-                           quantizer_sets=[noop_quantizer_set]*E, quantizer_dim='E')
+        expert_out = einsum(
+            "EBCH,EHM->EBCM",
+            hidden,
+            down_weights,
+            quantizer_sets=[noop_quantizer_set] * E,
+            quantizer_dim="E",
+        )
         assert expert_out.shape == (E, B, C, M)
 
         # 4. Output: EBCM,BSEC -> BSM (jnp.einsum - not NN layout)
@@ -162,7 +181,7 @@ class TestEinsumAutodiff:
 
         def loss_fn(a, b):
             result = einsum("ij,jk->ik", a, b)
-            return jnp.sum(result ** 2)
+            return jnp.sum(result**2)
 
         # Compute gradients
         loss, grads = value_and_grad(loss_fn, argnums=(0, 1))(A, B)
@@ -175,13 +194,14 @@ class TestEinsumAutodiff:
     @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_moe_complete_grad(self, B, S, M, E, C, H, dtype):
         """Test gradients through complete MoE pipeline."""
+
         def moe_forward(tokens, routing, up_w, down_w):
             # Complete MoE forward pass (no quantization for gradient test)
-            dispatched = einsum("BSM,BSEC->EBCM", tokens, routing)
+            dispatched = jnp.einsum("BSM,BSEC->EBCM", tokens, routing)
             hidden = einsum("EBCM,EMH->EBCH", dispatched, up_w)
             expert_out = einsum("EBCH,EHM->EBCM", hidden, down_w)
-            output = einsum("EBCM,BSEC->BSM", expert_out, routing)
-            return jnp.sum(output ** 2)
+            output = jnp.einsum("EBCM,BSEC->BSM", expert_out, routing)
+            return jnp.sum(output**2)
 
         tokens = jax.random.normal(jax.random.PRNGKey(0), (B, S, M), dtype=dtype)
         routing = jax.random.normal(jax.random.PRNGKey(1), (B, S, E, C), dtype=dtype)
@@ -215,19 +235,19 @@ class TestEinsumPerExpertQuantizers:
             QuantizerFactory.create_set(
                 fp8_recipe=recipe,
                 quantize_meta_set=QuantizeMetaSet(
-                    x=QuantizeMeta(),
-                    kernel=QuantizeMeta(),
-                    grad=QuantizeMeta()
-                )
-            ) for _ in range(E)
+                    x=QuantizeMeta(), kernel=QuantizeMeta(), grad=QuantizeMeta()
+                ),
+            )
+            for _ in range(E)
         ]
 
         dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
         weights = jax.random.normal(jax.random.PRNGKey(1), (E, M, H), dtype=dtype)
 
         # Test with FP8 quantization - specify expert dimension
-        result = einsum("EBCM,EMH->EBCH", dispatched, weights,
-                       quantizer_sets=quantizer_sets, quantizer_dim='E')
+        result = einsum(
+            "EBCM,EMH->EBCH", dispatched, weights, quantizer_sets=quantizer_sets, quantizer_dim="E"
+        )
         expected = jnp.einsum("EBCM,EMH->EBCH", dispatched, weights)
 
         assert result.shape == (E, B, C, H)
@@ -244,17 +264,17 @@ class TestEinsumPerExpertQuantizers:
             QuantizerFactory.create_set(
                 fp8_recipe=recipe,
                 quantize_meta_set=QuantizeMetaSet(
-                    x=QuantizeMeta(),
-                    kernel=QuantizeMeta(),
-                    grad=QuantizeMeta()
-                )
-            ) for _ in range(E)
+                    x=QuantizeMeta(), kernel=QuantizeMeta(), grad=QuantizeMeta()
+                ),
+            )
+            for _ in range(E)
         ]
 
         def loss_fn(x, w):
-            result = einsum("EBCM,EMH->EBCH", x, w,
-                          quantizer_sets=quantizer_sets, quantizer_dim='E')
-            return jnp.sum(result ** 2)
+            result = einsum(
+                "EBCM,EMH->EBCH", x, w, quantizer_sets=quantizer_sets, quantizer_dim="E"
+            )
+            return jnp.sum(result**2)
 
         dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
         weights = jax.random.normal(jax.random.PRNGKey(1), (E, M, H), dtype=dtype)

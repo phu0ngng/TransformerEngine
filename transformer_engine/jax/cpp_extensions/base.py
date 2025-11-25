@@ -178,19 +178,19 @@ class BasePrimitive(metaclass=ABCMeta):
         num_outputs: int = 1,
     ) -> Tuple[Tuple[Any, ...], Tuple[Union[int, None], ...]]:
         """Batcher implementation for JAX primitives.
-        
+
         Implements the standard batching pattern: loop over batch dimension,
         call primitive for each slice, and stack results.
-        
+
         Args:
             batched_args: Tuple of input tensors (some may be batched)
             batch_dims: Tuple indicating batch dimension for each arg (None if not batched)
             static_kwargs: Dictionary of static arguments to pass to primitive.bind()
             num_outputs: Number of outputs the primitive returns
-            
+
         Returns:
             Tuple of (output_tensors, output_batch_dims)
-            
+
         Example:
             @staticmethod
             def batcher(batched_args, batch_dims, *, arg1, arg2, arg3):
@@ -201,7 +201,7 @@ class BasePrimitive(metaclass=ABCMeta):
                 )
         """
         from jax import lax
-        
+
         # Find batch dimension and validate all batched args have the same batch_dim
         batch_dim = None
         batch_size = None
@@ -212,10 +212,10 @@ class BasePrimitive(metaclass=ABCMeta):
                     batch_size = arg.shape[bdim]
                 elif bdim != batch_dim:
                     raise ValueError(
-                        f"All batched arguments must have the same batch dimension. "
+                        "All batched arguments must have the same batch dimension. "
                         f"Got batch_dims={batch_dims}"
                     )
-        
+
         if batch_size is None:
             # No batching - call primitive directly
             result = cls.outer_primitive.bind(*batched_args, **static_kwargs)
@@ -223,10 +223,10 @@ class BasePrimitive(metaclass=ABCMeta):
                 result = (result,)
             out_bdims = tuple(None for _ in result)
             return result, out_bdims
-        
+
         # Loop over batch dimension and collect results
         all_results = []
-        
+
         for i in range(batch_size):
             # Extract slice for each argument
             sliced_args = []
@@ -236,30 +236,32 @@ class BasePrimitive(metaclass=ABCMeta):
                     sliced_args.append(slice_i)
                 else:
                     sliced_args.append(arg)
-            
+
             # Call primitive with unbatched slices
             result_i = cls.outer_primitive.bind(*sliced_args, **static_kwargs)
-            
+
             # Normalize to tuple
             if not isinstance(result_i, (tuple, list)):
                 result_i = (result_i,)
             elif isinstance(result_i, list):
                 result_i = tuple(result_i)
-            
+
             all_results.append(result_i)
-        
+
         # Transpose: from list of tuples to tuple of lists
         # all_results = [(out0_0, out1_0, ...), (out0_1, out1_1, ...), ...]
         # transposed = ([out0_0, out0_1, ...], [out1_0, out1_1, ...], ...)
         transposed = tuple(zip(*all_results))
-        
+
         # Stack each output along the batch dimension
         # Standard vmap convention: stack at the same position as input batch_dim
-        stacked_results = tuple(jnp.stack(list(out_list), axis=batch_dim) for out_list in transposed)
-        
+        stacked_results = tuple(
+            jnp.stack(list(out_list), axis=batch_dim) for out_list in transposed
+        )
+
         # All outputs are batched at the same dimension as inputs
         out_bdims = tuple(batch_dim for _ in stacked_results)
-        
+
         return stacked_results, out_bdims
 
 
@@ -354,5 +356,3 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
             cls.set_enabled(False)
         else:
             raise ValueError(f"Primitive not found in registry: {name}")
-
-
