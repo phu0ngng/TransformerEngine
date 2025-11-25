@@ -21,7 +21,7 @@ Example - MoE Forward Pass with Per-Expert FP8:
     ```python
     from transformer_engine.jax.einsum import einsum
     from transformer_engine.jax.quantize import QuantizerFactory, QuantizeMeta, QuantizeMetaSet
-    
+
     # Create per-expert quantizers (E experts)
     quantizer_sets = [
         QuantizerFactory.create_set(
@@ -31,20 +31,20 @@ Example - MoE Forward Pass with Per-Expert FP8:
             )
         ) for _ in range(num_experts)
     ]
-    
+
     # MoE pipeline with per-expert quantization
     # 1. Dispatch: BSM,BSEC -> EBCM
-    dispatched = einsum("BSM,BSEC->EBCM", tokens, routing, 
+    dispatched = einsum("BSM,BSEC->EBCM", tokens, routing,
                        quantizer_sets=quantizer_sets)
-    
+
     # 2. MLP Up: EBCM,EMH -> EBCH
     hidden = einsum("EBCM,EMH->EBCH", dispatched, expert_up_weights,
                    quantizer_sets=quantizer_sets)
-    
+
     # 3. MLP Down: EBCH,EHM -> EBCM
     expert_out = einsum("EBCH,EHM->EBCM", hidden, expert_down_weights,
                        quantizer_sets=quantizer_sets)
-    
+
     # 4. Output: EBCM,BSEC -> BSM
     output = einsum("EBCM,BSEC->BSM", expert_out, routing,
                    quantizer_sets=quantizer_sets)
@@ -56,7 +56,7 @@ Implementation Details:
     2. Creating a vmapped version of TE's dense layer
     3. Vmapping over both batch dimensions AND quantizer_sets (for per-expert quantization)
     4. Leveraging dense's existing VJP for automatic differentiation
-    
+
     This design reuses TE's well-tested dense layer infrastructure while enabling
     flexible per-expert quantization for MoE models.
 """
@@ -76,17 +76,17 @@ from .quantize import (
 
 def _parse_einsum_input(equation: str, *operands) -> Tuple[str, List[str], str]:
     """Parse einsum equation into input specs and output spec.
-    
+
     Args:
         equation: Einsum equation string (e.g., "ij,jk->ik" or "BNSM,BNSEC->EBNCM")
         operands: Input tensors
-        
+
     Returns:
         Tuple of (equation, input_specs, output_spec)
     """
     # Remove spaces
     equation = equation.replace(' ', '')
-    
+
     if '->' in equation:
         inputs_str, output_str = equation.split('->')
         input_specs = inputs_str.split(',')
@@ -99,18 +99,18 @@ def _parse_einsum_input(equation: str, *operands) -> Tuple[str, List[str], str]:
         for spec in input_specs:
             all_indices.update(spec)
         output_str = ''.join(sorted(all_indices))
-    
+
     return equation, input_specs, output_str
 
 
 def _find_contracting_and_batch_dims(lhs_spec: str, rhs_spec: str, output_spec: str):
     """Find contracting and batch dimensions for a GEMM operation.
-    
+
     Args:
         lhs_spec: Index specification for LHS (e.g., "BNSM")
         rhs_spec: Index specification for RHS (e.g., "BNSEC")
         output_spec: Index specification for output (e.g., "EBNCM")
-        
+
     Returns:
         Tuple of (lhs_contracting, rhs_contracting, lhs_batch, rhs_batch)
     """
@@ -118,42 +118,42 @@ def _find_contracting_and_batch_dims(lhs_spec: str, rhs_spec: str, output_spec: 
     lhs_set = set(lhs_spec)
     rhs_set = set(rhs_spec)
     output_set = set(output_spec)
-    
+
     contracting_indices = (lhs_set & rhs_set) - output_set
-    
+
     # Batch dimensions: indices in lhs, rhs, and output
     batch_indices = lhs_set & rhs_set & output_set
-    
+
     # Find positions
     lhs_contracting = tuple(i for i, c in enumerate(lhs_spec) if c in contracting_indices)
     rhs_contracting = tuple(i for i, c in enumerate(rhs_spec) if c in contracting_indices)
     lhs_batch = tuple(i for i, c in enumerate(lhs_spec) if c in batch_indices)
     rhs_batch = tuple(i for i, c in enumerate(rhs_spec) if c in batch_indices)
-    
+
     return lhs_contracting, rhs_contracting, lhs_batch, rhs_batch
 
 
 def _einsum_to_gemm_info(equation: str, *operands):
     """Extract GEMM information from einsum equation.
-    
+
     Args:
         equation: Einsum equation
         operands: Input tensors
-        
+
     Returns:
         Dict with keys: lhs_idx, rhs_idx, contracting_dims, batch_dims, output_spec
     """
     equation, input_specs, output_spec = _parse_einsum_input(equation, *operands)
-    
+
     if len(input_specs) != 2:
         raise NotImplementedError(f"Einsum with {len(input_specs)} operands not yet supported")
-    
+
     lhs_spec, rhs_spec = input_specs
-    
+
     lhs_contracting, rhs_contracting, lhs_batch, rhs_batch = _find_contracting_and_batch_dims(
         lhs_spec, rhs_spec, output_spec
     )
-    
+
     return {
         'lhs_idx': 0,
         'rhs_idx': 1,
@@ -173,15 +173,15 @@ def einsum(
     output_axes: Optional[Tuple[str, ...]] = None,
 ) -> jnp.ndarray:
     """Perform einsum operation with optional FP8 quantization using vmap + dense.
-    
+
     This function implements einsum by:
     1. Identifying batch dimensions
     2. Using vmap to vectorize over batch dimensions
     3. Calling the existing dense() function which has VJP already implemented
-    
+
     Each batched GEMM can have its own quantizer_set, enabling per-expert
     quantization in MoE models.
-    
+
     Args:
         equation: Einsum equation string (e.g., "ij,jk->ik", "BNSM,BNSEC->EBNCM")
         *operands: Input tensors
@@ -190,38 +190,38 @@ def einsum(
                        - None: uses noop quantizers (no FP8)
         operand_axes: List of logical axes tuples for sharding each operand
         output_axes: Logical axes for sharding the output
-        
+
     Returns:
         Result of the einsum operation
-        
+
     Examples:
         # Simple matrix multiplication with FP8
         result = einsum("ij,jk->ik", A, B, quantizer_sets=my_quantizer_set)
-        
+
         # MoE with per-expert quantizers (E experts)
         expert_quantizers = [quantizer_e0, quantizer_e1, ..., quantizer_eN]
-        result = einsum("EBNCM,EMH->EBNCH", tokens, weights, 
+        result = einsum("EBNCM,EMH->EBNCH", tokens, weights,
                        quantizer_sets=expert_quantizers)
     """
     if operand_axes is None:
         operand_axes = [None] * len(operands)
-    
+
     if len(operands) != 2:
         raise NotImplementedError("Only 2-operand einsum currently supported")
-    
+
     # Parse einsum to get GEMM info
     gemm_info = _einsum_to_gemm_info(equation, *operands)
     contracting_dims = gemm_info['contracting_dims']
     batch_dims = gemm_info['batch_dims']
-    
+
     lhs, rhs = operands
-    
+
     # Determine if we have per-batch quantizers
     has_batch_dims = bool(batch_dims[0] or batch_dims[1])
-    
+
     if quantizer_sets is None:
-        quantizer_sets = noop_quantizer_set * len(operands)
-    
+        quantizer_sets = [noop_quantizer_set] * len(operands)
+
     # Create vmapped dense function for batch dimensions
     if has_batch_dims:
         # Per-batch quantizers: vmap over quantizer_sets
@@ -237,14 +237,14 @@ def einsum(
                 output_axes=output_axes,
                 quantizer_set=quantizer,
             )
-        
+
         # Apply vmap: first dimension is for quantizers (e.g., expert dimension)
         vmapped_func = jax.vmap(
             dense_with_quantizer,
             in_axes=(sorted(batch_dims[0])[0], sorted(batch_dims[1])[0], 0),  # vmap over quantizers
             out_axes=0
         )
-        
+
         # Apply vmap for remaining batch dimensions
         for lhs_dim, rhs_dim in zip(sorted(batch_dims[0])[1:], sorted(batch_dims[1])[1:]):
             # Adjust dimensions after first vmap
@@ -255,7 +255,7 @@ def einsum(
                 in_axes=(adj_lhs, adj_rhs, None),  # broadcast quantizer
                 out_axes=0
             )
-        
+
         output = vmapped_func(lhs, rhs, quantizer_sets)
     else:
         # No batch dimensions - direct dense call
@@ -269,5 +269,5 @@ def einsum(
             output_axes=output_axes,
             quantizer_set=quantizer_set,
         )
-    
+
     return output
