@@ -64,7 +64,7 @@ from typing import Tuple, Sequence, Optional, List
 from functools import partial
 import jax
 import jax.numpy as jnp
-from jax import lax
+from jax import lax, tree_util
 
 from .dense import dense
 from .quantize import (
@@ -307,6 +307,10 @@ def einsum(
         adj_contracting_dims = (adj_lhs_contracting, adj_rhs_contracting)
         
         if has_quantizer_dim:
+            # Stack quantizers into a pytree structure that vmap can handle
+            # QuantizerSet is already a pytree, so we can stack them
+            stacked_quantizers = tree_util.tree_map(lambda *args: jnp.stack(args), *quantizer_sets)
+            
             # Vmap over quantizers
             def dense_with_quantizer(lhs_single, rhs_single, quantizer_set):
                 """Dense with explicit quantizer argument for vmapping."""
@@ -322,10 +326,10 @@ def einsum(
             
             vmapped_func = jax.vmap(
                 dense_with_quantizer,
-                in_axes=(lhs_batch_dim, rhs_batch_dim, 0),  # vmap over quantizers
+                in_axes=(lhs_batch_dim, rhs_batch_dim, 0),  # vmap over stacked quantizers
                 out_axes=0
             )
-            output = vmapped_func(lhs, rhs, quantizer_sets)
+            output = vmapped_func(lhs, rhs, stacked_quantizers)
     else:
         # No batch dimensions - direct dense call
         # quantizer_set length already validated to be 1
