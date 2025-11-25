@@ -232,8 +232,12 @@ class BasePrimitive(metaclass=ABCMeta):
             
             # Call primitive with unbatched slices
             result_i = cls.outer_primitive.bind(*sliced_args, **static_kwargs)
-            if not isinstance(result_i, tuple):
+            
+            # Normalize to tuple
+            if not isinstance(result_i, (tuple, list)):
                 result_i = (result_i,)
+            elif isinstance(result_i, list):
+                result_i = tuple(result_i)
             
             all_results.append(result_i)
         
