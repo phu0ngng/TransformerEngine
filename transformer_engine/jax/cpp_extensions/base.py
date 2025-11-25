@@ -218,7 +218,7 @@ class BasePrimitive(metaclass=ABCMeta):
             return result, out_bdims
         
         # Loop over batch dimension and collect results
-        results = [[] for _ in range(num_outputs)]
+        all_results = []
         
         for i in range(batch_size):
             # Extract slice for each argument
@@ -235,12 +235,15 @@ class BasePrimitive(metaclass=ABCMeta):
             if not isinstance(result_i, tuple):
                 result_i = (result_i,)
             
-            # Collect results
-            for j, out_j in enumerate(result_i):
-                results[j].append(out_j)
+            all_results.append(result_i)
         
-        # Stack results along axis 0
-        stacked_results = tuple(jnp.stack(res_list, axis=0) for res_list in results)
+        # Transpose: from list of tuples to tuple of lists
+        # all_results = [(out0_0, out1_0), (out0_1, out1_1), ...]
+        # transposed = ([out0_0, out0_1, ...], [out1_0, out1_1, ...])
+        transposed = tuple(zip(*all_results))
+        
+        # Stack each output along axis 0
+        stacked_results = tuple(jnp.stack(out_list, axis=0) for out_list in transposed)
         out_bdims = tuple(0 for _ in stacked_results)
         
         return stacked_results, out_bdims
