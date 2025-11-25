@@ -202,12 +202,19 @@ class BasePrimitive(metaclass=ABCMeta):
         """
         from jax import lax
         
-        # Find batch size from first batched argument
+        # Find batch dimension and validate all batched args have the same batch_dim
+        batch_dim = None
         batch_size = None
         for arg, bdim in zip(batched_args, batch_dims):
             if bdim is not None:
-                batch_size = arg.shape[bdim]
-                break
+                if batch_dim is None:
+                    batch_dim = bdim
+                    batch_size = arg.shape[bdim]
+                elif bdim != batch_dim:
+                    raise ValueError(
+                        f"All batched arguments must have the same batch dimension. "
+                        f"Got batch_dims={batch_dims}"
+                    )
         
         if batch_size is None:
             # No batching - call primitive directly
@@ -246,12 +253,12 @@ class BasePrimitive(metaclass=ABCMeta):
         # transposed = ([out0_0, out0_1, ...], [out1_0, out1_1, ...], ...)
         transposed = tuple(zip(*all_results))
         
-        # Stack each output along axis 0 (standard vmap convention)
-        # This creates the batch dimension at position 0 for all outputs
-        stacked_results = tuple(jnp.stack(list(out_list), axis=0) for out_list in transposed)
+        # Stack each output along the batch dimension
+        # Standard vmap convention: stack at the same position as input batch_dim
+        stacked_results = tuple(jnp.stack(list(out_list), axis=batch_dim) for out_list in transposed)
         
-        # All outputs are batched at dimension 0
-        out_bdims = tuple(0 for _ in stacked_results)
+        # All outputs are batched at the same dimension as inputs
+        out_bdims = tuple(batch_dim for _ in stacked_results)
         
         return stacked_results, out_bdims
 
