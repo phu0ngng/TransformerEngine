@@ -15,7 +15,7 @@ from transformer_engine.jax.quantize import (
     QuantizeMeta,
     QuantizeMetaSet,
 )
-from transformer_engine.jax.quantize import helper
+from transformer_engine.jax.quantize import helper, noop_quantizer_set
 
 
 # Test parameters
@@ -79,11 +79,11 @@ class TestEinsumBasic:
         """Test single batch dimension with per-batch quantizers: Bij,Bjk->Bik"""
         A = jax.random.normal(jax.random.PRNGKey(0), (B, M, K), dtype=dtype)
         B_mat = jax.random.normal(jax.random.PRNGKey(1), (B, K, N), dtype=dtype)
-        
+
         # Create per-batch quantizers (one per B)
         quantizer_sets = [noop_quantizer_set for _ in range(B)]
 
-        result = einsum("Bij,Bjk->Bik", A, B_mat, 
+        result = einsum("Bij,Bjk->Bik", A, B_mat,
                        quantizer_sets=quantizer_sets, quantizer_dim='B')
         expected = jnp.einsum("Bij,Bjk->Bik", A, B_mat)
 
@@ -275,7 +275,7 @@ class TestEinsumPerExpertQuantizers:
         ]
 
         def loss_fn(x, w):
-            result = einsum("EBCM,EMH->EBCH", x, w, 
+            result = einsum("EBCM,EMH->EBCH", x, w,
                           quantizer_sets=quantizer_sets, quantizer_dim='E')
             return jnp.sum(result ** 2)
 
