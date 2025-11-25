@@ -812,17 +812,26 @@ class GemmPrimitive(BasePrimitive):
         assert GemmPrimitive.outer_primitive is not None
         lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
-        # Batched GEMM is not supported
-        assert (
-            lhs_bdims is None and rhs_bdims is None
-        ), f"(Batching is not supported, got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims})"
-        out_bdims = (None,)
-
-        # Bias gradient is never batched
-        bias_bdims = (None,)
-
-        # Pre-GeLU output, if exists, is batched like GEMM output
-        pre_gelu_bdims = (None,)
+        # Support batched GEMM via vmap
+        # If both lhs and rhs have the same batch dimension, output is batched
+        if lhs_bdims is not None and rhs_bdims is not None:
+            assert lhs_bdims == rhs_bdims, (
+                f"Batched GEMM requires matching batch dimensions, "
+                f"got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims}"
+            )
+            out_bdims = (lhs_bdims,)
+            bias_bdims = (None,)  # Bias is broadcast
+            pre_gelu_bdims = (lhs_bdims,)  # Pre-GeLU output is batched like GEMM output
+        elif lhs_bdims is None and rhs_bdims is None:
+            # No batching
+            out_bdims = (None,)
+            bias_bdims = (None,)
+            pre_gelu_bdims = (None,)
+        else:
+            raise ValueError(
+                f"Batched GEMM requires both operands to be batched or both unbatched, "
+                f"got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims}"
+            )
         if fuse_gelu and not grad:
             pre_gelu_bdims = out_bdims
 
