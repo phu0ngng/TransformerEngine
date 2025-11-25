@@ -7,15 +7,15 @@ This module provides an einsum implementation that decomposes einsum operations 
 a sequence of GEMMs, each with its own quantizer for FP8 support. It follows the
 pattern of jax.numpy.einsum but uses TE's optimized GEMM operations.
 
-This module provides a flexible einsum implementation optimized for Mixture-of-Experts (MoE)
-models with quantization support. It leverages JAX's vmap and TE's dense layer to
-efficiently handle complex multi-dimensional tensor contractions.
+This module provides an einsum implementation optimized for Mixture-of-Experts (MoE)
+models with per-expert quantization support. It leverages JAX's vmap and TE's dense
+layer to efficiently handle tensor contractions with a single batch dimension.
 
 Key Features:
     - **Per-expert quantization**: Each expert can have independent scaling and quantization parameters
     - **Automatic differentiation**: Full gradient support via dense layer's VJP
-    - **Efficient batching**: Uses vmap to vectorize over batch/expert dimensions
-    - **Flexible API**: Supports both shared and per-expert quantizers
+    - **Single batch dimension**: Optimized for MoE patterns (expert dimension)
+    - **Explicit API**: Requires quantizer_dim when using quantization
 
 Example - MoE Forward Pass with Per-Expert FP8:
     ```python
@@ -50,13 +50,14 @@ Example - MoE Forward Pass with Per-Expert FP8:
 
 Implementation Details:
     The einsum function works by:
-    1. Parsing the einsum equation to identify batch and contracting dimensions
-    2. Creating a vmapped version of TE's dense layer
-    3. Vmapping over both batch dimensions AND quantizer_sets (for per-expert quantization)
-    4. Leveraging dense's existing VJP for automatic differentiation
-
+    1. Parsing the einsum equation to identify the single batch dimension and contracting dimensions
+    2. Validating that quantizer_sets length matches the quantizer dimension size
+    3. Creating a vmapped version of TE's dense layer over the batch dimension
+    4. Vmapping over quantizer_sets to provide per-batch (e.g., per-expert) quantization
+    5. Leveraging dense's existing VJP for automatic differentiation
+    
     This design reuses TE's well-tested dense layer infrastructure while enabling
-    flexible per-expert quantization for MoE models.
+    per-expert quantization for MoE models with minimal code complexity.
 """
 
 from typing import Tuple, Sequence, Optional, List
@@ -219,6 +220,13 @@ def einsum(
     
     lhs, rhs = operands
     
+    # Validate quantizer_dim is provided when quantizer_sets is given
+    if quantizer_sets is not None and quantizer_dim is None:
+        raise ValueError(
+            "quantizer_dim must be specified when quantizer_sets is provided. "
+            "This explicitly indicates which dimension the quantizers correspond to."
+        )
+    
     # Find quantizer dimension
     quantizer_dim_lhs = None
     quantizer_dim_rhs = None
@@ -234,25 +242,20 @@ def einsum(
             raise ValueError(
                 f"quantizer_dim '{quantizer_dim}' not found in equation '{equation}'"
             )
-    else:
-        # Default: use first batch dimension at position 0 (if exists)
-        if batch_dims[0] and 0 in batch_dims[0]:
-            quantizer_dim_lhs = 0
-        if batch_dims[1] and 0 in batch_dims[1]:
-            quantizer_dim_rhs = 0
     
     has_quantizer_dim = quantizer_dim_lhs is not None or quantizer_dim_rhs is not None
     
-    # Determine expected quantizer_sets length
-    if has_quantizer_dim:
+    # Determine expected quantizer_sets length based on quantizer_dim
+    if quantizer_dim is not None:
         if quantizer_dim_lhs is not None:
             expected_length = lhs.shape[quantizer_dim_lhs]
         else:
             expected_length = rhs.shape[quantizer_dim_rhs]
     else:
+        # No quantizer_dim specified (and quantizer_sets must be None due to check above)
         expected_length = 1
     
-    # Validate quantizer_sets
+    # Validate and initialize quantizer_sets
     if quantizer_sets is None:
         quantizer_sets = [noop_quantizer_set] * expected_length
     elif not isinstance(quantizer_sets, (list, tuple)):
@@ -260,8 +263,7 @@ def einsum(
     elif len(quantizer_sets) != expected_length:
         raise ValueError(
             f"quantizer_sets length ({len(quantizer_sets)}) must match "
-            f"dimension {quantizer_dim if quantizer_dim else '(first batch dim)'} "
-            f"size ({expected_length})"
+            f"dimension '{quantizer_dim}' size ({expected_length})"
         )
     
     # Validate that this is NN layout (required by dense)
@@ -282,49 +284,48 @@ def einsum(
     has_batch_dims = bool(batch_dims[0] or batch_dims[1])
     
     if has_batch_dims:
-        # Adjust contracting dims after removing batch dimensions
-        # When we vmap, batch dimensions are removed, so we need to adjust indices
-        lhs_batch_sorted = sorted(batch_dims[0])
-        rhs_batch_sorted = sorted(batch_dims[1])
+        # Validate single batch dimension (MoE use case)
+        if len(batch_dims[0]) != 1 or len(batch_dims[1]) != 1:
+            raise NotImplementedError(
+                f"Only single batch dimension is currently supported. "
+                f"Got {len(batch_dims[0])} batch dims in lhs and {len(batch_dims[1])} in rhs. "
+                f"Equation: '{equation}'"
+            )
         
-        # Compute adjusted contracting dims (after batch dims are removed by vmap)
+        lhs_batch_dim = batch_dims[0][0]
+        rhs_batch_dim = batch_dims[1][0]
+        
+        # Adjust contracting dims after removing batch dimension
         adj_lhs_contracting = tuple(
-            dim - sum(1 for b in lhs_batch_sorted if b < dim)
+            dim - (1 if dim > lhs_batch_dim else 0)
             for dim in contracting_dims[0]
         )
         adj_rhs_contracting = tuple(
-            dim - sum(1 for b in rhs_batch_sorted if b < dim)
+            dim - (1 if dim > rhs_batch_dim else 0)
             for dim in contracting_dims[1]
         )
         adj_contracting_dims = (adj_lhs_contracting, adj_rhs_contracting)
         
-        # Create dense wrapper function
-        def dense_with_quantizer(lhs_single, rhs_single, quantizer_set):
-            """Dense with explicit quantizer argument for vmapping."""
-            return dense(
-                lhs_single, rhs_single, None,
-                contracting_dims=adj_contracting_dims,
-                transpose_batch_sequence=False,
-                input_axes=operand_axes[0],
-                kernel_axes=operand_axes[1],
-                output_axes=output_axes,
-                quantizer_set=quantizer_set,
-            )
-
-        # Apply vmap for all batch dimensions
-        vmapped_func = dense_with_quantizer
-        for idx, (lhs_dim, rhs_dim) in enumerate(zip(lhs_batch_sorted, rhs_batch_sorted)):
-            adj_lhs = lhs_dim - idx
-            adj_rhs = rhs_dim - idx
-            adj_quantizer = 0  # Quantizer array always at position 0 after each vmap, when no quantizer dimension it does not matter
+        if has_quantizer_dim:
+            # Vmap over quantizers
+            def dense_with_quantizer(lhs_single, rhs_single, quantizer_set):
+                """Dense with explicit quantizer argument for vmapping."""
+                return dense(
+                    lhs_single, rhs_single, None,
+                    contracting_dims=adj_contracting_dims,
+                    transpose_batch_sequence=False,
+                    input_axes=operand_axes[0],
+                    kernel_axes=operand_axes[1],
+                    output_axes=output_axes,
+                    quantizer_set=quantizer_set,
+                )
             
             vmapped_func = jax.vmap(
-                vmapped_func,
-                in_axes=(adj_lhs, adj_rhs, adj_quantizer),
+                dense_with_quantizer,
+                in_axes=(lhs_batch_dim, rhs_batch_dim, 0),  # vmap over quantizers
                 out_axes=0
             )
-        
-        output = vmapped_func(lhs, rhs, quantizer_sets)
+            output = vmapped_func(lhs, rhs, quantizer_sets)
     else:
         # No batch dimensions - direct dense call
         # quantizer_set length already validated to be 1

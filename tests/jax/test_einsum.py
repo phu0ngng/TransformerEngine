@@ -26,6 +26,7 @@ SIMPLE_MATMUL_CASES = [
     (256, 512, 1024),
 ]
 BATCHED_MATMUL_CASES = [
+    # (B, M, K, N) - Single batch dimension B
     (4, 128, 256, 512),
     (8, 64, 128, 256),
 ]
@@ -56,16 +57,16 @@ def init():
 
 
 class TestEinsumBasic:
-    """Test basic einsum operations."""
+    """Test basic einsum operations with single batch dimension."""
 
     @pytest_parametrize_wrapper("M,K,N", SIMPLE_MATMUL_CASES)
     @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_simple_matmul(self, M, K, N, dtype):
-        """Test simple matrix multiplication: ij,jk->ik"""
+        """Test simple matrix multiplication (no batch dim): ij,jk->ik"""
         A = jax.random.normal(jax.random.PRNGKey(0), (M, K), dtype=dtype)
         B = jax.random.normal(jax.random.PRNGKey(1), (K, N), dtype=dtype)
 
-        # Without FP8
+        # Without quantization
         result = einsum("ij,jk->ik", A, B)
         expected = jnp.einsum("ij,jk->ik", A, B)
 
@@ -74,20 +75,24 @@ class TestEinsumBasic:
 
     @pytest_parametrize_wrapper("B,M,K,N", BATCHED_MATMUL_CASES)
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    def test_batched_matmul(self, B, M, K, N, dtype):
-        """Test batched matrix multiplication: bij,bjk->bik"""
+    def test_single_batch_dim_with_quantizers(self, B, M, K, N, dtype):
+        """Test single batch dimension with per-batch quantizers: Bij,Bjk->Bik"""
         A = jax.random.normal(jax.random.PRNGKey(0), (B, M, K), dtype=dtype)
         B_mat = jax.random.normal(jax.random.PRNGKey(1), (B, K, N), dtype=dtype)
+        
+        # Create per-batch quantizers (one per B)
+        quantizer_sets = [noop_quantizer_set for _ in range(B)]
 
-        result = einsum("bij,bjk->bik", A, B_mat)
-        expected = jnp.einsum("bij,bjk->bik", A, B_mat)
+        result = einsum("Bij,Bjk->Bik", A, B_mat, 
+                       quantizer_sets=quantizer_sets, quantizer_dim='B')
+        expected = jnp.einsum("Bij,Bjk->Bik", A, B_mat)
 
         assert result.shape == (B, M, N)
         assert_allclose(result, expected, dtype=dtype)
 
 
 class TestEinsumMoE:
-    """Test MoE-specific einsum operations."""
+    """Test MoE-specific einsum operations (single batch dimension = expert dim)."""
 
     @pytest_parametrize_wrapper("B,S,M,E,C,H", MOE_CASES)
     @pytest_parametrize_wrapper("dtype", DTYPES)
