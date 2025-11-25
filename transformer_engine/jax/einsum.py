@@ -254,6 +254,9 @@ def einsum(
     
     has_quantizer_dim = quantizer_dim_lhs is not None or quantizer_dim_rhs is not None
     
+    # Check if we have batch dimensions
+    has_batch_dims = bool(batch_dims[0] or batch_dims[1])
+    
     # Determine expected quantizer_sets length based on quantizer_dim
     if quantizer_dim is not None:
         if quantizer_dim_lhs is not None:
