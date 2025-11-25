@@ -362,7 +362,6 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         use_rht,
     ):
         """Batch rule for quantization primitive using general batcher."""
-        del is_outer
         check_valid_batch_dims(batch_dims)
         assert BaseDBiasQuantizePrimitive.outer_primitive is not None
 
@@ -380,6 +379,7 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
                 "flatten_axis": flatten_axis,
                 "scale_dtype": scale_dtype,
                 "is_dbias": is_dbias,
+                "is_outer": is_outer,
                 "stochastic_rounding": stochastic_rounding,
                 "use_rht": use_rht,
             },
