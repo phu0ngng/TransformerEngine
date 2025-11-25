@@ -298,8 +298,7 @@ def einsum(
         )
         adj_contracting_dims = (adj_lhs_contracting, adj_rhs_contracting)
         
-        # Per-batch quantizers: vmap over quantizer_sets
-        # Assume first batch dimension corresponds to quantizer dimension (e.g., experts)
+        # Create dense wrapper function
         def dense_with_quantizer(lhs_single, rhs_single, quantizer_set):
             """Dense with explicit quantizer argument for vmapping."""
             return dense(
@@ -313,14 +312,11 @@ def einsum(
             )
 
         # Apply vmap for all batch dimensions
-        # All batch dimensions vmap over quantizers (quantizer array has same batch structure)
         vmapped_func = dense_with_quantizer
-        
-        for idx, (lhs_dim, rhs_dim) in enumerate(zip(sorted(batch_dims[0]), sorted(batch_dims[1]))):
-            # Adjust dimensions for previously applied vmaps
+        for idx, (lhs_dim, rhs_dim) in enumerate(zip(lhs_batch_sorted, rhs_batch_sorted)):
             adj_lhs = lhs_dim - idx
             adj_rhs = rhs_dim - idx
-            adj_quantizer = 0  # Quantizer array always at position 0 after each vmap
+            adj_quantizer = 0  # Quantizer array always at position 0 after each vmap, when no quantizer dimension it does not matter
             
             vmapped_func = jax.vmap(
                 vmapped_func,
@@ -331,7 +327,7 @@ def einsum(
         output = vmapped_func(lhs, rhs, quantizer_sets)
     else:
         # No batch dimensions - direct dense call
-        # quantizer_sets length already validated to be 1
+        # quantizer_set length already validated to be 1
         output = dense(
             lhs, rhs, None,
             contracting_dims=contracting_dims,
