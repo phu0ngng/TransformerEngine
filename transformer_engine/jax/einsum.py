@@ -295,28 +295,18 @@ def einsum(
         lhs_batch_dim = batch_dims[0][0]
         rhs_batch_dim = batch_dims[1][0]
         
-        # Adjust contracting dims after removing batch dimension
-        adj_lhs_contracting = tuple(
-            dim - (1 if dim > lhs_batch_dim else 0)
-            for dim in contracting_dims[0]
-        )
-        adj_rhs_contracting = tuple(
-            dim - (1 if dim > rhs_batch_dim else 0)
-            for dim in contracting_dims[1]
-        )
-        adj_contracting_dims = (adj_lhs_contracting, adj_rhs_contracting)
-        
         if has_quantizer_dim:
             # Stack quantizers into a pytree structure that vmap can handle
             # QuantizerSet is already a pytree, so we can stack them
             stacked_quantizers = tree_util.tree_map(lambda *args: jnp.stack(args), *quantizer_sets)
             
             # Vmap over quantizers
+            # Note: contracting_dims stay the same - vmap handles the batch dimension automatically
             def dense_with_quantizer(lhs_single, rhs_single, quantizer_set):
                 """Dense with explicit quantizer argument for vmapping."""
                 return dense(
                     lhs_single, rhs_single, None,
-                    contracting_dims=adj_contracting_dims,
+                    contracting_dims=contracting_dims,  # Use original contracting dims
                     transpose_batch_sequence=False,
                     input_axes=operand_axes[0],
                     kernel_axes=operand_axes[1],
