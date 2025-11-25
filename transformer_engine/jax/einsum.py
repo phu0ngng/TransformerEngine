@@ -33,21 +33,19 @@ Example - MoE Forward Pass with Per-Expert FP8:
     ]
 
     # MoE pipeline with per-expert quantization
-    # 1. Dispatch: BSM,BSEC -> EBCM
-    dispatched = einsum("BSM,BSEC->EBCM", tokens, routing,
-                       quantizer_sets=quantizer_sets)
-
-    # 2. MLP Up: EBCM,EMH -> EBCH
+    # 1. Dispatch: BSM,BSEC -> EBCM (no quantization - routing operation)
+    dispatched = einsum("BSM,BSEC->EBCM", tokens, routing)
+    
+    # 2. MLP Up: EBCM,EMH -> EBCH (per-expert quantization)
     hidden = einsum("EBCM,EMH->EBCH", dispatched, expert_up_weights,
-                   quantizer_sets=quantizer_sets)
-
-    # 3. MLP Down: EBCH,EHM -> EBCM
+                   quantizer_sets=expert_quantizers, quantizer_dim='E')
+    
+    # 3. MLP Down: EBCH,EHM -> EBCM (per-expert quantization)
     expert_out = einsum("EBCH,EHM->EBCM", hidden, expert_down_weights,
-                       quantizer_sets=quantizer_sets)
-
-    # 4. Output: EBCM,BSEC -> BSM
-    output = einsum("EBCM,BSEC->BSM", expert_out, routing,
-                   quantizer_sets=quantizer_sets)
+                       quantizer_sets=expert_quantizers, quantizer_dim='E')
+    
+    # 4. Output: EBCM,BSEC -> BSM (no quantization - routing operation)
+    output = einsum("EBCM,BSEC->BSM", expert_out, routing)
     ```
 
 Implementation Details:
@@ -169,6 +167,7 @@ def einsum(
     equation: str,
     *operands: jnp.ndarray,
     quantizer_sets: Optional[List[QuantizerSet]] = None,
+    quantizer_dim: Optional[str] = None,
     operand_axes: Optional[List[Tuple[str, ...]]] = None,
     output_axes: Optional[Tuple[str, ...]] = None,
 ) -> jnp.ndarray:
@@ -183,11 +182,13 @@ def einsum(
     quantization in MoE models.
 
     Args:
-        equation: Einsum equation string (e.g., "ij,jk->ik", "BNSM,BNSEC->EBNCM")
+        equation: Einsum equation string (e.g., "ij,jk->ik", "BSM,BSEC->EBCM")
         *operands: Input tensors
-        quantizer_sets: Can be:
-                       - List/array of QuantizerSets: one per batch element (for MoE)
-                       - None: uses noop quantizers (no FP8)
+        quantizer_sets: List or tuple of QuantizerSets. Length must match the size of
+                       the dimension specified by quantizer_dim. If None, creates noop quantizers.
+        quantizer_dim: Index label indicating which dimension the quantizers correspond to.
+                      For MoE, this is typically 'E' (expert dimension). If None and
+                      quantizer_sets is provided, assumes first batch dimension at position 0.
         operand_axes: List of logical axes tuples for sharding each operand
         output_axes: Logical axes for sharding the output
 
@@ -205,16 +206,63 @@ def einsum(
     """
     if operand_axes is None:
         operand_axes = [None] * len(operands)
-
+    
     if len(operands) != 2:
         raise NotImplementedError("Only 2-operand einsum currently supported")
-
+    
     # Parse einsum to get GEMM info
     gemm_info = _einsum_to_gemm_info(equation, *operands)
     contracting_dims = gemm_info['contracting_dims']
     batch_dims = gemm_info['batch_dims']
+    lhs_spec = gemm_info['lhs_spec']
+    rhs_spec = gemm_info['rhs_spec']
     
     lhs, rhs = operands
+    
+    # Find quantizer dimension
+    quantizer_dim_lhs = None
+    quantizer_dim_rhs = None
+    
+    if quantizer_dim is not None:
+        # Find position of quantizer_dim in lhs and rhs specs
+        if quantizer_dim in lhs_spec:
+            quantizer_dim_lhs = lhs_spec.index(quantizer_dim)
+        if quantizer_dim in rhs_spec:
+            quantizer_dim_rhs = rhs_spec.index(quantizer_dim)
+        
+        if quantizer_dim_lhs is None and quantizer_dim_rhs is None:
+            raise ValueError(
+                f"quantizer_dim '{quantizer_dim}' not found in equation '{equation}'"
+            )
+    else:
+        # Default: use first batch dimension at position 0 (if exists)
+        if batch_dims[0] and 0 in batch_dims[0]:
+            quantizer_dim_lhs = 0
+        if batch_dims[1] and 0 in batch_dims[1]:
+            quantizer_dim_rhs = 0
+    
+    has_quantizer_dim = quantizer_dim_lhs is not None or quantizer_dim_rhs is not None
+    
+    # Determine expected quantizer_sets length
+    if has_quantizer_dim:
+        if quantizer_dim_lhs is not None:
+            expected_length = lhs.shape[quantizer_dim_lhs]
+        else:
+            expected_length = rhs.shape[quantizer_dim_rhs]
+    else:
+        expected_length = 1
+    
+    # Validate quantizer_sets
+    if quantizer_sets is None:
+        quantizer_sets = [noop_quantizer_set] * expected_length
+    elif not isinstance(quantizer_sets, (list, tuple)):
+        raise TypeError(f"quantizer_sets must be a list or tuple, got {type(quantizer_sets)}")
+    elif len(quantizer_sets) != expected_length:
+        raise ValueError(
+            f"quantizer_sets length ({len(quantizer_sets)}) must match "
+            f"dimension {quantizer_dim if quantizer_dim else '(first batch dim)'} "
+            f"size ({expected_length})"
+        )
     
     # Validate that this is NN layout (required by dense)
     # For NN: lhs last dim must contract, rhs last dim must NOT contract
@@ -268,28 +316,40 @@ def einsum(
                 quantizer_set=quantizer,
             )
 
-        # Apply vmap: first dimension is for quantizers (e.g., expert dimension)
-        vmapped_func = jax.vmap(
-            dense_with_quantizer,
-            in_axes=(sorted(batch_dims[0])[0], sorted(batch_dims[1])[0], 0),  # vmap over quantizers
-            out_axes=0
-        )
-
-        # Apply vmap for remaining batch dimensions
-        for lhs_dim, rhs_dim in zip(sorted(batch_dims[0])[1:], sorted(batch_dims[1])[1:]):
-            # Adjust dimensions after first vmap
-            adj_lhs = lhs_dim - (1 if lhs_dim > sorted(batch_dims[0])[0] else 0)
-            adj_rhs = rhs_dim - (1 if rhs_dim > sorted(batch_dims[1])[0] else 0)
-            vmapped_func = jax.vmap(
-                vmapped_func,
-                in_axes=(adj_lhs, adj_rhs, None),  # broadcast quantizer
-                out_axes=0
+        # Apply vmap for all batch dimensions
+        # Expert dimension (if exists at position 0) vmaps over quantizers
+        # Other batch dimensions broadcast quantizer
+        vmapped_func = dense_with_quantizer
+        
+        for idx, (lhs_dim, rhs_dim) in enumerate(zip(sorted(batch_dims[0]), sorted(batch_dims[1]))):
+            # Check if this dimension is the quantizer dimension
+            is_quantizer_vmap = (
+                (lhs_dim == quantizer_dim_lhs or rhs_dim == quantizer_dim_rhs)
+                and has_quantizer_dim
             )
-
+            
+            if is_quantizer_vmap:
+                # Quantizer dimension: vmap over quantizers
+                vmapped_func = jax.vmap(
+                    vmapped_func,
+                    in_axes=(lhs_dim, rhs_dim, 0),  # vmap over quantizers
+                    out_axes=0
+                )
+            else:
+                # Regular batch dimension: broadcast quantizer
+                # Adjust dimensions for previously applied vmaps
+                adj_lhs = lhs_dim - idx
+                adj_rhs = rhs_dim - idx
+                vmapped_func = jax.vmap(
+                    vmapped_func,
+                    in_axes=(adj_lhs, adj_rhs, None),
+                    out_axes=0
+                )
+        
         output = vmapped_func(lhs, rhs, quantizer_sets)
     else:
         # No batch dimensions - direct dense call
-        quantizer_set = quantizer_sets[0]
+        # quantizer_sets length already validated to be 1
         output = dense(
             lhs, rhs, None,
             contracting_dims=contracting_dims,
@@ -297,7 +357,7 @@ def einsum(
             input_axes=operand_axes[0],
             kernel_axes=operand_axes[1],
             output_axes=output_axes,
-            quantizer_set=quantizer_set,
+            quantizer_set=quantizer_sets[0],
         )
-
+    
     return output

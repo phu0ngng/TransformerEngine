@@ -641,3 +641,5 @@ def _grouped_dense_bwd_rule(
 
 
 _grouped_dense.defvjp(_grouped_dense_fwd_rule, _grouped_dense_bwd_rule)
+
+

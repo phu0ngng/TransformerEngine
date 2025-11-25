@@ -151,7 +151,7 @@ class TestEinsumMoE:
         up_weights = jax.random.normal(jax.random.PRNGKey(2), (E, M, H), dtype=dtype)
         down_weights = jax.random.normal(jax.random.PRNGKey(3), (E, H, M), dtype=dtype)
 
-        # 1. Dispatch: BSM,BSEC -> EBCM
+        # 1. Dispatch: BSM,BSEC -> EBCM (no quantization)
         dispatched = einsum("BSM,BSEC->EBCM", tokens, routing)
         assert dispatched.shape == (E, B, C, M)
 
@@ -194,7 +194,7 @@ class TestEinsumAutodiff:
     def test_moe_complete_grad(self, B, S, M, E, C, H, dtype):
         """Test gradients through complete MoE pipeline."""
         def moe_forward(tokens, routing, up_w, down_w):
-            # Complete MoE forward pass
+            # Complete MoE forward pass (no quantization for gradient test)
             dispatched = einsum("BSM,BSEC->EBCM", tokens, routing)
             hidden = einsum("EBCM,EMH->EBCH", dispatched, up_w)
             expert_out = einsum("EBCH,EHM->EBCM", hidden, down_w)
@@ -243,9 +243,9 @@ class TestEinsumPerExpertQuantizers:
         dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
         weights = jax.random.normal(jax.random.PRNGKey(1), (E, M, H), dtype=dtype)
 
-        # Test with FP8 quantization
+        # Test with FP8 quantization - specify expert dimension
         result = einsum("EBCM,EMH->EBCH", dispatched, weights,
-                       quantizer_sets=quantizer_sets)
+                       quantizer_sets=quantizer_sets, quantizer_dim='E')
         expected = jnp.einsum("EBCM,EMH->EBCH", dispatched, weights)
 
         assert result.shape == (E, B, C, H)
@@ -270,7 +270,8 @@ class TestEinsumPerExpertQuantizers:
         ]
 
         def loss_fn(x, w):
-            result = einsum("EBCM,EMH->EBCH", x, w, quantizer_sets=quantizer_sets)
+            result = einsum("EBCM,EMH->EBCH", x, w, 
+                          quantizer_sets=quantizer_sets, quantizer_dim='E')
             return jnp.sum(result ** 2)
 
         dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
