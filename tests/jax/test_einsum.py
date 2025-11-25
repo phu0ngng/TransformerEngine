@@ -11,8 +11,6 @@ from jax import value_and_grad
 from utils import assert_allclose, pytest_parametrize_wrapper
 from transformer_engine.jax.einsum import einsum
 from transformer_engine.jax.quantize import (
-    noop_quantizer_set,
-    is_fp8_available,
     QuantizerFactory,
     QuantizeMeta,
     QuantizeMetaSet,
@@ -32,19 +30,16 @@ BATCHED_MATMUL_CASES = [
     (8, 64, 128, 256),
 ]
 MOE_CASES = [
-    # (B, N, S, M, E, C, H)
+    # (B, S, M, E, C, H)
     # B: Batch size
-    # N: Number of sequences (e.g., pipeline parallel dimension)
-    # S: Sequence length (number of tokens per sequence)
+    # S: Sequence length (number of tokens)
     # M: Model dimension (hidden size)
     # E: Number of experts
     # C: Capacity (max tokens per expert)
     # H: Hidden dimension (MLP intermediate size)
-    (2, 4, 8, 128, 8, 2, 512),
-    (1, 2, 4, 64, 4, 2, 256),
+    (2, 8, 128, 8, 2, 512),
+    (4, 16, 64, 4, 4, 256),
 ]
-
-is_fp8_supported, fp8_unsupported_reason = is_fp8_available()
 
 # Get supported scaling modes and recipes
 supported_scaling_modes = helper.get_supported_scaling_modes()
@@ -99,92 +94,92 @@ class TestEinsumMoE:
     """Test MoE-specific einsum operations."""
     
     @pytest_parametrize_wrapper(
-        "B,N,S,M,E,C,H", MOE_CASES,
+        "B,S,M,E,C,H", MOE_CASES,
         "dtype", DTYPES,
     )
-    def test_moe_dispatch(self, B, N, S, M, E, C, H, dtype):
-        """Test MoE dispatch: BNSM,BNSEC->EBNCM"""
-        tokens = jax.random.normal(jax.random.PRNGKey(0), (B, N, S, M), dtype=dtype)
-        routing = jax.random.normal(jax.random.PRNGKey(1), (B, N, S, E, C), dtype=dtype)
+    def test_moe_dispatch(self, B, S, M, E, C, H, dtype):
+        """Test MoE dispatch: BSM,BSEC->EBCM"""
+        tokens = jax.random.normal(jax.random.PRNGKey(0), (B, S, M), dtype=dtype)
+        routing = jax.random.normal(jax.random.PRNGKey(1), (B, S, E, C), dtype=dtype)
         
-        result = einsum("BNSM,BNSEC->EBNCM", tokens, routing)
-        expected = jnp.einsum("BNSM,BNSEC->EBNCM", tokens, routing)
+        result = einsum("BSM,BSEC->EBCM", tokens, routing)
+        expected = jnp.einsum("BSM,BSEC->EBCM", tokens, routing)
         
-        assert result.shape == (E, B, N, C, M)
+        assert result.shape == (E, B, C, M)
         assert_allclose(result, expected, dtype=dtype)
     
     @pytest_parametrize_wrapper(
-        "B,N,S,M,E,C,H", MOE_CASES,
+        "B,S,M,E,C,H", MOE_CASES,
         "dtype", DTYPES,
     )
-    def test_moe_mlp_up(self, B, N, S, M, E, C, H, dtype):
-        """Test MoE MLP up projection: EBNCM,EMH->EBNCH"""
-        dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, N, C, M), dtype=dtype)
+    def test_moe_mlp_up(self, B, S, M, E, C, H, dtype):
+        """Test MoE MLP up projection: EBCM,EMH->EBCH"""
+        dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
         weights = jax.random.normal(jax.random.PRNGKey(1), (E, M, H), dtype=dtype)
         
-        result = einsum("EBNCM,EMH->EBNCH", dispatched, weights)
-        expected = jnp.einsum("EBNCM,EMH->EBNCH", dispatched, weights)
+        result = einsum("EBCM,EMH->EBCH", dispatched, weights)
+        expected = jnp.einsum("EBCM,EMH->EBCH", dispatched, weights)
         
-        assert result.shape == (E, B, N, C, H)
+        assert result.shape == (E, B, C, H)
         assert_allclose(result, expected, dtype=dtype)
     
     @pytest_parametrize_wrapper(
-        "B,N,S,M,E,C,H", MOE_CASES,
+        "B,S,M,E,C,H", MOE_CASES,
         "dtype", DTYPES,
     )
-    def test_moe_mlp_down(self, B, N, S, M, E, C, H, dtype):
-        """Test MoE MLP down projection: EBNCH,EHM->EBNCM"""
-        hidden = jax.random.normal(jax.random.PRNGKey(0), (E, B, N, C, H), dtype=dtype)
+    def test_moe_mlp_down(self, B, S, M, E, C, H, dtype):
+        """Test MoE MLP down projection: EBCH,EHM->EBCM"""
+        hidden = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, H), dtype=dtype)
         weights = jax.random.normal(jax.random.PRNGKey(1), (E, H, M), dtype=dtype)
         
-        result = einsum("EBNCH,EHM->EBNCM", hidden, weights)
-        expected = jnp.einsum("EBNCH,EHM->EBNCM", hidden, weights)
+        result = einsum("EBCH,EHM->EBCM", hidden, weights)
+        expected = jnp.einsum("EBCH,EHM->EBCM", hidden, weights)
         
-        assert result.shape == (E, B, N, C, M)
+        assert result.shape == (E, B, C, M)
         assert_allclose(result, expected, dtype=dtype)
     
     @pytest_parametrize_wrapper(
-        "B,N,S,M,E,C,H", MOE_CASES,
+        "B,S,M,E,C,H", MOE_CASES,
         "dtype", DTYPES,
     )
-    def test_moe_output(self, B, N, S, M, E, C, H, dtype):
-        """Test MoE output combination: EBNCM,BNSEC->BNSM"""
-        expert_outputs = jax.random.normal(jax.random.PRNGKey(0), (E, B, N, C, M), dtype=dtype)
-        routing = jax.random.normal(jax.random.PRNGKey(1), (B, N, S, E, C), dtype=dtype)
+    def test_moe_output(self, B, S, M, E, C, H, dtype):
+        """Test MoE output combination: EBCM,BSEC->BSM"""
+        expert_outputs = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
+        routing = jax.random.normal(jax.random.PRNGKey(1), (B, S, E, C), dtype=dtype)
         
-        result = einsum("EBNCM,BNSEC->BNSM", expert_outputs, routing)
-        expected = jnp.einsum("EBNCM,BNSEC->BNSM", expert_outputs, routing)
+        result = einsum("EBCM,BSEC->BSM", expert_outputs, routing)
+        expected = jnp.einsum("EBCM,BSEC->BSM", expert_outputs, routing)
         
-        assert result.shape == (B, N, S, M)
+        assert result.shape == (B, S, M)
         assert_allclose(result, expected, dtype=dtype)
     
     @pytest_parametrize_wrapper(
-        "B,N,S,M,E,C,H", MOE_CASES,
+        "B,S,M,E,C,H", MOE_CASES,
         "dtype", DTYPES,
     )
-    def test_moe_complete_forward(self, B, N, S, M, E, C, H, dtype):
+    def test_moe_complete_forward(self, B, S, M, E, C, H, dtype):
         """Test complete MoE forward pass with all four einsum operations."""
         # Inputs
-        tokens = jax.random.normal(jax.random.PRNGKey(0), (B, N, S, M), dtype=dtype)
-        routing = jax.random.normal(jax.random.PRNGKey(1), (B, N, S, E, C), dtype=dtype)
+        tokens = jax.random.normal(jax.random.PRNGKey(0), (B, S, M), dtype=dtype)
+        routing = jax.random.normal(jax.random.PRNGKey(1), (B, S, E, C), dtype=dtype)
         up_weights = jax.random.normal(jax.random.PRNGKey(2), (E, M, H), dtype=dtype)
         down_weights = jax.random.normal(jax.random.PRNGKey(3), (E, H, M), dtype=dtype)
         
-        # 1. Dispatch: BNSM,BNSEC -> EBNCM
-        dispatched = einsum("BNSM,BNSEC->EBNCM", tokens, routing)
-        assert dispatched.shape == (E, B, N, C, M)
+        # 1. Dispatch: BSM,BSEC -> EBCM
+        dispatched = einsum("BSM,BSEC->EBCM", tokens, routing)
+        assert dispatched.shape == (E, B, C, M)
         
-        # 2. MLP Up: EBNCM,EMH -> EBNCH
-        hidden = einsum("EBNCM,EMH->EBNCH", dispatched, up_weights)
-        assert hidden.shape == (E, B, N, C, H)
+        # 2. MLP Up: EBCM,EMH -> EBCH
+        hidden = einsum("EBCM,EMH->EBCH", dispatched, up_weights)
+        assert hidden.shape == (E, B, C, H)
         
-        # 3. MLP Down: EBNCH,EHM -> EBNCM
-        expert_out = einsum("EBNCH,EHM->EBNCM", hidden, down_weights)
-        assert expert_out.shape == (E, B, N, C, M)
+        # 3. MLP Down: EBCH,EHM -> EBCM
+        expert_out = einsum("EBCH,EHM->EBCM", hidden, down_weights)
+        assert expert_out.shape == (E, B, C, M)
         
-        # 4. Output: EBNCM,BNSEC -> BNSM
-        output = einsum("EBNCM,BNSEC->BNSM", expert_out, routing)
-        assert output.shape == (B, N, S, M)
+        # 4. Output: EBCM,BSEC -> BSM
+        output = einsum("EBCM,BSEC->BSM", expert_out, routing)
+        assert output.shape == (B, S, M)
 
 
 class TestEinsumAutodiff:
@@ -211,21 +206,21 @@ class TestEinsumAutodiff:
         assert not jnp.isnan(loss)
     
     @pytest_parametrize_wrapper(
-        "B,N,S,M,E,C,H", MOE_CASES,
+        "B,S,M,E,C,H", MOE_CASES,
         "dtype", DTYPES,
     )
-    def test_moe_complete_grad(self, B, N, S, M, E, C, H, dtype):
+    def test_moe_complete_grad(self, B, S, M, E, C, H, dtype):
         """Test gradients through complete MoE pipeline."""
         def moe_forward(tokens, routing, up_w, down_w):
             # Complete MoE forward pass
-            dispatched = einsum("BNSM,BNSEC->EBNCM", tokens, routing)
-            hidden = einsum("EBNCM,EMH->EBNCH", dispatched, up_w)
-            expert_out = einsum("EBNCH,EHM->EBNCM", hidden, down_w)
-            output = einsum("EBNCM,BNSEC->BNSM", expert_out, routing)
+            dispatched = einsum("BSM,BSEC->EBCM", tokens, routing)
+            hidden = einsum("EBCM,EMH->EBCH", dispatched, up_w)
+            expert_out = einsum("EBCH,EHM->EBCM", hidden, down_w)
+            output = einsum("EBCM,BSEC->BSM", expert_out, routing)
             return jnp.sum(output ** 2)
         
-        tokens = jax.random.normal(jax.random.PRNGKey(0), (B, N, S, M), dtype=dtype)
-        routing = jax.random.normal(jax.random.PRNGKey(1), (B, N, S, E, C), dtype=dtype)
+        tokens = jax.random.normal(jax.random.PRNGKey(0), (B, S, M), dtype=dtype)
+        routing = jax.random.normal(jax.random.PRNGKey(1), (B, S, E, C), dtype=dtype)
         up_weights = jax.random.normal(jax.random.PRNGKey(2), (E, M, H), dtype=dtype)
         down_weights = jax.random.normal(jax.random.PRNGKey(3), (E, H, M), dtype=dtype)
         
@@ -245,14 +240,13 @@ class TestEinsumAutodiff:
 class TestEinsumPerExpertQuantizers:
     """Test einsum with per-expert quantizers using different FP8 recipes."""
     
-    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest_parametrize_wrapper(
         "recipe", supported_recipes,
         "dtype", [jnp.bfloat16],  # FP8 typically used with BF16
     )
     def test_per_expert_quantizers_different_recipes(self, recipe, dtype):
         """Test einsum with per-expert quantizers using different FP8 recipes."""
-        B, N, S, M, E, C, H = 2, 2, 4, 64, 4, 2, 128
+        B, S, M, E, C, H = 2, 4, 64, 4, 2, 128
         
         # Create per-expert quantizers with different recipes
         quantizer_sets = [
@@ -266,25 +260,24 @@ class TestEinsumPerExpertQuantizers:
             ) for _ in range(E)
         ]
         
-        dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, N, C, M), dtype=dtype)
+        dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
         weights = jax.random.normal(jax.random.PRNGKey(1), (E, M, H), dtype=dtype)
         
         # Test with FP8 quantization
-        result = einsum("EBNCM,EMH->EBNCH", dispatched, weights, 
+        result = einsum("EBCM,EMH->EBCH", dispatched, weights, 
                        quantizer_sets=quantizer_sets)
-        expected = jnp.einsum("EBNCM,EMH->EBNCH", dispatched, weights)
+        expected = jnp.einsum("EBCM,EMH->EBCH", dispatched, weights)
         
-        assert result.shape == (E, B, N, C, H)
+        assert result.shape == (E, B, C, H)
         assert_allclose(result, expected, dtype=dtype)
     
-    @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
     @pytest_parametrize_wrapper(
         "recipe", supported_recipes,
         "dtype", [jnp.bfloat16],
     )
     def test_per_expert_quantizers_with_grad(self, recipe, dtype):
         """Test gradients work with per-expert FP8 quantizers."""
-        B, N, S, M, E, C, H = 2, 2, 4, 64, 4, 2, 128
+        B, S, M, E, C, H = 2, 4, 64, 4, 2, 128
         
         # Create per-expert quantizers
         quantizer_sets = [
@@ -299,10 +292,10 @@ class TestEinsumPerExpertQuantizers:
         ]
         
         def loss_fn(x, w):
-            result = einsum("EBNCM,EMH->EBNCH", x, w, quantizer_sets=quantizer_sets)
+            result = einsum("EBCM,EMH->EBCH", x, w, quantizer_sets=quantizer_sets)
             return jnp.sum(result ** 2)
         
-        dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, N, C, M), dtype=dtype)
+        dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
         weights = jax.random.normal(jax.random.PRNGKey(1), (E, M, H), dtype=dtype)
         
         # Compute gradients with FP8

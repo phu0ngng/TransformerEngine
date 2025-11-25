@@ -33,20 +33,20 @@ Example - MoE Forward Pass with Per-Expert FP8:
     ]
     
     # MoE pipeline with per-expert quantization
-    # 1. Dispatch: BNSM,BNSEC -> EBNCM
-    dispatched = einsum("BNSM,BNSEC->EBNCM", tokens, routing, 
+    # 1. Dispatch: BSM,BSEC -> EBCM
+    dispatched = einsum("BSM,BSEC->EBCM", tokens, routing, 
                        quantizer_sets=quantizer_sets)
     
-    # 2. MLP Up: EBNCM,EMH -> EBNCH
-    hidden = einsum("EBNCM,EMH->EBNCH", dispatched, expert_up_weights,
+    # 2. MLP Up: EBCM,EMH -> EBCH
+    hidden = einsum("EBCM,EMH->EBCH", dispatched, expert_up_weights,
                    quantizer_sets=quantizer_sets)
     
-    # 3. MLP Down: EBNCH,EHM -> EBNCM
-    expert_out = einsum("EBNCH,EHM->EBNCM", hidden, expert_down_weights,
+    # 3. MLP Down: EBCH,EHM -> EBCM
+    expert_out = einsum("EBCH,EHM->EBCM", hidden, expert_down_weights,
                        quantizer_sets=quantizer_sets)
     
-    # 4. Output: EBNCM,BNSEC -> BNSM
-    output = einsum("EBNCM,BNSEC->BNSM", expert_out, routing,
+    # 4. Output: EBCM,BSEC -> BSM
+    output = einsum("EBCM,BSEC->BSM", expert_out, routing,
                    quantizer_sets=quantizer_sets)
     ```
 
