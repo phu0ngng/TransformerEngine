@@ -58,10 +58,8 @@ def init():
 class TestEinsumBasic:
     """Test basic einsum operations."""
     
-    @pytest_parametrize_wrapper(
-        "M,K,N", SIMPLE_MATMUL_CASES,
-        "dtype", DTYPES,
-    )
+    @pytest_parametrize_wrapper("M,K,N", SIMPLE_MATMUL_CASES)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_simple_matmul(self, M, K, N, dtype):
         """Test simple matrix multiplication: ij,jk->ik"""
         A = jax.random.normal(jax.random.PRNGKey(0), (M, K), dtype=dtype)
@@ -74,10 +72,8 @@ class TestEinsumBasic:
         assert result.shape == (M, N)
         assert_allclose(result, expected, dtype=dtype)
     
-    @pytest_parametrize_wrapper(
-        "B,M,K,N", BATCHED_MATMUL_CASES,
-        "dtype", DTYPES,
-    )
+    @pytest_parametrize_wrapper("B,M,K,N", BATCHED_MATMUL_CASES)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_batched_matmul(self, B, M, K, N, dtype):
         """Test batched matrix multiplication: bij,bjk->bik"""
         A = jax.random.normal(jax.random.PRNGKey(0), (B, M, K), dtype=dtype)
@@ -93,10 +89,8 @@ class TestEinsumBasic:
 class TestEinsumMoE:
     """Test MoE-specific einsum operations."""
     
-    @pytest_parametrize_wrapper(
-        "B,S,M,E,C,H", MOE_CASES,
-        "dtype", DTYPES,
-    )
+    @pytest_parametrize_wrapper("B,S,M,E,C,H", MOE_CASES)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_moe_dispatch(self, B, S, M, E, C, H, dtype):
         """Test MoE dispatch: BSM,BSEC->EBCM"""
         tokens = jax.random.normal(jax.random.PRNGKey(0), (B, S, M), dtype=dtype)
@@ -108,10 +102,8 @@ class TestEinsumMoE:
         assert result.shape == (E, B, C, M)
         assert_allclose(result, expected, dtype=dtype)
     
-    @pytest_parametrize_wrapper(
-        "B,S,M,E,C,H", MOE_CASES,
-        "dtype", DTYPES,
-    )
+    @pytest_parametrize_wrapper("B,S,M,E,C,H", MOE_CASES)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_moe_mlp_up(self, B, S, M, E, C, H, dtype):
         """Test MoE MLP up projection: EBCM,EMH->EBCH"""
         dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
@@ -123,10 +115,8 @@ class TestEinsumMoE:
         assert result.shape == (E, B, C, H)
         assert_allclose(result, expected, dtype=dtype)
     
-    @pytest_parametrize_wrapper(
-        "B,S,M,E,C,H", MOE_CASES,
-        "dtype", DTYPES,
-    )
+    @pytest_parametrize_wrapper("B,S,M,E,C,H", MOE_CASES)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_moe_mlp_down(self, B, S, M, E, C, H, dtype):
         """Test MoE MLP down projection: EBCH,EHM->EBCM"""
         hidden = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, H), dtype=dtype)
@@ -138,10 +128,8 @@ class TestEinsumMoE:
         assert result.shape == (E, B, C, M)
         assert_allclose(result, expected, dtype=dtype)
     
-    @pytest_parametrize_wrapper(
-        "B,S,M,E,C,H", MOE_CASES,
-        "dtype", DTYPES,
-    )
+    @pytest_parametrize_wrapper("B,S,M,E,C,H", MOE_CASES)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_moe_output(self, B, S, M, E, C, H, dtype):
         """Test MoE output combination: EBCM,BSEC->BSM"""
         expert_outputs = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
@@ -153,10 +141,8 @@ class TestEinsumMoE:
         assert result.shape == (B, S, M)
         assert_allclose(result, expected, dtype=dtype)
     
-    @pytest_parametrize_wrapper(
-        "B,S,M,E,C,H", MOE_CASES,
-        "dtype", DTYPES,
-    )
+    @pytest_parametrize_wrapper("B,S,M,E,C,H", MOE_CASES)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_moe_complete_forward(self, B, S, M, E, C, H, dtype):
         """Test complete MoE forward pass with all four einsum operations."""
         # Inputs
@@ -185,10 +171,8 @@ class TestEinsumMoE:
 class TestEinsumAutodiff:
     """Test automatic differentiation through einsum."""
     
-    @pytest_parametrize_wrapper(
-        "M,K,N", SIMPLE_MATMUL_CASES,
-        "dtype", DTYPES,
-    )
+    @pytest_parametrize_wrapper("M,K,N", SIMPLE_MATMUL_CASES)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_simple_grad(self, M, K, N, dtype):
         """Test gradients for simple matrix multiplication."""
         A = jax.random.normal(jax.random.PRNGKey(0), (M, K), dtype=dtype)
@@ -205,10 +189,8 @@ class TestEinsumAutodiff:
         assert grads[1].shape == B.shape
         assert not jnp.isnan(loss)
     
-    @pytest_parametrize_wrapper(
-        "B,S,M,E,C,H", MOE_CASES,
-        "dtype", DTYPES,
-    )
+    @pytest_parametrize_wrapper("B,S,M,E,C,H", MOE_CASES)
+    @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_moe_complete_grad(self, B, S, M, E, C, H, dtype):
         """Test gradients through complete MoE pipeline."""
         def moe_forward(tokens, routing, up_w, down_w):
@@ -240,10 +222,8 @@ class TestEinsumAutodiff:
 class TestEinsumPerExpertQuantizers:
     """Test einsum with per-expert quantizers using different FP8 recipes."""
     
-    @pytest_parametrize_wrapper(
-        "recipe", supported_recipes,
-        "dtype", [jnp.bfloat16],  # FP8 typically used with BF16
-    )
+    @pytest_parametrize_wrapper("recipe", supported_recipes)
+    @pytest_parametrize_wrapper("dtype", [jnp.bfloat16])
     def test_per_expert_quantizers_different_recipes(self, recipe, dtype):
         """Test einsum with per-expert quantizers using different FP8 recipes."""
         B, S, M, E, C, H = 2, 4, 64, 4, 2, 128
