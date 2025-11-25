@@ -808,7 +808,6 @@ class GemmPrimitive(BasePrimitive):
         sequence_dim,
         is_outer,
     ):
-        del transpose_batch_sequence, sequence_dim, is_outer
         assert GemmPrimitive.outer_primitive is not None
         lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
