@@ -811,45 +811,25 @@ class GemmPrimitive(BasePrimitive):
         assert GemmPrimitive.outer_primitive is not None
         lhs_bdims, _, rhs_bdims, *_ = batch_dims
 
-        # Support batched GEMM via vmap
-        # If both lhs and rhs have the same batch dimension, output is batched
-        if lhs_bdims is not None and rhs_bdims is not None:
+        # Validate batch dimensions
+        if (lhs_bdims is not None or rhs_bdims is not None):
             assert lhs_bdims == rhs_bdims, (
                 f"Batched GEMM requires matching batch dimensions, "
                 f"got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims}"
             )
-            out_bdims = (lhs_bdims,)
-            bias_bdims = (None,)  # Bias is broadcast
-            pre_gelu_bdims = (lhs_bdims,)  # Pre-GeLU output is batched like GEMM output
-        elif lhs_bdims is None and rhs_bdims is None:
-            # No batching
-            out_bdims = (None,)
-            bias_bdims = (None,)
-            pre_gelu_bdims = (None,)
-        else:
-            raise ValueError(
-                f"Batched GEMM requires both operands to be batched or both unbatched, "
-                f"got lhs_bdims={lhs_bdims}, rhs_bdims={rhs_bdims}"
-            )
+        
+        # Determine number of outputs based on fuse flags
+        num_outputs = 1
+        if fuse_bias and grad:
+            num_outputs = 2
         if fuse_gelu and not grad:
-            pre_gelu_bdims = out_bdims
-
-        return (
-            GemmPrimitive.outer_primitive.bind(
-                *batched_args,
-                out_dtype=out_dtype,
-                contracting_dims=contracting_dims,
-                scaling_mode=scaling_mode,
-                fuse_bias=fuse_bias,
-                fuse_gelu=fuse_gelu,
-                grad=grad,
-                use_split_accumulator=use_split_accumulator,
-                collective_op=collective_op,
-                transpose_batch_sequence=transpose_batch_sequence,
-                sequence_dim=sequence_dim,
-                is_outer=is_outer,
-            ),
-            (out_bdims, bias_bdims, pre_gelu_bdims),
+            num_outputs = 3
+        
+        # Use general batcher from BasePrimitive
+        return GemmPrimitive.batcher_impl(
+            batched_args, batch_dims,
+            static_kwargs={'out_dtype': out_dtype, 'contracting_dims': contracting_dims, 'scaling_mode': scaling_mode, 'fuse_bias': fuse_bias, 'fuse_gelu': fuse_gelu, 'grad': grad, 'use_split_accumulator': use_split_accumulator, 'collective_op': collective_op, 'transpose_batch_sequence': transpose_batch_sequence, 'sequence_dim': sequence_dim, 'is_outer': is_outer},
+            num_outputs=num_outputs,
         )
 
     @staticmethod

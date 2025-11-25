@@ -7,13 +7,14 @@ import re
 import warnings
 from abc import ABCMeta, abstractmethod
 from functools import partial
+from typing import Any, Sequence, Union, Tuple
 
 from jax.extend import core
 from jax.interpreters import xla, mlir
 from jax.experimental.custom_partitioning import custom_partitioning
 from jax._src.interpreters import batching
 from jax._src import dispatch
-from jax import ffi
+from jax import ffi, numpy as jnp
 
 import transformer_engine_jax
 
@@ -168,6 +169,82 @@ class BasePrimitive(metaclass=ABCMeta):
         del args
         return "... -> ..."
 
+    @classmethod
+    def batcher_impl(
+        cls,
+        batched_args: Sequence[Any],
+        batch_dims: Sequence[Union[int, None]],
+        static_kwargs: dict,
+        num_outputs: int = 1,
+    ) -> Tuple[Tuple[Any, ...], Tuple[Union[int, None], ...]]:
+        """Batcher implementation for JAX primitives.
+        
+        Implements the standard batching pattern: loop over batch dimension,
+        call primitive for each slice, and stack results.
+        
+        Args:
+            batched_args: Tuple of input tensors (some may be batched)
+            batch_dims: Tuple indicating batch dimension for each arg (None if not batched)
+            static_kwargs: Dictionary of static arguments to pass to primitive.bind()
+            num_outputs: Number of outputs the primitive returns
+            
+        Returns:
+            Tuple of (output_tensors, output_batch_dims)
+            
+        Example:
+            @staticmethod
+            def batcher(batched_args, batch_dims, *, arg1, arg2, arg3):
+                return MyPrimitive.batcher_impl(
+                    batched_args, batch_dims,
+                    static_kwargs={'arg1': arg1, 'arg2': arg2, 'arg3': arg3},
+                    num_outputs=2
+                )
+        """
+        from jax import lax
+        
+        # Find batch size from first batched argument
+        batch_size = None
+        for arg, bdim in zip(batched_args, batch_dims):
+            if bdim is not None:
+                batch_size = arg.shape[bdim]
+                break
+        
+        if batch_size is None:
+            # No batching - call primitive directly
+            result = cls.outer_primitive.bind(*batched_args, **static_kwargs)
+            if not isinstance(result, tuple):
+                result = (result,)
+            out_bdims = tuple(None for _ in result)
+            return result, out_bdims
+        
+        # Loop over batch dimension and collect results
+        results = [[] for _ in range(num_outputs)]
+        
+        for i in range(batch_size):
+            # Extract slice for each argument
+            sliced_args = []
+            for arg, bdim in zip(batched_args, batch_dims):
+                if bdim is not None:
+                    slice_i = lax.index_in_dim(arg, i, bdim, keepdims=False)
+                    sliced_args.append(slice_i)
+                else:
+                    sliced_args.append(arg)
+            
+            # Call primitive with unbatched slices
+            result_i = cls.outer_primitive.bind(*sliced_args, **static_kwargs)
+            if not isinstance(result_i, tuple):
+                result_i = (result_i,)
+            
+            # Collect results
+            for j, out_j in enumerate(result_i):
+                results[j].append(out_j)
+        
+        # Stack results along axis 0
+        stacked_results = tuple(jnp.stack(res_list, axis=0) for res_list in results)
+        out_bdims = tuple(0 for _ in stacked_results)
+        
+        return stacked_results, out_bdims
+
 
 # Registry to store all registered primitive classes
 _primitive_registry = {}
@@ -260,3 +337,5 @@ def manage_primitives(enable_names=None, disable_names=None, disable_all_first=F
             cls.set_enabled(False)
         else:
             raise ValueError(f"Primitive not found in registry: {name}")
+
+
