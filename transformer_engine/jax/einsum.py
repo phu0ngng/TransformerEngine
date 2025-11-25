@@ -17,6 +17,15 @@ Key Features:
     - **Single batch dimension**: Optimized for MoE patterns (expert dimension)
     - **Explicit API**: Requires quantizer_dim when using quantization
 
+Limitations:
+    - **NN layout only**: LHS last dim must contract, RHS last dim must not contract
+    - **Single batch dimension**: Only one batch dimension supported
+    - **2-operand only**: Only supports binary operations
+    - **Explicit quantizer_dim**: Required when quantizer_sets is provided
+    
+    For operations that don't meet these requirements (e.g., routing operations
+    like "BSM,BSEC->EBCM"), use jnp.einsum instead.
+
 Example - MoE Forward Pass with Per-Expert FP8:
     ```python
     from transformer_engine.jax.einsum import einsum
@@ -33,8 +42,8 @@ Example - MoE Forward Pass with Per-Expert FP8:
     ]
 
     # MoE pipeline with per-expert quantization
-    # 1. Dispatch: BSM,BSEC -> EBCM (no quantization - routing operation)
-    dispatched = einsum("BSM,BSEC->EBCM", tokens, routing)
+    # 1. Dispatch: BSM,BSEC -> EBCM
+    dispatched = jnp.einsum("BSM,BSEC->EBCM", tokens, routing)
     
     # 2. MLP Up: EBCM,EMH -> EBCH (per-expert quantization)
     hidden = einsum("EBCM,EMH->EBCH", dispatched, expert_up_weights,
@@ -45,7 +54,7 @@ Example - MoE Forward Pass with Per-Expert FP8:
                        quantizer_sets=expert_quantizers, quantizer_dim='E')
     
     # 4. Output: EBCM,BSEC -> BSM (no quantization - routing operation)
-    output = einsum("EBCM,BSEC->BSM", expert_out, routing)
+    output = jnp.einsum("EBCM,BSEC->BSM", expert_out, routing)
     ```
 
 Implementation Details:
@@ -275,9 +284,11 @@ def einsum(
     
     if not lhs_last_contracts or rhs_last_contracts:
         raise ValueError(
-            f"Einsum equation '{equation}' does not correspond to NN layout. "
-            f"TE dense requires last dimension of LHS to contract and last dimension of RHS to not contract. "
-            f"Got lhs_contracting={contracting_dims[0]}, rhs_contracting={contracting_dims[1]}"
+            f"TE einsum only supports NN layout (non-transposed matrix multiplication). "
+            f"Equation '{equation}' is not NN layout:\n"
+            f"  - LHS '{gemm_info['lhs_spec']}': last dimension must contract (got contracting_dims={contracting_dims[0]})\n"
+            f"  - RHS '{gemm_info['rhs_spec']}': last dimension must NOT contract (got contracting_dims={contracting_dims[1]})\n"
+            f"For non-NN layouts (e.g., routing operations), use jnp.einsum instead."
         )
 
     # Create vmapped dense function for batch dimensions

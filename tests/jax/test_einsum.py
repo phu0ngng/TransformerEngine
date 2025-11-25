@@ -96,25 +96,13 @@ class TestEinsumMoE:
 
     @pytest_parametrize_wrapper("B,S,M,E,C,H", MOE_CASES)
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    def test_moe_dispatch(self, B, S, M, E, C, H, dtype):
-        """Test MoE dispatch: BSM,BSEC->EBCM"""
-        tokens = jax.random.normal(jax.random.PRNGKey(0), (B, S, M), dtype=dtype)
-        routing = jax.random.normal(jax.random.PRNGKey(1), (B, S, E, C), dtype=dtype)
-
-        result = einsum("BSM,BSEC->EBCM", tokens, routing)
-        expected = jnp.einsum("BSM,BSEC->EBCM", tokens, routing)
-
-        assert result.shape == (E, B, C, M)
-        assert_allclose(result, expected, dtype=dtype)
-
-    @pytest_parametrize_wrapper("B,S,M,E,C,H", MOE_CASES)
-    @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_moe_mlp_up(self, B, S, M, E, C, H, dtype):
-        """Test MoE MLP up projection: EBCM,EMH->EBCH"""
+        """Test MoE MLP up projection: EBCM,EMH->EBCH (NN layout)"""
         dispatched = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
         weights = jax.random.normal(jax.random.PRNGKey(1), (E, M, H), dtype=dtype)
 
-        result = einsum("EBCM,EMH->EBCH", dispatched, weights)
+        result = einsum("EBCM,EMH->EBCH", dispatched, weights,
+                       quantizer_sets=[noop_quantizer_set]*E, quantizer_dim='E')
         expected = jnp.einsum("EBCM,EMH->EBCH", dispatched, weights)
 
         assert result.shape == (E, B, C, H)
@@ -123,11 +111,12 @@ class TestEinsumMoE:
     @pytest_parametrize_wrapper("B,S,M,E,C,H", MOE_CASES)
     @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_moe_mlp_down(self, B, S, M, E, C, H, dtype):
-        """Test MoE MLP down projection: EBCH,EHM->EBCM"""
+        """Test MoE MLP down projection: EBCH,EHM->EBCM (NN layout)"""
         hidden = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, H), dtype=dtype)
         weights = jax.random.normal(jax.random.PRNGKey(1), (E, H, M), dtype=dtype)
 
-        result = einsum("EBCH,EHM->EBCM", hidden, weights)
+        result = einsum("EBCH,EHM->EBCM", hidden, weights,
+                       quantizer_sets=[noop_quantizer_set]*E, quantizer_dim='E')
         expected = jnp.einsum("EBCH,EHM->EBCM", hidden, weights)
 
         assert result.shape == (E, B, C, M)
@@ -135,41 +124,29 @@ class TestEinsumMoE:
 
     @pytest_parametrize_wrapper("B,S,M,E,C,H", MOE_CASES)
     @pytest_parametrize_wrapper("dtype", DTYPES)
-    def test_moe_output(self, B, S, M, E, C, H, dtype):
-        """Test MoE output combination: EBCM,BSEC->BSM"""
-        expert_outputs = jax.random.normal(jax.random.PRNGKey(0), (E, B, C, M), dtype=dtype)
-        routing = jax.random.normal(jax.random.PRNGKey(1), (B, S, E, C), dtype=dtype)
-
-        result = einsum("EBCM,BSEC->BSM", expert_outputs, routing)
-        expected = jnp.einsum("EBCM,BSEC->BSM", expert_outputs, routing)
-
-        assert result.shape == (B, S, M)
-        assert_allclose(result, expected, dtype=dtype)
-
-    @pytest_parametrize_wrapper("B,S,M,E,C,H", MOE_CASES)
-    @pytest_parametrize_wrapper("dtype", DTYPES)
     def test_moe_complete_forward(self, B, S, M, E, C, H, dtype):
-        """Test complete MoE forward pass with all four einsum operations."""
-        # Inputs
+        """Test complete MoE forward (dispatch/output use jnp.einsum, MLP uses TE einsum)."""
         tokens = jax.random.normal(jax.random.PRNGKey(0), (B, S, M), dtype=dtype)
         routing = jax.random.normal(jax.random.PRNGKey(1), (B, S, E, C), dtype=dtype)
         up_weights = jax.random.normal(jax.random.PRNGKey(2), (E, M, H), dtype=dtype)
         down_weights = jax.random.normal(jax.random.PRNGKey(3), (E, H, M), dtype=dtype)
 
-        # 1. Dispatch: BSM,BSEC -> EBCM (no quantization)
-        dispatched = einsum("BSM,BSEC->EBCM", tokens, routing)
+        # 1. Dispatch: BSM,BSEC -> EBCM (jnp.einsum - not NN layout)
+        dispatched = jnp.einsum("BSM,BSEC->EBCM", tokens, routing)
         assert dispatched.shape == (E, B, C, M)
 
-        # 2. MLP Up: EBCM,EMH -> EBCH
-        hidden = einsum("EBCM,EMH->EBCH", dispatched, up_weights)
+        # 2. MLP Up: EBCM,EMH -> EBCH (TE einsum - NN layout with quantization)
+        hidden = einsum("EBCM,EMH->EBCH", dispatched, up_weights,
+                       quantizer_sets=[noop_quantizer_set]*E, quantizer_dim='E')
         assert hidden.shape == (E, B, C, H)
 
-        # 3. MLP Down: EBCH,EHM -> EBCM
-        expert_out = einsum("EBCH,EHM->EBCM", hidden, down_weights)
+        # 3. MLP Down: EBCH,EHM -> EBCM (TE einsum - NN layout with quantization)
+        expert_out = einsum("EBCH,EHM->EBCM", hidden, down_weights,
+                           quantizer_sets=[noop_quantizer_set]*E, quantizer_dim='E')
         assert expert_out.shape == (E, B, C, M)
 
-        # 4. Output: EBCM,BSEC -> BSM
-        output = einsum("EBCM,BSEC->BSM", expert_out, routing)
+        # 4. Output: EBCM,BSEC -> BSM (jnp.einsum - not NN layout)
+        output = jnp.einsum("EBCM,BSEC->BSM", expert_out, routing)
         assert output.shape == (B, S, M)
 
 
