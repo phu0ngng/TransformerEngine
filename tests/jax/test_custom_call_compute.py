@@ -672,19 +672,6 @@ QUANTIZATION_INPUT_DTYPE = {
 }
 
 
-@pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
-@pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
-@pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn, jnp.float8_e5m2, jnp.float4_e2m1fn])
-@pytest_parametrize_wrapper("input_shape,flatten_axis", ALL_QUANTIZE_TEST_SHAPES_AND_FLATTEN_AXES)
-@pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
-@pytest_parametrize_wrapper(
-    "q_layout",
-    [
-        QuantizeLayout.ROWWISE,
-        QuantizeLayout.COLWISE,
-        QuantizeLayout.ROWWISE_COLWISE,
-    ],
-)
 class TestQuantize:
     """
     Purely quantization related tests that will always test on a wider set of types and shapes
@@ -1288,6 +1275,55 @@ class TestFusedQuantize:
             is_dbias=is_dbias,
             q_layout=q_layout,
         )
+
+class TestQuantizeWithVmap:
+    """Test vmap support for quantization primitives."""
+    
+    @pytest_parametrize_wrapper("recipe", supported_recipes)
+    @pytest_parametrize_wrapper("in_dtype", [jnp.bfloat16])
+    def test_vmap_quantize(self, recipe, in_dtype):
+        """Test that vmap works with tex.quantize using the general batcher."""
+        # Create batched input (E, M, K) - E experts
+        E, M, K = 4, 64, 128
+        key = jax.random.PRNGKey(0)
+        batched_input = jax.random.uniform(key, (E, M, K), in_dtype)
+        
+        # Create per-expert quantizers using recipe
+        quantizers = [
+            QuantizerFactory.create_set(
+                fp8_recipe=recipe,
+                quantize_meta_set=QuantizeMetaSet(
+                    x=QuantizeMeta(),
+                    kernel=QuantizeMeta(),
+                    grad=QuantizeMeta()
+                )
+            ).x for _ in range(E)  # Use .x quantizer
+        ]
+        
+        # Stack quantizers for vmap
+        stacked_quantizers = jax.tree_util.tree_map(
+            lambda *args: jnp.stack(args), *quantizers
+        )
+        
+        # Vmap over expert dimension
+        def quantize_single(x, quantizer):
+            return tex.quantize(x, quantizer=quantizer, flatten_axis=-1)
+        
+        vmapped_quantize = jax.vmap(quantize_single, in_axes=(0, 0))
+        result = vmapped_quantize(batched_input, stacked_quantizers)
+        
+        # Verify shapes
+        assert result.data.shape == (E, M, K)
+        assert result.scale_inv.shape[0] == E  # Per-expert scales
+        
+        # Compare with calling quantize for each expert individually
+        individual_results = []
+        for i in range(E):
+            res_i = tex.quantize(batched_input[i], quantizer=quantizers[i], flatten_axis=-1)
+            individual_results.append(res_i.data)
+        
+        expected = jnp.stack(individual_results, axis=0)
+        assert_allclose(result.data, expected, dtype=stacked_quantizers[0].x.q_dtype)
 
 
 valid_fp8_gemm_operand_types = [
