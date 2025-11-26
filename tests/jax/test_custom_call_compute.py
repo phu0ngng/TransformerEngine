@@ -1280,27 +1280,24 @@ class TestQuantizeWithVmap:
     """Test vmap support for quantization primitives."""
 
     @pytest_parametrize_wrapper("in_dtype", [jnp.bfloat16])
-    @pytest_parametrize_wrapper("recipe", supported_recipes)
-    def test_vmap_quantize(self, in_dtype, recipe):
-        """Test that vmap works with tex.quantize using the general batcher."""
-        # Skip DelayedScaling which has state that doesn't work with vmap tracers
-        if recipe.__class__.__name__ == 'DelayedScaling':
-            pytest.skip("DelayedScaling state management not yet compatible with vmap tracers")
+    @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
+    @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
+    @pytest_parametrize_wrapper("q_layout", [QuantizeLayout.ROWWISE])
+    def test_vmap_quantize(self, in_dtype, q_dtype, scaling_mode, q_layout):
+        """Test that vmap works with tex.quantize using the general batcher.
+        """
         # Create batched input (E, M, K) - E experts
         E, M, K = 4, 64, 128
         key = jax.random.PRNGKey(0)
         batched_input = jax.random.uniform(key, (E, M, K), in_dtype)
-
-        # Create per-expert quantizers using recipe
+        
+        # Create per-expert quantizers
         quantizers = [
-            QuantizerFactory.create_set(
-                fp8_recipe=recipe,
-                quantize_meta_set=QuantizeMetaSet(
-                    x=QuantizeMeta(),
-                    kernel=QuantizeMeta(),
-                    grad=QuantizeMeta()
-                )
-            ).x for _ in range(E)  # Use .x quantizer
+            QuantizerFactory.create(
+                q_dtype=q_dtype,
+                scaling_mode=scaling_mode,
+                q_layout=q_layout,
+            ) for _ in range(E)
         ]
 
         # Stack quantizers for vmap
@@ -1326,7 +1323,7 @@ class TestQuantizeWithVmap:
             individual_results.append(res_i.data)
 
         expected = jnp.stack(individual_results, axis=0)
-        assert_allclose(result.data, expected, dtype=stacked_quantizers[0].x.q_dtype)
+        assert_allclose(result.data, expected, dtype=quantizers[0].q_dtype)
 
 
 valid_fp8_gemm_operand_types = [
