@@ -254,15 +254,18 @@ class BasePrimitive(metaclass=ABCMeta):
         transposed = tuple(zip(*all_results))
 
         # Stack each output along the batch dimension
-        # Standard vmap convention: stack at the same position as input batch_dim
         stacked_results = tuple(
             jnp.stack(list(out_list), axis=batch_dim) for out_list in transposed
         )
 
-        # All outputs are batched at the same dimension as inputs
-        out_bdims = tuple((batch_dim,) for _ in stacked_results)
-
-        return stacked_results, out_bdims
+        # Format return based on number of outputs
+        if len(stacked_results) == 1:
+            # Single output: return unwrapped result and single tuple for batch_dim
+            return stacked_results[0], (batch_dim,)
+        else:
+            # Multiple outputs: return tuple of results and nested tuple for batch_dims
+            out_bdims = tuple((batch_dim,) for _ in stacked_results)
+            return stacked_results, out_bdims
 
 
 # Registry to store all registered primitive classes
