@@ -259,12 +259,14 @@ class BasePrimitive(metaclass=ABCMeta):
         )
 
         # Format return based on number of outputs
+        # out_bdims is always a flat tuple of ints (one per output)
+        out_bdims = tuple(batch_dim for _ in stacked_results)
+        
         if len(stacked_results) == 1:
-            # Single output: return unwrapped result and single tuple for batch_dim
-            return stacked_results[0], (batch_dim,)
+            # Single output: return unwrapped result
+            return stacked_results[0], out_bdims
         else:
-            # Multiple outputs: return tuple of results and nested tuple for batch_dims
-            out_bdims = tuple((batch_dim,) for _ in stacked_results)
+            # Multiple outputs: return tuple of results
             return stacked_results, out_bdims
 
 

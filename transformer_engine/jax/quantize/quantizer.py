@@ -64,10 +64,11 @@ def compute_scale_from_amax(
     fp8_max = jnp.astype(jnp.finfo(q_dtype).max, jnp.float32)
     if scale is None:
         scale = jnp.ones((1,))
-    sf = (fp8_max / amax) / (2**margin)
+    # Use jnp operations explicitly for tracer compatibility
+    sf = jnp.divide(jnp.divide(fp8_max, amax), jnp.power(2.0, margin))
     sf = jnp.where(amax > 0.0, sf, scale)
     sf = jnp.where(jnp.isfinite(amax), sf, scale)
-    assert sf.shape == (1,), f"Expected sf.shape == (1,), but got {sf.shape}"
+    # Note: Don't assert shape - may be batched when used with vmap
     return sf
 
 
