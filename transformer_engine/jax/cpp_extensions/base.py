@@ -263,7 +263,7 @@ class BasePrimitive(metaclass=ABCMeta):
             return stacked_results[0], batch_dim
 
         # Multiple outputs: return tuple of results
-        return stacked_results, tuple((batch_dim,) for _ in stacked_results)
+        return stacked_results, [batch_dim for _ in stacked_results]
 
 
 # Registry to store all registered primitive classes
