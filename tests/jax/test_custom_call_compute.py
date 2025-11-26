@@ -1280,12 +1280,16 @@ class TestQuantizeWithVmap:
     """Test vmap support for quantization primitives."""
 
     @pytest_parametrize_wrapper("in_dtype", [jnp.bfloat16])
-    @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
     @pytest_parametrize_wrapper("scaling_mode", supported_scaling_modes)
     @pytest_parametrize_wrapper("q_layout", [QuantizeLayout.ROWWISE])
-    def test_vmap_quantize(self, in_dtype, q_dtype, scaling_mode, q_layout):
-        """Test that vmap works with tex.quantize using the general batcher.
-        """
+    def test_vmap_quantize(self, in_dtype, scaling_mode, q_layout):
+        """Test that vmap works with tex.quantize using the general batcher."""
+        # Determine q_dtype based on scaling mode
+        if scaling_mode.is_nvfp4_scaling:
+            q_dtype = jnp.float4_e2m1fn
+        else:
+            q_dtype = jnp.float8_e4m3fn
+        
         # Create batched input (E, M, K) - E experts
         E, M, K = 4, 64, 128
         key = jax.random.PRNGKey(0)
