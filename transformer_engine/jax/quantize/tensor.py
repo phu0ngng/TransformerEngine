@@ -248,10 +248,24 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
                 ),
                 broadcast_2d_scale_shape_to_1d=True,
             )
-            assert self.scale_inv.shape in (unpadded_scale_shape, unpadded_scale_shape_broadcast), (
-                f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} or"
-                f" {unpadded_scale_shape_broadcast} but got {self.scale_inv.shape}."
-            )
+            # Check shape, allowing for batch dimensions from vmap
+            # If vmapped, shape will be (batch_size, *expected_shape)
+            actual_shape = self.scale_inv.shape
+            if actual_shape not in (unpadded_scale_shape, unpadded_scale_shape_broadcast):
+                # Check if it's a batched version (extra leading dimensions)
+                if len(actual_shape) > len(unpadded_scale_shape):
+                    # Batched: check that trailing dimensions match
+                    trailing_shape = actual_shape[-(len(unpadded_scale_shape)):]
+                    if trailing_shape not in (unpadded_scale_shape, unpadded_scale_shape_broadcast):
+                        raise AssertionError(
+                            f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} or "
+                            f"{unpadded_scale_shape_broadcast} (possibly with batch dims) but got {self.scale_inv.shape}."
+                        )
+                else:
+                    raise AssertionError(
+                        f"Unpadded inverse scale factor has wrong shape, expected {unpadded_scale_shape} or "
+                        f"{unpadded_scale_shape_broadcast} but got {self.scale_inv.shape}."
+                    )
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.
@@ -431,10 +445,21 @@ class GroupedScaledTensor1x(ScaledTensor1x):
             flatten_axis=self.flatten_axis,
         )
 
-        assert self.scale_inv.shape == expected_scale_shape, (
-            f"Unexpected scale_inv shape! \nExpect {expected_scale_shape} for padded"
-            f" scale_inv, got {self.scale_inv.shape}"
-        )
+        # Check shape, allowing for batch dimensions from vmap
+        actual_shape = self.scale_inv.shape
+        if actual_shape != expected_scale_shape:
+            # Check if it's a batched version
+            if len(actual_shape) > len(expected_scale_shape):
+                trailing_shape = actual_shape[-(len(expected_scale_shape)):]
+                assert trailing_shape == expected_scale_shape, (
+                    f"Unexpected scale_inv shape! Expected {expected_scale_shape} for padded "
+                    f"scale_inv (possibly with batch dims), got {self.scale_inv.shape}"
+                )
+            else:
+                raise AssertionError(
+                    f"Unexpected scale_inv shape! Expected {expected_scale_shape} for padded "
+                    f"scale_inv, got {self.scale_inv.shape}"
+                )
 
     def tree_flatten(self):
         """Flattens the tensor for JAX tree operations.
