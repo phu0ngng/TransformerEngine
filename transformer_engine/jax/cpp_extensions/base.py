@@ -260,7 +260,7 @@ class BasePrimitive(metaclass=ABCMeta):
         )
 
         # All outputs are batched at the same dimension as inputs
-        out_bdims = tuple(batch_dim for _ in stacked_results)
+        out_bdims = tuple((batch_dim,) for _ in stacked_results)
 
         return stacked_results, out_bdims
 
