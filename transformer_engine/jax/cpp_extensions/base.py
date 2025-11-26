@@ -258,16 +258,12 @@ class BasePrimitive(metaclass=ABCMeta):
             jnp.stack(list(out_list), axis=batch_dim) for out_list in transposed
         )
 
-        # Format return based on number of outputs
-        # out_bdims is always a flat tuple of ints (one per output)
-        out_bdims = tuple(batch_dim for _ in stacked_results)
-        
+        # Single output: return unwrapped result
         if len(stacked_results) == 1:
-            # Single output: return unwrapped result
-            return stacked_results[0], out_bdims
-        else:
-            # Multiple outputs: return tuple of results
-            return stacked_results, out_bdims
+            return stacked_results[0], batch_dim
+
+        # Multiple outputs: return tuple of results
+        return stacked_results, tuple((batch_dim,) for _ in stacked_results)
 
 
 # Registry to store all registered primitive classes
