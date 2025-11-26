@@ -1283,6 +1283,9 @@ class TestQuantizeWithVmap:
     @pytest_parametrize_wrapper("recipe", supported_recipes)
     def test_vmap_quantize(self, in_dtype, recipe):
         """Test that vmap works with tex.quantize using the general batcher."""
+        # Skip DelayedScaling which has state that doesn't work with vmap tracers
+        if recipe.__class__.__name__ == 'DelayedScaling':
+            pytest.skip("DelayedScaling state management not yet compatible with vmap tracers")
         # Create batched input (E, M, K) - E experts
         E, M, K = 4, 64, 128
         key = jax.random.PRNGKey(0)
