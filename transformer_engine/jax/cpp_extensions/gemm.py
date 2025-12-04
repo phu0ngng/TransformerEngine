@@ -1449,7 +1449,7 @@ class GroupedGemmPrimitive(BasePrimitive):
         Grouped GEMM operation.
 
         Args:
-            lhs_data: Left-hand side input matrix data, 1D flattened array
+            lhs_data: Left-hand side input matrix data, 1D if quantized, 2D if BF16
             lhs_scale_inv: Left-hand side input scale_inv matrix, 1D flattened array
             rhs_data: Right-hand side input matrix data, 1D flattened array
             rhs_scale_inv: Right-hand side input scale_inv matrix, 1D flattened array
@@ -1576,6 +1576,37 @@ class GroupedGemmPrimitive(BasePrimitive):
             use_async_d2h_group_sizes=use_async_d2h_group_sizes,
         )
         return (out,)
+
+    @staticmethod
+    def partition(
+        M,
+        N,
+        K,
+        lhs_is_trans,
+        rhs_is_trans,
+        scaling_mode,
+        out_dtype,
+        has_bias,
+        is_grouped_dense_wgrad,
+        use_async_d2h_group_sizes,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        lhs_specs, _, rhs_specs, *_ = map(get_padded_spec, arg_infos)
+
+        assert len(lhs_specs) == 1
+
+        gmr = global_mesh_resource()
+        # No TP or TPSP supported for grouped GEMM
+        assert not any(s in lhs_specs for s in (gmr.tp_resource, gmr.tpsp_resource)), "TP and TPSP are not supported for grouped GEMM"
+        assert not any(s in rhs_specs for s in (gmr.tp_resource, gmr.tpsp_resource)), "TP and TPSP are not supported for grouped GEMM"
+
+        #      Y = (M, K) x (G, K, N) -> (M, N)
+        #   grad = (M, N) x (G, K, N) -> (M, K)
+        #  wgrad = (M, K) x (M, N) -> (G, K, N)
+        #  AG whenever FSDP is appeared in the rhs except the wgrad GEMM
+        if not is_grouped_dense_wgrad:
 
 
 register_primitive(GroupedGemmPrimitive)

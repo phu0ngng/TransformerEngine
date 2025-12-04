@@ -28,12 +28,16 @@ __all__ = [
     "TensorUsage",
     "AbstractBaseTensor",
     "NoScaleTensor",
+    "NoScaleGroupedTensor",
     "ScaledTensor",
     "ScaledTensor1x",
     "ScaledTensor2x",
+    "GroupedScaledTensor",
     "GroupedScaledTensor1x",
+    "GroupedScaledTensor2x",
     "ScaledTensorFactory",
     "with_sharding_constraint_by_logical_axes",
+    "convert_to_grouped_scaled_tensor",
 ]
 
 
@@ -356,9 +360,27 @@ class ScaledTensor1x(AbstractBaseTensor1x, ScaledTensor):
         return jax_checkpoint_name(self, name=quantizer.checkpoint_name)
 
 
+class GroupedScaledTensor(ABC):
+    """Base class for grouped scaled tensors."""
+    pass
+
+
 @register_pytree_node_class
 @dataclass
-class GroupedScaledTensor1x(ScaledTensor1x):
+class NoScaleGroupedTensor(GroupedScaledTensor, NoScaleTensor):
+    """No-scale grouped tensor implementation."""
+    group_sizes: jnp.ndarray
+    group_axis: int
+
+    def tree_flatten(self):
+        children = (self.data, self.amax, self.group_sizes)
+        aux_data = (self.group_axis,)
+        return (children, aux_data)
+
+
+@register_pytree_node_class
+@dataclass
+class GroupedScaledTensor1x(GroupedScaledTensor, ScaledTensor1x):
     """Grouped Quantizer for an array.
 
     This class extends ScaledTensor1x to support quantization of an array in grouped manner,
@@ -552,6 +574,16 @@ class ScaledTensor2x(AbstractBaseTensor, ScaledTensor):
         raise NotImplementedError
 
 
+@register_pytree_node_class
+@dataclass
+class GroupedScaledTensor2x(GroupedScaledTensor, ScaledTensor2x):
+    """Grouped Double-scale quantized tensor implementation.
+
+    This class represents a double-scale quantized tensor where both row-wise and column-wise tensors are grouped.
+    """
+    pass
+
+
 @dataclass
 class ScaledTensorFactory:
     """Factory class for creating scaled tensor instances.
@@ -729,7 +761,7 @@ class ScaledTensorFactory:
             group_axis=group_axis,
             has_rht_applied=colwise_has_rht_applied,
         )
-        return ScaledTensor2x(rowwise_tensor, colwise_tensor)
+        return GroupedScaledTensor2x(rowwise_tensor, colwise_tensor)
 
     @staticmethod
     def create(
@@ -834,10 +866,48 @@ def with_sharding_constraint_by_logical_axes(x, logical_axis_names: Tuple[str, .
     Returns:
         The tensor with applied sharding constraints
     """
-    if isinstance(x, GroupedScaledTensor1x):
+    if isinstance(x, GroupedScaledTensor):
         raise NotImplementedError
 
     if isinstance(x, AbstractBaseTensor):
         return x.apply_sharding_constraint_by_logical_axes(logical_axis_names)
 
     return original_with_sharding_constraint_by_logical_axes(x, logical_axis_names)
+
+
+def convert_to_grouped_scaled_tensor(x: ScaledTensor) -> GroupedScaledTensor:
+    """Convert a ScaledTensor to a GroupedScaledTensor.
+
+    Args:
+        x: The ScaledTensor to convert
+
+    Returns:
+        The GroupedScaledTensor
+    """
+    if isinstance(x, ScaledTensor1x):
+        flatten_axis = (x.flatten_axis + x.ndim) % x.ndim
+        assert flatten_axis > 0 and flatten_axis < x.ndim, "flatten_axis must be positive and less than x.ndim"
+        assert x.ndim >= flatten_axis + 1 + 1, f"Invalid batched input shape, got shape {x.shape} with flatten_axis={flatten_axis}"
+        group_axis = 0
+        group_sizes = jnp.ones(x.shape[group_axis], dtype=jnp.int32)
+        return ScaledTensorFactory.create_1x(
+            x.data,
+            x.scale_inv,
+            x.amax,
+            x.scaling_mode,
+            x.dq_dtype,
+            x.is_colwise,
+            x.data_layout,
+            flatten_axis,
+            group_sizes,
+            x.data.shape,
+            group_axis,
+            x.has_rht_applied,
+        )
+
+    if isinstance(x, ScaledTensor2x):
+        return GroupedScaledTensor2x(
+            convert_to_grouped_scaled_tensor(x.rowwise_tensor),
+            convert_to_grouped_scaled_tensor(x.colwise_tensor),
+        )
+    raise ValueError(f"Unsupported ScaledTensor type: {type(x)}")

@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 """JAX/TE custom ops for quantization"""
+from doctest import OutputChecker
 import operator
 from functools import reduce
 from typing import Tuple, Optional, Union
@@ -32,23 +33,44 @@ from ..sharding import (
     all_reduce_max_along_all_axes_except_PP,
     all_reduce_sum_along_dp_fsdp,
     get_num_devices_in_mesh,
+    global_mesh_resource,
 )
 from ..quantize import (
-    ScaledTensor2x,
     ScaledTensor,
     ScaledTensorFactory,
-    GroupedScaledTensor1x,
+    GroupedScaledTensor,
     Quantizer,
     GroupedQuantizer,
     ScalingMode,
     compute_scale_from_amax,
     NoScaleTensor,
+    NoScaleGroupedTensor,
     get_rht_matrix,
     QuantizeLayout,
+    convert_to_grouped_scaled_tensor,
 )
 
 
-__all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
+__all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias", "batched_quantize"]
+
+
+# TODO(Phuong): adapt other primitives to use this function
+def make_shardings_from_specs(mesh, prefix, spec_name_pairs):
+    """
+    Create a tuple of NamedShardings from a list of (name, spec) pairs.
+    
+    Args:
+        mesh: The mesh to use for sharding
+        prefix: Prefix for the primitive name (e.g., "GroupedQuantize")
+        spec_name_pairs: List of (name, spec) tuples
+        
+    Returns:
+        Tuple of NamedShardings
+    """
+    return tuple(
+        NamedSharding(mesh, PartitionSpec(*spec), desc=f"{prefix}Primitive.{name}")
+        for name, spec in spec_name_pairs
+    )
 
 
 class BaseDBiasQuantizePrimitive(BasePrimitive):
@@ -361,34 +383,29 @@ class BaseDBiasQuantizePrimitive(BasePrimitive):
         stochastic_rounding,
         use_rht,
     ):
-        """
-        to describe batch rules for vmap
-        """
-        del is_outer
+        """Batch rule for quantization primitive using general batcher."""
         check_valid_batch_dims(batch_dims)
         assert BaseDBiasQuantizePrimitive.outer_primitive is not None
-        x, scale, amax, sr_rng_state, post_rht_amax, rht_matrix = batched_args
-        x_bdim, scale_bdim, amax_bdim, _, _, _ = batch_dims
 
-        out_bdims = x_bdim, x_bdim, scale_bdim, scale_bdim, amax_bdim, x_bdim
-        return (
-            BaseDBiasQuantizePrimitive.outer_primitive.bind(
-                x,
-                scale,
-                amax,
-                sr_rng_state,
-                post_rht_amax,
-                rht_matrix,
-                out_dtype=out_dtype,
-                scaling_mode=scaling_mode,
-                q_layout=q_layout,
-                flatten_axis=flatten_axis,
-                scale_dtype=scale_dtype,
-                is_dbias=is_dbias,
-                stochastic_rounding=stochastic_rounding,
-                use_rht=use_rht,
-            ),
-            out_bdims,
+        # Quantization returns 6 outputs:
+        # (data, transposed_data, scale, scale_inv, amax, dbias)
+        num_outputs = 6
+
+        return BaseDBiasQuantizePrimitive.batcher_impl(
+            batched_args,
+            batch_dims,
+            static_kwargs={
+                "out_dtype": out_dtype,
+                "scaling_mode": scaling_mode,
+                "q_layout": q_layout,
+                "flatten_axis": flatten_axis,
+                "scale_dtype": scale_dtype,
+                "is_dbias": is_dbias,
+                "is_outer": is_outer,
+                "stochastic_rounding": stochastic_rounding,
+                "use_rht": use_rht,
+            },
+            num_outputs=num_outputs,
         )
 
     @staticmethod
@@ -741,7 +758,7 @@ def _quantize_dbias_impl(
     flatten_axis: int = -1,
     amax_scope: AmaxScope = AmaxScope.LOCAL,  # Only works when using current-scaling
     transpose_batch_sequence: bool = False,
-) -> Tuple[ScaledTensor2x, jnp.ndarray]:
+) -> Tuple[ScaledTensor, jnp.ndarray]:
     """
     Cast wrapper
     Return FP8 tensor
@@ -956,7 +973,7 @@ def quantize_dbias(
     flatten_axis: int = -1,
     amax_scope: AmaxScope = AmaxScope.LOCAL,
     transpose_batch_sequence: bool = False,
-) -> Tuple[ScaledTensor2x, jnp.ndarray]:
+) -> Tuple[ScaledTensor, jnp.ndarray]:
     """Quantize input tensor and compute bias gradient.
 
     Args:
@@ -1154,60 +1171,160 @@ class GroupedQuantizePrimitive(BasePrimitive):
         )
         return (rowwise_out, colwise_out, rowwise_scale_inv, colwise_scale_inv, updated_amax)
 
+    @staticmethod
+    def partition(
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        group_axis,
+        scale_dtype,
+        mesh,
+        arg_infos,
+        result_infos,
+    ):
+        """
+        te_dbias_quantize_p partition
+        """
+        x_spec = get_padded_spec(arg_infos[0])
+        scale_spec = get_padded_spec(arg_infos[1])
+        group_sizes_spec = get_padded_spec(arg_infos[2])
+
+        gmr = global_mesh_resource()
+        assert not any(s in x_spec for s in (gmr.tp_resource, gmr.tpsp_resource)), "TP and TPSP are not supported for grouped quantization"
+        assert len(x_spec) == 2, "Expect 2D input x, i.e [ntokens, hidden_size]"
+        # Here since we don't support TP or TPSP, the only possible sharding is dp or fsdp in which the input is partitioned along the first dimension
+        out_spec = (x_spec[0], )
+        # The colwise output could be transposed, but in 1D layout, the partitioning pattern is still the same as the rowwise output
+        colwise_out_spec = (None,) if not q_layout.has_colwise else out_spec
+        rowwise_scale_inv_spec = colwise_scale_inv_spec = amax_spec = (None,)
+        if ScalingMode(scaling_mode).is_block_scaling:
+            rowwise_scale_inv_spec = out_spec
+            colwise_scale_inv_spec = colwise_out_spec
+
+        out_shardings = make_shardings_from_specs(
+            mesh,
+            "GroupedQuantize",
+            [
+                ("rowwise_out", out_spec),
+                ("colwise_out", colwise_out_spec),
+                ("rowwise_scale_inv", rowwise_scale_inv_spec),
+                ("colwise_scale_inv", colwise_scale_inv_spec),
+                ("amax", amax_spec),
+            ],
+        )
+        
+        arg_shardings = tuple(arg_i.sharding for arg_i in arg_infos)
+        
+        def sharded_impl(x, scale, group_sizes):
+            return GroupedQuantizePrimitive.impl(
+                x,
+                scale,
+                group_sizes,
+                out_dtype=out_dtype,
+                scaling_mode=scaling_mode,
+                q_layout=q_layout,
+                flatten_axis=flatten_axis,
+                group_axis=group_axis,
+                scale_dtype=scale_dtype,
+            )
+        
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(
+        out_dtype,
+        scaling_mode,
+        q_layout,
+        flatten_axis,
+        group_axis,
+        scale_dtype,
+        mesh,
+        value_types,
+        result_types,
+    ):
+        assert ScalingMode(scaling_mode).is_block_scaling, "Block scaling is not yet supported with Shardy"
+        prefix = "GroupedQuantize"
+        input_shape = value_types[0].shape
+        scale_rules = ScalingMode(scaling_mode).get_shardy_sharding_rules(
+            input_shape,
+            unique_var=prefix,
+            flatten_axis=flatten_axis,
+            q_layout=q_layout,
+            broadcast_2d_scale_shape_to_1d=True,
+        )
+        amax = (BATCHING + prefix + "_amax",)
+        scale = (BATCHING + prefix + "_scale",)
+    
+        return SdyShardingRule(
+            (scale_rules.input_spec, scale, amax),
+            (
+                scale_rules.rowwise_out_spec,
+                scale_rules.colwise_out_spec,
+                scale_rules.rowwise_scale_spec,
+                scale_rules.colwise_scale_spec,
+                amax,
+            ),
+            **scale_rules.factor_sizes,
+        )
 
 register_primitive(GroupedQuantizePrimitive)
 
 
 def grouped_quantize(
     x: jnp.ndarray,
-    quantizer: GroupedQuantizer,
-    group_sizes: jnp.ndarray = None,
+    group_sizes: jnp.ndarray,
     amax: jnp.ndarray = None,
     flatten_axis: int = -1,
-) -> GroupedScaledTensor1x:
-    """Quantize a tensor in grouped manner.
-
-    This function quantizes a tensor by splitting it into groups along a specified axis
-    and applying quantization to each group separately. The groups can be either specified
-    explicitly through group_sizes or automatically split along the group_axis.
-
+    quantizer: GroupedQuantizer = None,
+) -> GroupedScaledTensor:
+    """Quantize grouped activation inputs.
+    
+    This function is specifically designed for quantizing activation tensors where tokens
+    are grouped (e.g., MoE activations after routing). The input shape is [ntokens, hidden_size]
+    where tokens from different groups are concatenated along axis 0.
+    
+    For weight quantization with groups (shape [ngroups, hidden_in, hidden_out]), use 
+    `batched_quantize` instead.
+    
     Args:
-        x: Input tensor to quantize
-        quantizer: The quantizer to use for quantization
-        group_sizes: Array of ints containing the size of each group (default: None)
-        amax: The amax of x; if None, it is auto-generated. (default: None)
-        flatten_axis: The axis along which the tensor could be flattened to 2D (default: -1)
-
+        x: Input activation tensor to quantize. Shape: [ntokens, hidden_size]
+        group_sizes: Array of ints containing the size of each group. 
+            Must be 1D with dtype int32. sum(group_sizes) must equal ntokens.
+        flatten_axis: The axis along which the tensor could be flattened to 2D.
+            Must be -1 or x.ndim - 1 (default: -1)
+        quantizer: The GroupedQuantizer to use for quantization. If None, returns
+            NoScaleGroupedTensor (default: None)
+    
     Returns:
-        A GroupedScaledTensor1x containing the quantized data
-
+        A GroupedScaledTensor containing the quantized activation data.
+        
     Note:
-        - If group_sizes is not provided, the tensor will be split into equal-sized groups
-          along the group_axis
-        - The group_axis is currently fixed to 0
-        - The quantizer's q_layout determines whether row-wise, column-wise, or both
-          quantization is applied
+        - The group_axis is fixed to 0 (tokens are grouped along the first dimension)
+        - Column-wise only quantization is not supported
+        - Input must be 2D: [ntokens, hidden_size]
     """
+    # TODO(Phuong): add WAR for MXFP8 to go through the normal quantize path
 
+    assert x.ndim == 2, "Input tensor must be a 2D tensor"
+
+    group_axis = 0
     if quantizer is None:
-        if isinstance(x, NoScaleTensor):
-            return x
-        return NoScaleTensor(data=x, amax=None)
+        return NoScaleGroupedTensor(data=x, amax=amax, group_sizes=group_sizes, group_axis=group_axis)
 
-    # TODO(Phuong): add support for flatten_axis = -2
     assert flatten_axis in (
         -1,
         x.ndim - 1,
-    ), f"Only flatten_axis = -1 is supported for now, got {flatten_axis}"
-    group_axis = 0
+    ), f"Only flatten_axis = -1 or x.ndim - 1 is supported, got {flatten_axis}"
 
-    if group_sizes is None:
-        group_sizes = jnp.ones(x.shape[group_axis], dtype=jnp.int32)
+    assert group_sizes.ndim == 1 and group_sizes.dtype == jnp.int32, "group_sizes must be a 1D tensor with positive length"
 
     if not GroupedQuantizePrimitive.enabled():
+        raise UserWarning("GroupedQuantizePrimitive is not enabled, using quantizer.quantize instead which is not fully supported in production")
         return quantizer.quantize(
             x, flatten_axis=flatten_axis, group_sizes=group_sizes, group_axis=group_axis
         )
+
     n_groups = group_sizes.size
     original_shape = x.shape
     assert n_groups == len(
@@ -1236,10 +1353,9 @@ def grouped_quantize(
         ScalingMode.DELAYED_TENSOR_SCALING,
         ScalingMode.CURRENT_TENSOR_SCALING,
     )
-    # WAR for tensor_scaling as TE/Common does not support q_layout = COLWISE yet
-    # So we performance ROWWISE_COLWISE and use the colwise_tensor_output
-    apply_colwise_war = is_tensor_scaling and quantizer.q_layout.is_colwise_only
-    q_layout = QuantizeLayout.ROWWISE_COLWISE if apply_colwise_war else quantizer.q_layout
+
+    assert not quantizer.q_layout.is_colwise_only, "Column-wise quantization is not supported for grouped quantization"
+
     (
         rowwise_casted_output,
         colwise_casted_output,
@@ -1252,7 +1368,7 @@ def grouped_quantize(
         group_sizes,
         out_dtype=quantizer.q_dtype,
         scaling_mode=quantizer.scaling_mode.value,
-        q_layout=q_layout,
+        q_layout=quantizer.q_layout,
         flatten_axis=flatten_axis,
         group_axis=group_axis,
         scale_dtype=quantizer.get_scale_dtype(),
@@ -1260,7 +1376,7 @@ def grouped_quantize(
 
     # For DelayedScaling2x and CurrentScaling2x, the scale buffer
     # is shared between rowwise and colwise
-    if is_tensor_scaling and quantizer.q_layout.is_rowwise_colwise or apply_colwise_war:
+    if is_tensor_scaling and quantizer.q_layout.is_rowwise_colwise:
         colwise_scale_inv = rowwise_scale_inv
 
     # TODO(Phuong): store the whole updated_amax in the grouped_quantize instead?
@@ -1306,3 +1422,72 @@ def grouped_dbias(grad: jnp.ndarray, group_sizes: jnp.ndarray) -> jnp.ndarray:
     dbias_fp32 = jax.ops.segment_sum(grad_fp32, segment_ids, num_segments=group_sizes.shape[0])
     dbias = dbias_fp32.astype(grad.dtype)
     return dbias
+
+
+def batched_quantize(
+    x: jnp.ndarray,
+    quantizers: Tuple[Quantizer, ...],
+    flatten_axis: int = -1,
+    amax_scope: AmaxScope = AmaxScope.LOCAL,
+    transpose_batch_sequence: bool = False,
+) -> GroupedScaledTensor:
+    """Quantize batched tensors with per-batch quantizers using vmap.
+    
+    This function is primarily designed for weight quantization where each group/expert
+    has its own weight tensor and quantizer (e.g., MoE expert weights). It uses JAX's vmap
+    to efficiently apply independent quantization to each batch element.
+    
+    For activation quantization where tokens are grouped (shape [ntokens, hidden]), 
+    use `grouped_quantize` instead.
+    
+    Args:
+        x: Batched input tensor to be quantized.
+            Shape: [B, ...] where B is the batch size (e.g., number of experts/groups).
+            Typical use: [ngroups, hidden_in, hidden_out] for weight quantization.
+        quantizers: Tuple of Quantizers (one per batch element).
+            The length must match the batch size B. Each quantizer maintains independent
+            scaling parameters.
+        flatten_axis: The quantization axis in which input data can be flattened to 2D 
+            for quantization. Note that this is relative to the non-batched shape 
+            (i.e., after removing the first batch dimension). Defaults to -1.
+        amax_scope: Indicate the scope to run amax calculation. This only works when 
+            using current-scaling. Default is AmaxScope.LOCAL.
+        transpose_batch_sequence: Whether to transpose batch and sequence dimensions
+            before computing amax. Default is False.
+    
+    Returns:
+        A GroupedScaledTensor containing the quantized batched tensor.
+    """
+    flatten_axis = (flatten_axis + x.ndim) % x.ndim
+    assert flatten_axis > 0 and flatten_axis < x.ndim, "flatten_axis must be positive and less than x.ndim"
+    assert x.ndim >= flatten_axis + 1 + 1, "Invalid batched input shape, got shape {x.shape} with flatten_axis={flatten_axis}"
+    
+    batch_size = x.shape[0]
+    assert batch_size > 0, "Invalid batch size"
+    
+    assert isinstance(quantizers, tuple), f"quantizers must be a tuple of Quantizers, got {type(quantizers)}"
+    assert len(quantizers) == batch_size, f"Number of quantizers ({len(quantizers)}) must match batch size ({batch_size})"
+    
+    # Stack quantizers into a pytree structure that vmap can handle
+    # This stacks all pytree leaves (scales, amaxes, etc.) along axis 0
+    stacked_quantizers = jax.tree_util.tree_map(
+        lambda *args: jnp.stack(args), *quantizers
+    )
+    
+    # Vmap over both input and quantizers
+    quantize_fn = jax.vmap(
+        lambda single_x, single_quantizer: quantize(
+            single_x,
+            quantizer=single_quantizer,
+            flatten_axis=flatten_axis,
+            amax_scope=amax_scope,
+            transpose_batch_sequence=transpose_batch_sequence,
+        ),
+        in_axes=(0, 0),  # vmap over both x and stacked quantizers
+        out_axes=0,
+    )
+
+    # TODO(Phuong): consider BatchedScaledTensor class 
+    batched_output = quantize_fn(x, stacked_quantizers)
+    out = convert_to_grouped_scaled_tensor(batched_output)
+    return out
