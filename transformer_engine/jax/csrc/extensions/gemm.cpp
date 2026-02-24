@@ -98,6 +98,8 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
   return std::make_tuple(std::move(input), input_shape);
 }
 
+// NOTE: gelu_input, pre_gelu_out, and fuse_gelu parameters are deprecated and will be removed in a
+// future release. They are kept here only to maintain FFI interface stability.
 Error_Type CollectiveGemmInitFFI(Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                                  Buffer_Type rhs_scale_inv, Buffer_Type bias,
                                  Buffer_Type gelu_input, Buffer_Type alpha, Buffer_Type beta,
@@ -170,6 +172,15 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
                    int64_t lhs_axis_boundary, int64_t rhs_axis_boundary, bool lhs_transposed,
                    bool rhs_transposed, bool fuse_bias, bool fuse_gelu, bool grad,
                    bool use_split_accumulator, JAXX_Collective_Op collective_op) {
+  // Deprecation warnings: fuse_gelu, gelu_input, and pre_gelu_out will be removed in a future
+  // release. The Python API no longer exposes these options; they are kept here only to maintain
+  // FFI interface stability.
+  if (fuse_gelu) {
+    fprintf(stderr,
+            "[TransformerEngine WARNING] GemmFFI: fuse_gelu, gelu_input, and pre_gelu_out are "
+            "deprecated and will be removed in a future release. fuse_gelu will be ignored.\n");
+    fuse_gelu = false;
+  }
   // cuBLAS workspace + 256 alignment enforcement (+ swizzle scales)
   uint8_t *lhs_swizzle_scale_ptr = nullptr, *rhs_swizzle_scale_ptr = nullptr;
   auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
@@ -218,21 +229,8 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   }
   auto bias_ = TensorWrapper(bias_ptr, std::vector<size_t>{bias_size}, bias_dtype);
 
-  // Pre-GeLU output from forward pass or input to backward pass
-  void *pre_gelu_ptr = nullptr;
-  std::vector<size_t> pre_gelu_shape = {0};
-  DType pre_gelu_dtype = out_dtype;
-  if (gelu_input.element_count() > 0) {
-    if (grad) {
-      NVTE_CHECK(pre_gelu_out->untyped_data() == gelu_input.untyped_data(),
-                 "Missing operand-output aliasing in GemmPrimitive: gelu_input <-> pre_gelu_out");
-    }
-    pre_gelu_ptr = pre_gelu_out->untyped_data();
-    pre_gelu_shape = {product(pre_gelu_out->dimensions(), 0, pre_gelu_out->dimensions().size() - 1),
-                      static_cast<size_t>(pre_gelu_out->dimensions().back())};
-    pre_gelu_dtype = convert_ffi_datatype_to_te_dtype(pre_gelu_out->element_type());
-  }
-  auto pre_gelu_ = TensorWrapper(pre_gelu_ptr, pre_gelu_shape, pre_gelu_dtype);
+  // Deprecated: pre_gelu_out and gelu_input are no longer used; always empty.
+  auto pre_gelu_ = TensorWrapper(nullptr, std::vector<size_t>{0}, out_dtype);
 
   auto num_math_sm = cuda::sm_count() - getenv<int>("NVTE_EXT_MARGIN_SM", 0);
 
@@ -254,10 +252,6 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   config.set_use_split_accumulator(use_split_accumulator);
   config.set_sm_count(num_math_sm);
   if (fuse_bias) config.set_bias_tensor(bias_.data());
-  if (fuse_gelu) {
-    config.set_with_gelu_epilogue(true);
-    config.set_epilogue_aux_tensor(pre_gelu_.data());
-  }
 
   if (collective_op == JAXX_Collective_Op::NONE) {
     auto out_ = TensorWrapper(output->untyped_data(), out_shape, out_dtype);
