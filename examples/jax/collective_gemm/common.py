@@ -9,20 +9,30 @@ import numpy as np
 
 # Add this after your existing imports
 def dtype_tols(dtype, rtol=None, atol=None):
-    """Expected numerical tolerance for a data type."""
+    """Expected numerical tolerance for a data type.
+
+    FP8 tolerances (atol=1e-2, rtol=1e-2) are aligned with tests/cpp/test_common.cu::getTolerances.
+    """
     # Return immediately if tolerances are fully specified
     if rtol is not None and atol is not None:
         return {"rtol": rtol, "atol": atol}
 
     # Default tolerances for common dtypes
     if dtype in [jnp.float32, "float32"]:
-        return {"rtol": 1e-5, "atol": 1e-8}
+        default_rtol, default_atol = 1e-5, 1e-8
     elif dtype in [jnp.float16, "float16"]:
-        return {"rtol": 1e-3, "atol": 1e-6}
+        default_rtol, default_atol = 1e-3, 1e-6
     elif dtype in [jnp.bfloat16, "bfloat16"]:
-        return {"rtol": 1e-2, "atol": 1e-5}
+        default_rtol, default_atol = 1e-2, 1e-5
+    elif dtype in [jnp.float8_e4m3fn, jnp.float8_e5m2]:
+        default_rtol, default_atol = 1e-2, 1e-2
     else:
-        return {"rtol": 1e-5, "atol": 1e-8}
+        default_rtol, default_atol = 1e-5, 1e-8
+
+    return {
+        "rtol": rtol if rtol is not None else default_rtol,
+        "atol": atol if atol is not None else default_atol,
+    }
 
 
 def assert_allclose(

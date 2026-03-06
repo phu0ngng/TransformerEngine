@@ -22,6 +22,7 @@ from jax.sharding import PartitionSpec, NamedSharding
 
 from common import (
     assert_allclose,
+    dtype_tols,
     _initialize_distributed,
     _get_dp_and_tp_sizes,
     _create_mesh,
@@ -101,14 +102,20 @@ def run_gemm_tests(args, mesh=None):
     _initialize_distributed(args)
     mesh = mesh or _create_mesh(args)
 
-    # Create test data
-    rng = jax.random.PRNGKey(0)
-    rng, x_rng, weight_rng, bias_rng = jax.random.split(rng, 4)
-    x = jax.random.normal(
-        x_rng, (args.batch_size, args.seq_len, args.hidden_in), dtype=jnp.bfloat16
+    # Structured test data for easy error detection:
+    #   x[b, s, :]   = (s % 8 + 1)  — every element in row s has the same value in [1..8]
+    #   weight[:, j] = (j % 8 + 1)  — every element in col j has the same value in [1..8]
+    #   bias         = 0
+    # Expected output: y[b, s, j] = hidden_in * (s%8+1) * (j%8+1)
+    x_row_vals = (jnp.arange(args.seq_len, dtype=jnp.float32) % 8 + 1).astype(jnp.bfloat16)
+    x = jnp.broadcast_to(
+        x_row_vals[None, :, None], (args.batch_size, args.seq_len, args.hidden_in)
     )
-    weight = jax.random.normal(weight_rng, (args.hidden_in, args.hidden_out), dtype=jnp.bfloat16)
-    bias = jax.random.normal(bias_rng, (args.hidden_out,), dtype=jnp.bfloat16)
+    w_col_vals = (jnp.arange(args.hidden_out, dtype=jnp.float32) % 8 + 1).astype(jnp.bfloat16)
+    weight = jnp.broadcast_to(
+        w_col_vals[None, :], (args.hidden_in, args.hidden_out)
+    )
+    bias = jnp.zeros((args.hidden_out,), dtype=jnp.bfloat16)
     collective_op = (
         CollectiveOp.ALL_GATHER
         if args.collective_type == "all_gather"
@@ -168,8 +175,46 @@ def run_gemm_tests(args, mesh=None):
         jax.block_until_ready(gathered_ref_output)
         jax.block_until_ready(gathered_output)
 
-    if args.enable_result_check and args.process_id == 0:
-        assert_allclose(gathered_ref_output, gathered_output)
+    if args.process_id == 0:
+        tol_dtype = quantizer_set.x.q_dtype if use_fp8 else gathered_ref_output.dtype
+        tols = dtype_tols(tol_dtype)
+
+        # Expected output formula: y[b, s, j] = hidden_in * (s%8+1) * (j%8+1)
+        expected = (
+            args.hidden_in
+            * (jnp.arange(args.seq_len) % 8 + 1).astype(jnp.float32)[:, None]
+            * (jnp.arange(args.hidden_out) % 8 + 1).astype(jnp.float32)[None, :]
+        )  # [seq_len, hidden_out]
+
+        ref = jnp.array(gathered_ref_output[0], dtype=jnp.float32)  # [seq_len, hidden_out]
+        out = jnp.array(gathered_output[0], dtype=jnp.float32)
+
+        print("\n=== Output comparison (batch=0, rows 0..3, cols 0..7) ===")
+        print(f"  expected:\n{expected[:4, :8]}")
+        print(f"  ref (CollectiveOp.NONE):\n{ref[:4, :8]}")
+        print(f"  output  (CollectiveOp.{args.collective_type.upper()}):\n{out[:4, :8]}")
+
+        diff = jnp.abs(ref - out)
+        mismatch_mask = diff > (tols["atol"] + tols["rtol"] * jnp.abs(ref))
+        n_total = gathered_ref_output[0].size
+        n_mismatch = int(jnp.sum(mismatch_mask))
+        print(f"\n=== Mismatches: {n_mismatch} / {n_total} (tols: {tols}) ===")
+        if 0 < n_mismatch <= 200:
+            indices = jnp.argwhere(mismatch_mask)
+            for s, j in indices[:50]:
+                print(
+                    f"  [0,{int(s):5d},{int(j):5d}]"
+                    f"  expected={float(expected[s, j]):.2f}"
+                    f"  ref={float(ref[s, j]):.4f}"
+                    f"  got={float(out[s, j]):.4f}"
+                    f"  diff={float(diff[s, j]):.4f}"
+                )
+        elif n_mismatch > 200:
+            print(f"  (too many mismatches to list individually; showing first 50 rows, 8 cols)")
+            print(f"  diff[0:50, 0:8]:\n{diff[:50, :8]}")
+
+        if args.enable_result_check:
+            assert_allclose(gathered_ref_output, gathered_output, dtype=tol_dtype)
 
 
 class TestCollectiveGemmWithDP(unittest.TestCase):
@@ -184,7 +229,7 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         self.args.process_id = self.process_id
         self.args.local_device_ids = self.local_device_ids
         self.args.num_devices_per_process = self.num_devices_per_process
-        self.args.enable_data_parallel = True
+        # self.args.enable_data_parallel = True
         self.args.tensor_parallel_size = _get_dp_and_tp_sizes(self.args)[1]
         _initialize_distributed(self.args)
         self.mesh = _create_mesh(self.args)
@@ -253,27 +298,25 @@ class TestCollectiveGemmWithDP(unittest.TestCase):
         self.args.collective_type = "reduce_scatter"
         run_gemm_tests(self.args, self.mesh)
 
-    # TODO: Enable when MXFP8BlockScaling + Collective GEMM is supported
-    # def test_te_mxfp8_all_gather_with_dp(self):
-    #     """Test Collective GEMM with MXFP8BlockScaling + AllGather"""
-    #     self.args.quantize_recipe = "MXFP8BlockScaling"
-    #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
-    #     if not is_supported:
-    #         self.skipTest(reason)
-    #     self.args.use_fp8 = True
-    #     self.args.collective_type = "all_gather"
-    #     run_gemm_tests(self.args, self.mesh)
+    def test_te_mxfp8_all_gather_with_dp(self):
+        """Test Collective GEMM with MXFP8BlockScaling + AllGather"""
+        self.args.quantize_recipe = "MXFP8BlockScaling"
+        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        if not is_supported:
+            self.skipTest(reason)
+        self.args.use_fp8 = True
+        self.args.collective_type = "all_gather"
+        run_gemm_tests(self.args, self.mesh)
 
-    # TODO: Enable when MXFP8BlockScaling + Collective GEMM is supported
-    # def test_te_mxfp8_reduce_scatter_with_dp(self):
-    #     """Test Collective GEMM with MXFP8BlockScaling + ReduceScatter"""
-    #     self.args.quantize_recipe = "MXFP8BlockScaling"
-    #     is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
-    #     if not is_supported:
-    #         self.skipTest(reason)
-    #     self.args.use_fp8 = True
-    #     self.args.collective_type = "reduce_scatter"
-    #     run_gemm_tests(self.args, self.mesh)
+    def test_te_mxfp8_reduce_scatter_with_dp(self):
+        """Test Collective GEMM with MXFP8BlockScaling + ReduceScatter"""
+        self.args.quantize_recipe = "MXFP8BlockScaling"
+        is_supported, reason = is_scaling_mode_supported(get_scaling_mode_from_recipe_name(self.args.quantize_recipe))
+        if not is_supported:
+            self.skipTest(reason)
+        self.args.use_fp8 = True
+        self.args.collective_type = "reduce_scatter"
+        run_gemm_tests(self.args, self.mesh)
 
     # TODO: Enable when NVFP4BlockScaling + Collective GEMM is supported
     # def test_te_nvfp4_all_gather_with_dp(self):

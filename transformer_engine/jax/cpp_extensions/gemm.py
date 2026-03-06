@@ -602,7 +602,7 @@ class GemmPrimitive(BasePrimitive):
         is_outer,
         collective_op,
     ):
-        if scaling_mode.is_1d_block_scaling():
+        if scaling_mode.is_1d_block_scaling() and not is_outer:
             lhs_cdims, rhs_cdims = map(sanitize_dims, (lhs.ndim, rhs.ndim), contracting_dims)
             lhs_transposed, rhs_transposed = _get_gemm_layout(
                 (lhs.ndim, rhs.ndim), (lhs_cdims, rhs_cdims)
@@ -618,7 +618,7 @@ class GemmPrimitive(BasePrimitive):
             )
 
         # Only perform JAX-based swizzle for MXFP8, NVFP4 swizzle will go though nvte kernel
-        if scaling_mode.is_mxfp8_scaling:
+        if scaling_mode.is_mxfp8_scaling and not is_outer:
             lhs_scale_inv = swizzled_scale(lhs_scale_inv, lhs_flatten_axis, lhs_transposed)
             rhs_scale_inv = swizzled_scale(rhs_scale_inv, rhs_flatten_axis, not rhs_transposed)
 
@@ -648,6 +648,7 @@ class GemmPrimitive(BasePrimitive):
             )
             reordered = reshaped.transpose(2, 0, 1, 3, *range(4, reshaped.ndim))
             lhs = reordered.reshape(original_shape)
+            # TODO: need to reorder the lhs_scale_inv here as well
 
         (output, _) = GemmPrimitive.inner_primitive.bind(
             lhs,
@@ -1200,10 +1201,9 @@ def _te_gemm(
         rhs_tensor_scale_inv = _get_nvfp4_tensor_scale_inv(rhs_amax)
         alpha = lhs_tensor_scale_inv * rhs_tensor_scale_inv
 
-    if not collective_op.is_none and scaling_mode.is_1d_block_scaling():
-        raise ValueError(
-            f"Collective GEMM is not yet supported with {scaling_mode} quantization. "
-            "Only DELAYED_TENSOR_SCALING and CURRENT_TENSOR_SCALING are supported."
+    if not collective_op.is_none:
+        assert not ScalingMode(scaling_mode).is_nvfp4_scaling, (
+            f"Collective GEMM is not yet supported with NVFP4 quantization. "
         )
 
     out_dtype = lhs_q.dq_dtype if isinstance(lhs_q, ScaledTensor) else lhs_data.dtype
