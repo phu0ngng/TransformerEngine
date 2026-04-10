@@ -7,3 +7,6 @@
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
+[submodule "3rdparty/nccl_ep"]
+	path = 3rdparty/nccl_ep
+	url = https://gitlab-master.nvidia.com:12051/nccl/nccl.git

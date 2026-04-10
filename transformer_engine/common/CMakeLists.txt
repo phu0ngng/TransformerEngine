@@ -303,6 +303,76 @@ if (NVTE_WITH_CUBLASMP)
   message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
 endif()
 
+# ── NCCL EP (optional, HT mode only) ──────────────────────────────────────
+option(NVTE_WITH_NCCL_EP "Enable NCCL EP expert-parallel backend (HT mode)" OFF)
+
+if(NVTE_WITH_NCCL_EP)
+  # ── NCCL EP headers ────────────────────────────────────────────────────────
+  # Primary: use the 3rdparty/nccl_ep submodule (contrib/nccl_ep/include/).
+  # Fallback: NCCL_EP_DIR or NCCL_EP_HOME environment variables for external
+  # installs (e.g., when the submodule is not checked out).
+  set(NCCL_EP_SUBMODULE_INCLUDE
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl_ep/contrib/nccl_ep/include")
+
+  if(EXISTS "${NCCL_EP_SUBMODULE_INCLUDE}/nccl_ep.h")
+    set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_INCLUDE}")
+    message(STATUS "NCCL EP headers: submodule at ${NCCL_EP_INCLUDE_DIR}")
+  else()
+    find_path(NCCL_EP_INCLUDE_DIR
+        NAMES nccl_ep.h
+        HINTS ${NCCL_EP_DIR}/include ${NCCL_EP_HOME}/include
+        REQUIRED)
+    message(STATUS "NCCL EP headers: external at ${NCCL_EP_INCLUDE_DIR}")
+  endif()
+
+  # ── libnccl_ep.so ──────────────────────────────────────────────────────────
+  # The NCCL EP library must be pre-built externally (its build system is
+  # coupled with the parent NCCL build and cannot be trivially integrated
+  # into TE's CMake). Point NCCL_EP_DIR or NCCL_EP_HOME to the build output.
+  find_library(NCCL_EP_LIB
+      NAMES nccl_ep libnccl_ep
+      HINTS ${NCCL_EP_DIR}/lib ${NCCL_EP_HOME}/lib
+      PATH_SUFFIXES lib lib64
+      REQUIRED)
+
+  # ── NCCL + GIN headers ─────────────────────────────────────────────────────
+  # libnccl.so and all GIN headers (ncclGin.h, ncclWindow_t, ncclDevComm_t)
+  # ship with the base CUDA Toolkit — no separate NCCL build needed.
+  # CUDAToolkit_INCLUDE_DIRS already covers ${CUDA_HOME}/include where
+  # nccl.h and nccl_device/ live.
+  if(NOT NCCL_LIB)
+    find_library(NCCL_LIB
+        NAMES nccl libnccl
+        HINTS ${CUDAToolkit_LIBRARY_DIR}
+        PATH_SUFFIXES lib lib64
+        REQUIRED)
+  endif()
+
+  target_compile_definitions(transformer_engine PUBLIC NVTE_WITH_NCCL_EP)
+
+  target_include_directories(transformer_engine PRIVATE
+      ${NCCL_EP_INCLUDE_DIR}
+      ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})  # covers nccl.h + nccl_device/
+
+  target_link_libraries(transformer_engine PUBLIC
+      ${NCCL_EP_LIB}
+      ${NCCL_LIB})
+
+  # Embed rpath so the installed wheel finds libnccl_ep.so at runtime.
+  # libnccl.so is already on the system via the Toolkit — no rpath needed for it.
+  set_target_properties(transformer_engine PROPERTIES
+      INSTALL_RPATH "$ORIGIN;${NCCL_EP_DIR}/lib")
+
+  # New TE source files that implement the NCCLEPBackend glue layer
+  target_sources(transformer_engine PRIVATE
+      ep/ep_manager.cpp
+      ep/nccl_ep_backend.cpp
+      ep/ep_api.cpp)
+
+  message(STATUS "NCCL EP enabled: ${NCCL_EP_LIB}")
+  message(STATUS "NCCL EP include: ${NCCL_EP_INCLUDE_DIR}")
+endif()
+
 # Number of philox4x32 rounds for stochastic rounding (build-time constant).
 set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR $ENV{NVTE_BUILD_NUM_PHILOX_ROUNDS})
 if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR)

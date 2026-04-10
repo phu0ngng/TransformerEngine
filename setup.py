@@ -78,6 +78,15 @@ def setup_common_extension() -> CMakeExtension:
         ).locate_file(f"nvidia/cublasmp/cu{cuda_version()[0]}")
         cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
 
+    if bool(int(os.getenv("NVTE_WITH_NCCL_EP", "0"))):
+        nccl_ep_home = os.getenv("NCCL_EP_HOME") or os.getenv("NCCL_EP_DIR")
+        if not nccl_ep_home:
+            raise RuntimeError(
+                "NVTE_WITH_NCCL_EP=1 requires NCCL_EP_HOME or NCCL_EP_DIR to be set"
+            )
+        cmake_flags.append("-DNVTE_WITH_NCCL_EP=ON")
+        cmake_flags.append(f"-DNCCL_EP_DIR={nccl_ep_home}")
+
     # Add custom CMake arguments from environment variable
     nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
     if nvte_cmake_extra_args:

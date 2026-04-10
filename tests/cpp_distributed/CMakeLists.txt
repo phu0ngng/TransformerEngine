@@ -55,3 +55,53 @@ target_link_libraries(test_comm_gemm PUBLIC CUDA::cuda_driver CUDA::cudart GTest
 
 include(GoogleTest)
 gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
+
+# ── EP distributed tests (requires NVTE_WITH_NCCL_EP, HT mode) ──────────────
+# No MPI dependency — processes are spawned by run_test_ep.sh with
+# --process-id / --num-processes flags.  ncclUniqueId exchange uses a
+# shared temp file (see test_ep.cu for details).
+option(NVTE_WITH_NCCL_EP "Enable NCCL EP tests" OFF)
+
+if(NVTE_WITH_NCCL_EP)
+  find_library(NCCL_EP_LIB
+               NAMES nccl_ep libnccl_ep
+               HINTS $ENV{NCCL_EP_HOME}/lib $ENV{NCCL_EP_DIR}/lib
+               PATH_SUFFIXES lib lib64
+               REQUIRED)
+
+  # Primary: use the 3rdparty/nccl_ep submodule for headers.
+  # Fallback: NCCL_EP_HOME/NCCL_EP_DIR environment variables.
+  set(NCCL_EP_SUBMODULE_INCLUDE
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl_ep/contrib/nccl_ep/include")
+
+  if(EXISTS "${NCCL_EP_SUBMODULE_INCLUDE}/nccl_ep.h")
+    set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_INCLUDE}")
+    message(STATUS "EP test: NCCL EP headers from submodule: ${NCCL_EP_INCLUDE_DIR}")
+  else()
+    find_path(NCCL_EP_INCLUDE_DIR
+              NAMES nccl_ep.h
+              HINTS $ENV{NCCL_EP_HOME}/include $ENV{NCCL_EP_DIR}/include
+              REQUIRED)
+    message(STATUS "EP test: NCCL EP headers from external: ${NCCL_EP_INCLUDE_DIR}")
+  endif()
+
+  add_executable(test_ep
+                 test_ep.cu)
+
+  target_include_directories(test_ep PRIVATE
+      ${NCCL_EP_INCLUDE_DIR}
+      ../../transformer_engine/common/include
+      ../../transformer_engine/common)
+
+  target_link_libraries(test_ep PUBLIC
+      CUDA::cuda_driver
+      CUDA::cudart
+      GTest::gtest
+      ${TE_LIB}
+      ${NCCL_LIB}
+      ${NCCL_EP_LIB})
+
+  # Do NOT use gtest_discover_tests — test_ep requires multi-process
+  # launch via run_test_ep.sh, not direct single-process execution.
+  message(STATUS "EP distributed test enabled: ${NCCL_EP_LIB}")
+endif()
