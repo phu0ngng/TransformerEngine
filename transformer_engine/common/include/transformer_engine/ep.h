@@ -9,7 +9,7 @@
  *
  *  This is the only public surface for EP functionality. All framework
  *  extensions (TE/PyTorch, TE/JAX) call these functions. Internal
- *  classes (EPManager, EPBackend, NCCLEPBackend) are never exposed.
+ *  The EPBackend singleton is never exposed.
  *
  *  All per-step ops (prepare, dispatch, combine, and their backward
  *  variants) are allocation-free and CUDA graph-capturable.
@@ -20,7 +20,7 @@
 #ifndef TRANSFORMER_ENGINE_EP_H_
 #define TRANSFORMER_ENGINE_EP_H_
 
-// transformer_engine.h defines NVTETensor, NVTEDType, NVTEScalingMode, etc.
+// transformer_engine.h defines NVTETensor, NVTEDType, etc.
 #include <transformer_engine/transformer_engine.h>
 
 #include <cuda_runtime_api.h>
@@ -30,14 +30,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* ── Enums ──────────────────────────────────────────────────────────────── */
-
-/*! \brief Topk routing format for EP dispatch/combine. */
-typedef enum {
-  NVTE_EP_TOPK_FORMAT_SPARSE = 0,  /*!< [T, top_k] int64 indices + [T, top_k] float32 weights */
-  NVTE_EP_TOPK_FORMAT_DENSE  = 1,  /*!< [T, E] float32 masked probability map */
-} NVTEEpTopkFormat;
 
 /* ── Config structs ─────────────────────────────────────────────────────── */
 
@@ -58,31 +50,24 @@ typedef struct {
  *  non-tensor, non-stream per-layer attributes.
  */
 typedef struct {
-  int num_local_experts;        /*!< Experts hosted on this rank. */
-  NVTEEpTopkFormat topk_format; /*!< Routing format: SPARSE or DENSE. */
-  NVTEScalingMode scaling_mode; /*!< Scaling mode. Currently NVTE_DELAYED_TENSOR_SCALING (no quant).
-                                     FP8 block scaling modes may be added in future. */
+  int num_local_experts;  /*!< Experts hosted on this rank. */
+  /* topk_format   — reserved; only sparse int64 routing supported today */
+  /* scaling_mode  — reserved; FP8 block-scaling support planned */
 } NVTEEpLayerConfig;
 
 /* ── Bootstrap ──────────────────────────────────────────────────────────── */
 
-/*! \brief Bootstrap — called once per process. Returns nothing.
+/*! \brief Bootstrap from a serialized ncclUniqueId — JAX path.
  *
- *  TE/Common creates its own world-sized NCCL communicator internally:
+ *  TE creates a world-sized NCCL comm from the uid internally:
  *    ncclCommInitRank(&world_comm, world_size, uid, rank)
- *  then splits it into the EP sub-communicator:
- *    ncclCommSplit(world_comm, color = rank / ep_size, ...)
- *  caches the EP sub-comm in EPManager, then destroys the temporary world comm.
+ *  then splits it into the EP sub-communicator and initializes the backend.
+ *  The world comm is destroyed immediately after the split.
  *
- *  unique_id_bytes must be a 128-byte ncclUniqueId, identical on all ranks.
- *  The caller generates it on rank 0 and broadcasts it via the framework's
- *  own distributed primitives before calling this function.
+ *  Use this path for JAX, which does not expose its internal ncclComm_t.
+ *  For PyTorch use nvte_ep_initialize_with_comm() instead.
  *
- *  Rationale: neither PyTorch nor JAX exposes its internal ncclComm_t to
- *  external libraries. TE/Common therefore bootstraps its own communicator
- *  from the unique_id, making both frameworks follow the same code path.
- *
- *  Requires SM_90+ (Hopper or later). Uses High Throughput (HT) mode.
+ *  Requires SM_90+ (Hopper or later).
  *
  *  \param[in] unique_id_bytes  Pointer to 128-byte ncclUniqueId (broadcast by caller).
  *  \param[in] world_size       Total number of ranks.
@@ -93,6 +78,24 @@ void nvte_ep_initialize(const uint8_t* unique_id_bytes,
                         int world_size,
                         int rank,
                         NVTEEpGroupConfig group_config);
+
+/*! \brief Bootstrap from an existing NCCL EP sub-communicator — PyTorch path.
+ *
+ *  For frameworks that already hold an ncclComm_t for the EP process group
+ *  (e.g. PyTorch via torch.distributed), pass it here instead of going
+ *  through the uid bootstrap. TE takes ownership and destroys it after
+ *  the backend is initialized.
+ *
+ *  ep_comm must span exactly group_config.ep_size ranks. Passing the world
+ *  communicator is an error and will be caught at runtime.
+ *
+ *  Requires SM_90+ (Hopper or later).
+ *
+ *  \param[in] ep_comm      Opaque ncclComm_t for the EP sub-group (cast to void*).
+ *  \param[in] group_config Group-level EP configuration.
+ */
+void nvte_ep_initialize_with_comm(void* ep_comm,
+                                  NVTEEpGroupConfig group_config);
 
 /* ── Per-layer size query ────────────────────────────────────────────────── */
 
@@ -116,7 +119,7 @@ size_t nvte_ep_get_handle_mem_size(NVTEEpLayerConfig layer_config);
  *  topk_weights are NOT passed here — they travel alongside tokens during
  *  dispatch (see nvte_ep_dispatch).
  *
- *  \param[in]     topk_idx      SPARSE: [T, top_k] int64; DENSE: [T, E] float32.
+ *  \\param[in]     topk_idx      [T, top_k] int64 sparse routing indices.
  *  \param[in]     layer_config  Per-layer EP configuration.
  *  \param[out]    token_counts  Per-local-expert token counts [num_local_experts] int32.
  *  \param[in,out] handle_mem    Pre-allocated uint8 buffer (sized by nvte_ep_get_handle_mem_size).

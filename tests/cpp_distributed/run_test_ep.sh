@@ -2,125 +2,148 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-
-# Launch the EP distributed unit test across multiple GPUs.
+#
+# Run TE EP distributed unit tests across multiple GPUs.
+#
+# Uses mpirun if available (provides PMI environment for NCCL bootstrapping
+# on EOS/Enroot containers); falls back to bare background processes.
+#
+# Each test binary is run twice — once per init path:
+#   uid path  : nvte_ep_initialize        (JAX / generic)
+#   comm path : nvte_ep_initialize_with_comm  (PyTorch)
 #
 # Usage:
-#   bash run_test_ep.sh [num_gpus] [path/to/test_ep binary]
+#   bash run_test_ep.sh [num_gpus] [build_dir]
 #
 # Defaults:
 #   num_gpus  = number of GPUs visible to nvidia-smi
-#   test_ep   = ./build/test_ep  (relative to this script's directory)
-#
-# The script spawns one process per GPU, each with --process-id=<i>
-# and --num-processes=<N>.  ncclUniqueId exchange happens via a temp
-# file — no MPI needed.
+#   build_dir = <script_dir>/build
 #
 # Environment variables:
-#   GTEST_FILTER   — forwarded to all processes (e.g., "EPPipelineTest.*")
-#   TE_EP_UID_FILE — override the shared uid file path
+#   GTEST_FILTER  — forwarded to all processes (e.g., "EPDispatchTest.*")
+#   MPI_HOME      — path to MPI installation (default: /usr/local/mpi)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
+BUILD_DIR="${2:-${SCRIPT_DIR}/build}"
 NUM_GPUS="${1:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
-TEST_BIN="${2:-${SCRIPT_DIR}/build/test_ep}"
+MPI_HOME="${MPI_HOME:-/usr/local/mpi}"
 
-if [[ ! -x "${TEST_BIN}" ]]; then
-  echo "ERROR: test binary not found or not executable: ${TEST_BIN}"
-  echo "Build it first:  cd ${SCRIPT_DIR} && mkdir -p build && cd build && cmake .. -DNVTE_WITH_NCCL_EP=ON && make test_ep"
-  exit 1
-fi
+GTEST_ARGS="${GTEST_FILTER:+--gtest_filter=${GTEST_FILTER}}"
+OVERALL_FAIL=0
 
-if (( NUM_GPUS < 2 )); then
-  echo "EP tests require at least 2 GPUs, found ${NUM_GPUS}. Skipping."
-  exit 0
-fi
+# ---------------------------------------------------------------------------
+# run_suite BINARY SUITE_NAME MIN_GPUS [--use-comm]
+# ---------------------------------------------------------------------------
+run_suite() {
+    local BINARY="$1"
+    local SUITE_NAME="$2"
+    local MIN_GPUS="${3:-2}"
+    local USE_COMM="${4:-}"          # "--use-comm" or empty
 
-# Unique temp file for this invocation (PID-stamped to avoid collisions)
-UID_FILE="${TE_EP_UID_FILE:-/tmp/te_ep_test_uid_$$}"
+    local TEST_BIN="${BUILD_DIR}/${BINARY}"
 
-echo "=== EP Distributed Test ==="
-echo "  GPUs:     ${NUM_GPUS}"
-echo "  Binary:   ${TEST_BIN}"
-echo "  UID file: ${UID_FILE}"
-echo
-
-# Cleanup on exit
-cleanup() {
-  rm -f "${UID_FILE}"
-  for pid in "${PIDS[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -TERM "$pid" 2>/dev/null || true
+    if [[ ! -x "${TEST_BIN}" ]]; then
+        echo "ERROR: binary not found: ${TEST_BIN}"
+        echo "Build:  cd ${SCRIPT_DIR} && mkdir -p build && cd build && cmake .. -DNVTE_WITH_NCCL_EP=ON && make"
+        OVERALL_FAIL=1
+        return
     fi
-  done
-  sleep 1
-  for pid in "${PIDS[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then
-      kill -KILL "$pid" 2>/dev/null || true
+
+    if (( NUM_GPUS < MIN_GPUS )); then
+        echo "${SUITE_NAME}: requires ${MIN_GPUS} GPUs, found ${NUM_GPUS}. Skipping."
+        return
     fi
-  done
+
+    local TMPDIR_L="${TMPDIR:-/tmp}"
+    local UID_FILE="${TMPDIR_L}/te_ep_uid_${BINARY}_${USE_COMM:+comm_}$$"
+    rm -f "${UID_FILE}"
+
+    local LOG_DIR
+    LOG_DIR=$(mktemp -d)
+    local FAIL=0
+
+    echo "=== ${SUITE_NAME} ==="
+    echo "  GPUs: ${NUM_GPUS}   Binary: ${TEST_BIN}"
+    echo
+
+    if [[ -x "${MPI_HOME}/bin/mpirun" ]]; then
+        # mpirun provides a proper PMI environment, which NCCL needs for
+        # socket bootstrapping inside Enroot containers on EOS.
+        "${MPI_HOME}/bin/mpirun" \
+            -np "${NUM_GPUS}" \
+            --bind-to none \
+            --allow-run-as-root \
+            --oversubscribe \
+            -x LD_LIBRARY_PATH \
+            bash -c "\"${TEST_BIN}\" \
+                --rank=\${OMPI_COMM_WORLD_RANK} \
+                --nranks=${NUM_GPUS} \
+                --uid-file=\"${UID_FILE}\" \
+                ${USE_COMM} \
+                ${GTEST_ARGS} \
+                > \"${LOG_DIR}/rank_\${OMPI_COMM_WORLD_RANK}.log\" 2>&1" \
+            || FAIL=1
+    else
+        # Fallback: bare background processes (works on single-node with
+        # direct TCP access; may fail in restricted container environments).
+        local PIDS=()
+        for i in $(seq 0 $((NUM_GPUS - 1))); do
+            "${TEST_BIN}" \
+                --rank="${i}" \
+                --nranks="${NUM_GPUS}" \
+                --uid-file="${UID_FILE}" \
+                ${USE_COMM} \
+                ${GTEST_ARGS} \
+                > "${LOG_DIR}/rank_${i}.log" 2>&1 &
+            PIDS+=($!)
+        done
+        for i in $(seq 0 $((NUM_GPUS - 1))); do
+            wait "${PIDS[$i]}" || FAIL=1
+        done
+    fi
+
+    echo "--- Rank 0 output ---"
+    cat "${LOG_DIR}/rank_0.log"
+
+    if (( FAIL )); then
+        for i in $(seq 1 $((NUM_GPUS - 1))); do
+            echo "--- Rank ${i} output ---"
+            cat "${LOG_DIR}/rank_${i}.log"
+        done
+        echo "=== ${SUITE_NAME}: FAILED ==="
+        OVERALL_FAIL=1
+    else
+        echo "=== ${SUITE_NAME}: ALL PASSED ==="
+    fi
+
+    rm -rf "${LOG_DIR}"
+    rm -f "${UID_FILE}"
 }
+
+# ---------------------------------------------------------------------------
+# Cleanup on abort
+# ---------------------------------------------------------------------------
+cleanup() { rm -f "${TMPDIR:-/tmp}"/te_ep_uid_*_"$$" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
-# Remove stale uid file if it exists
-rm -f "${UID_FILE}"
+# ---------------------------------------------------------------------------
+# Run all suites for both init paths
+# ---------------------------------------------------------------------------
+run_suite "test_ep_init"     "EP Init Tests (uid)"              2
+run_suite "test_ep_init"     "EP Init Tests (comm)"             2 "--use-comm"
 
-PIDS=()
-LOG_DIR=$(mktemp -d)
-
-# Optional GTest filter
-GTEST_ARGS=""
-if [[ -n "${GTEST_FILTER:-}" ]]; then
-  GTEST_ARGS="--gtest_filter=${GTEST_FILTER}"
-fi
-
-for i in $(seq 0 $((NUM_GPUS - 1))); do
-  LOG_FILE="${LOG_DIR}/process_${i}.log"
-
-  # Each process calls cudaSetDevice(process_id % device_count) internally.
-  # Do NOT override CUDA_VISIBLE_DEVICES — this preserves SLURM GPU
-  # mappings and allows NVLink topology to remain visible to NCCL.
-  "${TEST_BIN}" \
-    --process-id="${i}" \
-    --num-processes="${NUM_GPUS}" \
-    --uid-file="${UID_FILE}" \
-    ${GTEST_ARGS} \
-    > "${LOG_FILE}" 2>&1 &
-
-  PIDS+=($!)
-done
-
-# Wait for all processes and collect exit codes
-HAS_FAILURE=0
-for i in $(seq 0 $((NUM_GPUS - 1))); do
-  if ! wait "${PIDS[$i]}"; then
-    echo "FAILED: process ${i} (PID ${PIDS[$i]})"
-    HAS_FAILURE=1
-  fi
-done
-
-# Print process 0's output (the one with summary messages)
 echo
-echo "=== Process 0 output ==="
-cat "${LOG_DIR}/process_0.log"
 
-# On failure, also print other processes' logs
-if (( HAS_FAILURE )); then
-  for i in $(seq 1 $((NUM_GPUS - 1))); do
-    echo
-    echo "=== Process ${i} output ==="
-    cat "${LOG_DIR}/process_${i}.log"
-  done
-  echo
-  echo "=== SOME PROCESSES FAILED ==="
+run_suite "test_ep_pipeline" "EP Pipeline Tests (uid)"          2
+run_suite "test_ep_pipeline" "EP Pipeline Tests (comm)"         2 "--use-comm"
+
+echo
+if (( OVERALL_FAIL )); then
+    echo "=== SOME SUITES FAILED ==="
 else
-  echo
-  echo "=== ALL PROCESSES PASSED ==="
+    echo "=== ALL SUITES PASSED ==="
 fi
 
-# Cleanup temp logs
-rm -rf "${LOG_DIR}"
-
-exit "${HAS_FAILURE}"
+exit "${OVERALL_FAIL}"

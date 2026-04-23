@@ -363,10 +363,8 @@ if(NVTE_WITH_NCCL_EP)
   set_target_properties(transformer_engine PROPERTIES
       INSTALL_RPATH "$ORIGIN;${NCCL_EP_DIR}/lib")
 
-  # New TE source files that implement the NCCLEPBackend glue layer
   target_sources(transformer_engine PRIVATE
-      ep/ep_manager.cpp
-      ep/nccl_ep_backend.cpp
+      ep/ep_backend.cpp
       ep/ep_api.cpp)
 
   message(STATUS "NCCL EP enabled: ${NCCL_EP_LIB}")

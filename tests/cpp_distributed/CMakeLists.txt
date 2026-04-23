@@ -46,10 +46,27 @@ add_executable(test_comm_gemm
 
 find_package(OpenMP REQUIRED)
 find_package(MPI REQUIRED)
+
+# ── NCCL library ──────────────────────────────────────────────────────────────
+# Search order: NCCL_HOME env → 3rdparty/nccl submodule build → system paths.
+set(NCCL_SUBMODULE_BUILD "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/build")
 find_library(NCCL_LIB
              NAMES nccl libnccl
-             PATH_SUFFIXES lib
+             HINTS $ENV{NCCL_HOME}/lib ${NCCL_SUBMODULE_BUILD}/lib
+             PATH_SUFFIXES lib lib64
              REQUIRED)
+
+# NCCL headers: prefer submodule build output (has the handle_init API),
+# then submodule src, then system (CUDA toolkit).
+set(NCCL_SUBMODULE_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/build/include")
+set(NCCL_SUBMODULE_SRC_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/src/include")
+if(EXISTS "${NCCL_SUBMODULE_INCLUDE}/nccl.h")
+  set(NCCL_INCLUDE_DIR "${NCCL_SUBMODULE_INCLUDE}")
+elseif(EXISTS "${NCCL_SUBMODULE_SRC_INCLUDE}/nccl.h")
+  set(NCCL_INCLUDE_DIR "${NCCL_SUBMODULE_SRC_INCLUDE}")
+elseif(DEFINED ENV{NCCL_HOME})
+  set(NCCL_INCLUDE_DIR "$ENV{NCCL_HOME}/include")
+endif()
 target_include_directories(test_comm_gemm PRIVATE ${MPI_CXX_INCLUDE_PATH} $ENV{CUBLASMP_HOME}/include)
 target_link_libraries(test_comm_gemm PUBLIC CUDA::cuda_driver CUDA::cudart GTest::gtest ${TE_LIB} CUDA::nvrtc MPI::MPI_CXX ${NCCL_LIB} OpenMP::OpenMP_CXX)
 
@@ -58,8 +75,8 @@ gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
 
 # ── EP distributed tests (requires NVTE_WITH_NCCL_EP, HT mode) ──────────────
 # No MPI dependency — processes are spawned by run_test_ep.sh with
-# --process-id / --num-processes flags.  ncclUniqueId exchange uses a
-# shared temp file (see test_ep.cu for details).
+# --rank / --nranks flags.  ncclUniqueId exchange uses a
+# shared temp file (see test_ep_common.h for details).
 option(NVTE_WITH_NCCL_EP "Enable NCCL EP tests" OFF)
 
 if(NVTE_WITH_NCCL_EP)
@@ -85,15 +102,20 @@ if(NVTE_WITH_NCCL_EP)
     message(STATUS "EP test: NCCL EP headers from external: ${NCCL_EP_INCLUDE_DIR}")
   endif()
 
-  add_executable(test_ep
-                 test_ep.cu)
+  # Collect NCCL include dirs shared by all EP test targets (nccl_ep.h + nccl.h).
+  set(EP_TEST_NCCL_INCLUDES ${NCCL_EP_INCLUDE_DIR})
+  if(DEFINED NCCL_INCLUDE_DIR)
+    list(APPEND EP_TEST_NCCL_INCLUDES ${NCCL_INCLUDE_DIR})
+    message(STATUS "EP test: NCCL headers: ${NCCL_INCLUDE_DIR}")
+  endif()
 
-  target_include_directories(test_ep PRIVATE
-      ${NCCL_EP_INCLUDE_DIR}
+  set(EP_TEST_COMMON_INCLUDES
+      ${EP_TEST_NCCL_INCLUDES}
       ../../transformer_engine/common/include
-      ../../transformer_engine/common)
+      ../../transformer_engine/common
+      ${CMAKE_CURRENT_SOURCE_DIR})
 
-  target_link_libraries(test_ep PUBLIC
+  set(EP_TEST_COMMON_LIBS
       CUDA::cuda_driver
       CUDA::cudart
       GTest::gtest
@@ -101,7 +123,17 @@ if(NVTE_WITH_NCCL_EP)
       ${NCCL_LIB}
       ${NCCL_EP_LIB})
 
-  # Do NOT use gtest_discover_tests — test_ep requires multi-process
+  # ── EP init tests (InitPath, HandleMemSizeQuery) ─────────────────────────────
+  add_executable(test_ep_init test_ep_init.cu)
+  target_include_directories(test_ep_init PRIVATE ${EP_TEST_COMMON_INCLUDES})
+  target_link_libraries(test_ep_init PUBLIC ${EP_TEST_COMMON_LIBS})
+
+  # ── EP pipeline tests (dispatch, combine, bwd, integrated) ───────────────────
+  add_executable(test_ep_pipeline test_ep_pipeline.cu)
+  target_include_directories(test_ep_pipeline PRIVATE ${EP_TEST_COMMON_INCLUDES})
+  target_link_libraries(test_ep_pipeline PUBLIC ${EP_TEST_COMMON_LIBS})
+
+  # Do NOT use gtest_discover_tests — these binaries require multi-process
   # launch via run_test_ep.sh, not direct single-process execution.
-  message(STATUS "EP distributed test enabled: ${NCCL_EP_LIB}")
+  message(STATUS "EP distributed tests enabled: ${NCCL_EP_LIB}")
 endif()
