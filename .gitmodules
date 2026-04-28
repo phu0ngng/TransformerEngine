@@ -9,7 +9,7 @@
 	url = https://github.com/NVIDIA/cutlass.git
 [submodule "3rdparty/nccl"]
 	path = 3rdparty/nccl
-	; url = ssh://git@gitlab-master.nvidia.com:12051/phuonguyen/nccl.git
-  ; branch = handle_init
-  url = ssh://git@gitlab-master.nvidia.com:12051/nccl/nccl.git
-  branch = v2.30u1
+	url = ssh://git@gitlab-master.nvidia.com:12051/phuonguyen/nccl.git
+  branch = phuong/expert_sort_nvlink_rebased
+  ; url = ssh://git@gitlab-master.nvidia.com:12051/nccl/nccl.git
+  ; branch = v2.30u1
