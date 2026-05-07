@@ -252,12 +252,11 @@ def fused_attn_fwd(
                        softmaxStats: torch.Tensor
                            log(sum(e^(x - max(x)))), where x=Q*K.T
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
-                    2. if fused_attention_backend == FusedAttnBackend["FP8"]
-                       M: torch.Tensor
-                           max(Q*K.T)
+                       Max: torch.Tensor, only when return_max_logit is True
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
-                       ZInv: torch.Tensor, only allocated for T3HD path
-                           1/sum(e^(x - max(x))), where x=Q*K.T
+                    2. if fused_attention_backend == FusedAttnBackend["FP8"]
+                       softmaxStats: torch.Tensor
+                           log(sum(e^(x - max(x)))), where x=Q*K.T
                            shape [batch_size, num_heads, max_seqlen_q, 1], dtype float32
                 rng_state: torch.Tensor
                     state of the random number generator;
@@ -461,7 +460,7 @@ def fused_attn_bwd(
                 in torch.dtype
     aux_ctx_tensors : List[torch.Tensor]
                 auxiliary output tensors of the forward pass when its is_training is True,
-                e.g. aux_ctx_tensors = [M, ZInv, rng_state]
+                e.g. aux_ctx_tensors = [S, Max, rng_state]
     fused_attention_backend : tex.NVTE_Fused_Attn_Backend
                 please see FusedAttention module for details on supported backends.
     cu_seqlens_q_padded : torch.Tensor, default = None
