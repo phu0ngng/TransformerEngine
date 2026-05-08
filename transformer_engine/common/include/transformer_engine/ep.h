@@ -21,11 +21,10 @@
 #define TRANSFORMER_ENGINE_EP_H_
 
 // transformer_engine.h defines NVTETensor, NVTEDType, etc.
-#include <transformer_engine/transformer_engine.h>
-
 #include <cuda_runtime_api.h>
-#include <stddef.h>   // size_t
-#include <stdint.h>   // uint8_t
+#include <stddef.h>  // size_t
+#include <stdint.h>  // uint8_t
+#include <transformer_engine/transformer_engine.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,10 +37,10 @@ extern "C" {
  *  Passed to nvte_ep_initialize. All fields are static for the process lifetime.
  */
 typedef struct {
-  int ep_size;              /*!< EP world size (number of GPUs in EP domain). */
-  int num_experts;          /*!< Total experts across all ranks. */
-  int max_tokens_per_rank;  /*!< Static upper bound on tokens per rank; fixed for CUDA graph. */
-  int hidden_dim;           /*!< Token hidden dimension. */
+  int ep_size;             /*!< EP world size (number of GPUs in EP domain). */
+  int num_experts;         /*!< Total experts across all ranks. */
+  int max_tokens_per_rank; /*!< Static upper bound on tokens per rank; fixed for CUDA graph. */
+  int hidden_dim;          /*!< Token hidden dimension. */
 } NVTEEpGroupConfig;
 
 /*! \brief Per-layer EP configuration (fixed per layer at construction).
@@ -50,7 +49,7 @@ typedef struct {
  *  non-tensor, non-stream per-layer attributes.
  */
 typedef struct {
-  int num_local_experts;  /*!< Experts hosted on this rank. */
+  int num_local_experts; /*!< Experts hosted on this rank. */
   /* topk_format   — reserved; only sparse int64 routing supported today */
   /* scaling_mode  — reserved; FP8 block-scaling support planned */
 } NVTEEpLayerConfig;
@@ -74,9 +73,7 @@ typedef struct {
  *  \param[in] rank             This process's rank.
  *  \param[in] group_config     Group-level EP configuration.
  */
-void nvte_ep_initialize(const uint8_t* unique_id_bytes,
-                        int world_size,
-                        int rank,
+void nvte_ep_initialize(const uint8_t* unique_id_bytes, int world_size, int rank,
                         NVTEEpGroupConfig group_config);
 
 /*! \brief Bootstrap from an existing NCCL EP sub-communicator — PyTorch path.
@@ -94,8 +91,7 @@ void nvte_ep_initialize(const uint8_t* unique_id_bytes,
  *  \param[in] ep_comm      Opaque ncclComm_t for the EP sub-group (cast to void*).
  *  \param[in] group_config Group-level EP configuration.
  */
-void nvte_ep_initialize_with_comm(void* ep_comm,
-                                  NVTEEpGroupConfig group_config);
+void nvte_ep_initialize_with_comm(void* ep_comm, NVTEEpGroupConfig group_config);
 
 /* ── Per-layer size query ────────────────────────────────────────────────── */
 
@@ -122,14 +118,14 @@ size_t nvte_ep_get_handle_mem_size(NVTEEpLayerConfig layer_config);
  *  \\param[in]     topk_idx      [T, top_k] int64 sparse routing indices.
  *  \param[in]     layer_config  Per-layer EP configuration.
  *  \param[out]    token_counts  Per-local-expert token counts [num_local_experts] int32.
- *  \param[in,out] handle_mem    Pre-allocated uint8 buffer (sized by nvte_ep_get_handle_mem_size).
+ *  \param[in,out] handle_mem    uint8 buffer sized by nvte_ep_get_handle_mem_size().
+ *                               MUST be zero-initialized at first call (the leading
+ *                               bytes are an internal HandleMemHeader; garbage there
+ *                               would be misread as a stale handle).
  *  \param[in]     stream        CUDA stream.
  */
-void nvte_ep_prepare(NVTETensor topk_idx,
-                     NVTEEpLayerConfig layer_config,
-                     NVTETensor token_counts,
-                     NVTETensor handle_mem,
-                     cudaStream_t stream);
+void nvte_ep_prepare(NVTETensor topk_idx, NVTEEpLayerConfig layer_config, NVTETensor token_counts,
+                     NVTETensor handle_mem, cudaStream_t stream);
 
 /*! \brief Dispatch tokens (and routing weights) to expert ranks.
  *
@@ -144,11 +140,8 @@ void nvte_ep_prepare(NVTETensor topk_idx,
  *  \param[out]    recv_tokens   Received tokens [recv_T, hidden_dim].
  *  \param[in]     stream        CUDA stream.
  */
-void nvte_ep_dispatch(NVTETensor handle_mem,
-                      NVTETensor tokens,
-                      NVTETensor topk_weights,
-                      NVTETensor recv_tokens,
-                      cudaStream_t stream);
+void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor tokens, NVTETensor topk_weights,
+                      NVTETensor recv_tokens, cudaStream_t stream);
 
 /*! \brief Combine expert outputs with weighted accumulation.
  *
@@ -160,9 +153,7 @@ void nvte_ep_dispatch(NVTETensor handle_mem,
  *  \param[out] result      Combined output [T, hidden_dim].
  *  \param[in]  stream      CUDA stream.
  */
-void nvte_ep_combine(NVTETensor handle_mem,
-                     NVTETensor expert_out,
-                     NVTETensor result,
+void nvte_ep_combine(NVTETensor handle_mem, NVTETensor expert_out, NVTETensor result,
                      cudaStream_t stream);
 
 /*! \brief Backward of dispatch (combine direction in backward pass).
@@ -172,9 +163,7 @@ void nvte_ep_combine(NVTETensor handle_mem,
  *  \param[out] result      Gradient w.r.t. tokens.
  *  \param[in]  stream      CUDA stream.
  */
-void nvte_ep_dispatch_bwd(NVTETensor handle_mem,
-                          NVTETensor grad,
-                          NVTETensor result,
+void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTETensor result,
                           cudaStream_t stream);
 
 /*! \brief Backward of combine (dispatch direction in backward pass).
@@ -184,9 +173,7 @@ void nvte_ep_dispatch_bwd(NVTETensor handle_mem,
  *  \param[out] result      Gradient w.r.t. expert_out.
  *  \param[in]  stream      CUDA stream.
  */
-void nvte_ep_combine_bwd(NVTETensor handle_mem,
-                         NVTETensor grad,
-                         NVTETensor result,
+void nvte_ep_combine_bwd(NVTETensor handle_mem, NVTETensor grad, NVTETensor result,
                          cudaStream_t stream);
 
 #ifdef __cplusplus

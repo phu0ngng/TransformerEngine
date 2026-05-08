@@ -144,6 +144,10 @@ struct EPForwardBuffers {
     NVTEEpLayerConfig cfg{num_local_experts};
     handle_mem_size = nvte_ep_get_handle_mem_size(cfg);
     cudaMalloc(&d_handle_mem, handle_mem_size);
+    // Zero-init: prepare() interprets the leading bytes as HandleMemHeader and
+    // checks hdr->handle to decide whether to destroy a prior handle. Garbage
+    // bytes would trigger ncclEpHandleDestroy on an invalid pointer.
+    cudaMemset(d_handle_mem, 0, handle_mem_size);
   }
 
   void free_all() {

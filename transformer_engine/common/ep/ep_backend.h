@@ -54,10 +54,10 @@ class EPBackend {
   size_t get_handle_mem_size(NVTEEpLayerConfig layer_config);
 
   void prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor token_counts,
-               NVTEEpLayerConfig layer_config, cudaStream_t stream);
+               cudaStream_t stream);
 
   void dispatch(void* handle_mem, const NVTETensor tokens, const NVTETensor topk_weights,
-                NVTETensor recv_tokens, cudaStream_t stream);
+                NVTETensor recv_tokens, NVTETensor recv_topk_weights, cudaStream_t stream);
 
   void combine(void* handle_mem, const NVTETensor expert_out, NVTETensor result,
                cudaStream_t stream);
