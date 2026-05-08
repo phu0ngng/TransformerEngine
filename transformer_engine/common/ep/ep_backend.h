@@ -20,13 +20,13 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_EP_EP_BACKEND_H_
 #define TRANSFORMER_ENGINE_COMMON_EP_EP_BACKEND_H_
 
-#include <cstddef>
-#include <mutex>
 #include <cuda_runtime_api.h>
-
-#include <transformer_engine/ep.h>
 #include <nccl.h>
 #include <nccl_ep.h>
+#include <transformer_engine/ep.h>
+
+#include <cstddef>
+#include <mutex>
 
 namespace transformer_engine {
 namespace ep {
@@ -53,32 +53,19 @@ class EPBackend {
 
   size_t get_handle_mem_size(NVTEEpLayerConfig layer_config);
 
-  void prepare(void* handle_mem,
-               const NVTETensor topk_idx,
-               NVTETensor token_counts,
-               NVTEEpLayerConfig layer_config,
+  void prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor token_counts,
+               NVTEEpLayerConfig layer_config, cudaStream_t stream);
+
+  void dispatch(void* handle_mem, const NVTETensor tokens, const NVTETensor topk_weights,
+                NVTETensor recv_tokens, cudaStream_t stream);
+
+  void combine(void* handle_mem, const NVTETensor expert_out, NVTETensor result,
                cudaStream_t stream);
 
-  void dispatch(void* handle_mem,
-                const NVTETensor tokens,
-                const NVTETensor topk_weights,
-                NVTETensor recv_tokens,
-                cudaStream_t stream);
-
-  void combine(void* handle_mem,
-               const NVTETensor expert_out,
-               NVTETensor result,
-               cudaStream_t stream);
-
-  void dispatch_bwd(void* handle_mem,
-                    const NVTETensor grad,
-                    NVTETensor result,
+  void dispatch_bwd(void* handle_mem, const NVTETensor grad, NVTETensor result,
                     cudaStream_t stream);
 
-  void combine_bwd(void* handle_mem,
-                   const NVTETensor grad,
-                   NVTETensor result,
-                   cudaStream_t stream);
+  void combine_bwd(void* handle_mem, const NVTETensor grad, NVTETensor result, cudaStream_t stream);
 
  private:
   EPBackend() = default;
@@ -89,16 +76,12 @@ class EPBackend {
   // Shared finalizer called by both initialize paths after bootstrap.
   void init(ncclComm_t ep_comm, NVTEEpGroupConfig config);
 
-  static EPBackend& instance();   // Meyers singleton accessor
+  static EPBackend& instance();  // Meyers singleton accessor
   static void validate_config(const NVTEEpGroupConfig& config);
 
-  ncclNDTensor_t make_tensor(void* data, unsigned int ndim,
-                             ncclDataType_t datatype,
-                             ncclEpTensorTag_t tag,
-                             unsigned int size0,
-                             unsigned int size1 = 1,
-                             unsigned int size2 = 1,
-                             unsigned int size3 = 1,
+  ncclNDTensor_t make_tensor(void* data, unsigned int ndim, ncclDataType_t datatype,
+                             ncclEpTensorTag_t tag, unsigned int size0, unsigned int size1 = 1,
+                             unsigned int size2 = 1, unsigned int size3 = 1,
                              unsigned int size4 = 1);
 
   void destroy_tensor(ncclNDTensor_t tensor);
@@ -106,11 +89,14 @@ class EPBackend {
   void reinit_handle(HandleMemHeader* hdr, void* handle_mem);
   void destroy_handle(HandleMemHeader* hdr);
 
-  ncclEpGroup_t    ep_group_{nullptr};
+  ncclEpGroup_t ep_group_{nullptr};
+  // Underlying NCCL communicator the EP group was built from. Kept alive
+  // for the EP group's lifetime — ncclEpGroupDestroy depends on it.
+  ncclComm_t ep_comm_{nullptr};
   NVTEEpGroupConfig group_config_{};
-  bool             initialized_{false};
-  size_t           routing_buf_size_{0};
-  std::mutex       mutex_;
+  bool initialized_{false};
+  size_t routing_buf_size_{0};
+  std::mutex mutex_;
 };
 
 }  // namespace ep
