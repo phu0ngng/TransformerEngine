@@ -79,11 +79,19 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
 
     if bool(int(os.getenv("NVTE_WITH_NCCL_EP", "0"))):
+        # NCCL EP requires SM>=90 (Hopper+). Catch at setup time rather than
+        # bubbling up from nvcc.
+        for a in str(archs).split(";"):
+            a_num = "".join(c for c in a if c.isdigit())
+            if a_num and int(a_num) < 90:
+                raise RuntimeError(
+                    "NVTE_WITH_NCCL_EP=1 requires CUDA arch >= 90 (Hopper or newer); "
+                    f"got '{a}' in NVTE_CUDA_ARCHS. Set NVTE_CUDA_ARCHS=\"90\" or higher."
+                )
         nccl_ep_home = os.getenv("NCCL_EP_HOME") or os.getenv("NCCL_EP_DIR")
         if not nccl_ep_home:
-            raise RuntimeError(
-                "NVTE_WITH_NCCL_EP=1 requires NCCL_EP_HOME or NCCL_EP_DIR to be set"
-            )
+            nccl_ep_home = build_nccl_ep_submodule()
+            os.environ["NCCL_EP_DIR"] = nccl_ep_home
         cmake_flags.append("-DNVTE_WITH_NCCL_EP=ON")
         cmake_flags.append(f"-DNCCL_EP_DIR={nccl_ep_home}")
 
@@ -130,6 +138,69 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
             test_reqs.extend(test_requirements())
 
     return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
+
+
+def build_nccl_ep_submodule() -> str:
+    """Build NCCL EP (and optionally NCCL core) from the 3rdparty/nccl submodule.
+
+    By default the NCCL core (libnccl.so) shipped with the CUDA / system image
+    is used; only libnccl_ep.so is built. The current image's NCCL core is
+    not yet compatible with NCCL EP, so set NVTE_BUILD_NCCL_CORE=1 to also
+    build NCCL core from the submodule. Returns the submodule build directory
+    (suitable for NCCL_EP_DIR).
+
+    Env knobs:
+        NVTE_BUILD_NCCL_CORE=1  Also build NCCL core from the submodule.
+        NVTE_NCCL_EP_REBUILD=1  Force rebuild even when libs exist on disk.
+    """
+    nccl_root = current_file_path / "3rdparty" / "nccl"
+    if not (nccl_root / "Makefile").exists():
+        raise RuntimeError(
+            f"NCCL submodule not found at {nccl_root}. "
+            "Run `git submodule update --init --recursive`."
+        )
+
+    build_dir = nccl_root / "build"
+    nccl_lib = build_dir / "lib" / "libnccl.so"
+    nccl_ep_lib = build_dir / "lib" / "libnccl_ep.so"
+    force = bool(int(os.getenv("NVTE_NCCL_EP_REBUILD", "0")))
+    build_core = bool(int(os.getenv("NVTE_BUILD_NCCL_CORE", "1")))
+
+    archs = cuda_archs() or "90"
+    arch_list = []
+    for a in str(archs).split(";"):
+        a = a.strip().rstrip("af")
+        if a and a.isdigit() and int(a) >= 90:
+            arch_list.append(a)
+    if not arch_list:
+        arch_list = ["90"]
+    gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
+
+    nproc = os.cpu_count() or 8
+    env = os.environ.copy()
+    env["NVCC_GENCODE"] = gencode
+
+    if build_core and (force or not nccl_lib.exists()):
+        print(f"[NCCL] Building NCCL core from submodule (gencode='{gencode}')")
+        subprocess.check_call(
+            ["make", "-j", str(nproc), "src.build"],
+            cwd=str(nccl_root),
+            env=env,
+        )
+
+    if force or not nccl_ep_lib.exists():
+        print(f"[NCCL EP] Building libnccl_ep.so (gencode='{gencode}')")
+        ep_env = env.copy()
+        ep_env.setdefault("_NCCL_EP_LSA_TEAM_SIZE_MIN", "4")
+        ep_env.setdefault("_NCCL_EP_LSA_TEAM_SIZE_MAX", "8")
+        ep_env.setdefault("_NCCL_EP_NUM_LSA_TEAMS_LIST", "1")
+        subprocess.check_call(
+            ["make", "-j", str(nproc), "-C", "contrib/nccl_ep", "lib"],
+            cwd=str(nccl_root),
+            env=ep_env,
+        )
+
+    return str(build_dir)
 
 
 def git_check_submodules() -> None:

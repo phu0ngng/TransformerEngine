@@ -100,13 +100,52 @@ def setup_jax_extension(
     else:
         cxx_flags.append("-g0")
 
+    # NCCL EP (optional): when NVTE_WITH_NCCL_EP=1, define the macro so the
+    # JAX extension's pybind.cpp + ep.cpp are guarded in. Headers come from
+    # the same submodule the C++ side uses; lib/ is contributed by NCCL_EP_DIR.
+    libraries = ["nccl"]
+    if bool(int(os.getenv("NVTE_WITH_NCCL_EP", "0"))):
+        # NCCL EP requires SM>=90 (Hopper+).
+        archs_env = os.getenv("NVTE_CUDA_ARCHS", "")
+        for a in archs_env.split(";"):
+            a_num = "".join(c for c in a if c.isdigit())
+            if a_num and int(a_num) < 90:
+                raise RuntimeError(
+                    "NVTE_WITH_NCCL_EP=1 requires CUDA arch >= 90 (Hopper or newer); "
+                    f"got '{a}' in NVTE_CUDA_ARCHS."
+                )
+        cxx_flags.append("-DNVTE_WITH_NCCL_EP")
+        nccl_ep_dir = os.getenv("NCCL_EP_DIR") or os.getenv("NCCL_EP_HOME")
+        if not nccl_ep_dir:
+            raise RuntimeError("NVTE_WITH_NCCL_EP=1 requires NCCL_EP_DIR or NCCL_EP_HOME env var")
+        # In-tree submodule headers (preferred) + external fallback for nccl_ep.h.
+        submod_inc = (
+            common_header_files / ".." / "3rdparty" / "nccl" / "contrib" / "nccl_ep" / "include"
+        ).resolve()
+        if (submod_inc / "nccl_ep.h").exists():
+            include_dirs.append(submod_inc)
+        else:
+            include_dirs.append(Path(nccl_ep_dir) / "include")
+        libraries.append("nccl_ep")
+
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
 
-    return Pybind11Extension(
+    ext = Pybind11Extension(
         "transformer_engine_jax",
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
-        libraries=["nccl"],
+        libraries=libraries,
     )
+    if bool(int(os.getenv("NVTE_WITH_NCCL_EP", "0"))):
+        nccl_ep_dir = os.getenv("NCCL_EP_DIR") or os.getenv("NCCL_EP_HOME")
+        ext.library_dirs.append(str(Path(nccl_ep_dir) / "lib"))
+        ext.runtime_library_dirs.append(str(Path(nccl_ep_dir) / "lib"))
+        # Prefer submodule's nccl.h when present (matches the C++ side).
+        submod_nccl_inc = (
+            common_header_files / ".." / "3rdparty" / "nccl" / "build" / "include"
+        ).resolve()
+        if (submod_nccl_inc / "nccl.h").exists():
+            ext.include_dirs.insert(0, str(submod_nccl_inc))
+    return ext

@@ -307,12 +307,25 @@ endif()
 option(NVTE_WITH_NCCL_EP "Enable NCCL EP expert-parallel backend (HT mode)" OFF)
 
 if(NVTE_WITH_NCCL_EP)
+  # NCCL EP requires SM>=90 (Hopper or newer). Reject earlier archs at configure
+  # time rather than failing deep inside libnccl_ep's nvcc invocation.
+  set(_NVTE_NCCL_EP_ALL_ARCHS ${NVTE_GENERIC_ARCHS} ${NVTE_SPECIFIC_ARCHS}
+                              ${CMAKE_CUDA_ARCHITECTURES})
+  foreach(_arch IN LISTS _NVTE_NCCL_EP_ALL_ARCHS)
+    string(REGEX REPLACE "[^0-9]" "" _arch_num "${_arch}")
+    if(_arch_num AND _arch_num LESS 90)
+      message(FATAL_ERROR
+        "NVTE_WITH_NCCL_EP=ON requires CUDA arch >= 90 (Hopper or newer); "
+        "got '${_arch}' in CMAKE_CUDA_ARCHITECTURES. Set NVTE_CUDA_ARCHS=\"90\" "
+        "(or higher) when building with NCCL EP enabled.")
+    endif()
+  endforeach()
   # ── NCCL EP headers ────────────────────────────────────────────────────────
-  # Primary: use the 3rdparty/nccl_ep submodule (contrib/nccl_ep/include/).
+  # Primary: use the 3rdparty/nccl submodule (contrib/nccl_ep/include/).
   # Fallback: NCCL_EP_DIR or NCCL_EP_HOME environment variables for external
   # installs (e.g., when the submodule is not checked out).
   set(NCCL_EP_SUBMODULE_INCLUDE
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl_ep/contrib/nccl_ep/include")
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/contrib/nccl_ep/include")
 
   if(EXISTS "${NCCL_EP_SUBMODULE_INCLUDE}/nccl_ep.h")
     set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_INCLUDE}")
@@ -337,22 +350,29 @@ if(NVTE_WITH_NCCL_EP)
 
   # ── NCCL + GIN headers ─────────────────────────────────────────────────────
   # libnccl.so and all GIN headers (ncclGin.h, ncclWindow_t, ncclDevComm_t)
-  # ship with the base CUDA Toolkit — no separate NCCL build needed.
-  # CUDAToolkit_INCLUDE_DIRS already covers ${CUDA_HOME}/include where
-  # nccl.h and nccl_device/ live.
+  # ship with the base CUDA Toolkit OR the 3rdparty/nccl submodule build
+  # (preferred when present; auto-built by setup.py with NVTE_WITH_NCCL_EP=1).
   if(NOT NCCL_LIB)
     find_library(NCCL_LIB
         NAMES nccl libnccl
-        HINTS ${CUDAToolkit_LIBRARY_DIR}
+        HINTS ${NCCL_EP_DIR}/lib ${NCCL_EP_HOME}/lib ${CUDAToolkit_LIBRARY_DIR}
         PATH_SUFFIXES lib lib64
         REQUIRED)
+  endif()
+
+  set(NCCL_SUBMODULE_INCLUDE
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/build/include")
+  if(EXISTS "${NCCL_SUBMODULE_INCLUDE}/nccl.h")
+    set(NCCL_INCLUDE_DIRS_FOR_TE ${NCCL_SUBMODULE_INCLUDE})
+  else()
+    set(NCCL_INCLUDE_DIRS_FOR_TE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   endif()
 
   target_compile_definitions(transformer_engine PUBLIC NVTE_WITH_NCCL_EP)
 
   target_include_directories(transformer_engine PRIVATE
       ${NCCL_EP_INCLUDE_DIR}
-      ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})  # covers nccl.h + nccl_device/
+      ${NCCL_INCLUDE_DIRS_FOR_TE})  # covers nccl.h + nccl_device/
 
   target_link_libraries(transformer_engine PUBLIC
       ${NCCL_EP_LIB}

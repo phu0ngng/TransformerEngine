@@ -197,6 +197,21 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedTopkWithScoreFunctionBackwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossForwardHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 
+#ifdef NVTE_WITH_NCCL_EP
+// EP bootstrap (called once per process)
+void EpInitialize(pybind11::bytes unique_id_bytes, int world_size, int rank, int ep_size,
+                  int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
+                  int hidden_dim);
+size_t EpGetHandleMemSize(int top_k);
+
+// EP FFI handlers
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpPrepareHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpDispatchBwdHandler);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(EpCombineBwdHandler);
+#endif  // NVTE_WITH_NCCL_EP
+
 }  // namespace jax
 }  // namespace transformer_engine
 

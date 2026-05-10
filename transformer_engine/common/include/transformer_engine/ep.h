@@ -42,9 +42,10 @@ typedef struct {
   int max_tokens_per_rank;      /*!< Static upper bound on tokens this rank will SEND
                             *   per dispatch. Fixed for CUDA graph. */
   int max_recv_tokens_per_rank; /*!< Static upper bound on tokens this rank will RECEIVE
-                                 *   per dispatch (= recv_capacity_max). Pass 0 to default
-                                 *   to ep_size * max_tokens_per_rank (worst case when all
-                                 *   tokens route to this rank). */
+                                 *   per dispatch (= recv_capacity_max). Required for HT
+                                 *   (must be > 0) — NCCL EP HT mode has no auto-default.
+                                 *   Size for worst-case top_k fan-out
+                                 *   (e.g. ep_size * max_tokens_per_rank * top_k). */
   int hidden_dim;               /*!< Token hidden dimension. */
 } NVTEEpGroupConfig;
 
@@ -54,7 +55,11 @@ typedef struct {
  *  non-tensor, non-stream per-layer attributes.
  */
 typedef struct {
-  int num_local_experts; /*!< Experts hosted on this rank. */
+  int num_local_experts; /*!< Reserved; not consumed by the backend today
+                              (derived from group_config.num_experts / ep_size at
+                              nvte_ep_initialize time). Kept for ABI stability. */
+  int top_k;             /*!< Per-token expert fan-out. Required for EXPERT_MAJOR HT layout
+                              (handle_mem size scales with top_k). */
   /* topk_format   — reserved; only sparse int64 routing supported today */
   /* scaling_mode  — reserved; FP8 block-scaling support planned */
 } NVTEEpLayerConfig;
@@ -125,10 +130,9 @@ size_t nvte_ep_get_handle_mem_size(NVTEEpLayerConfig layer_config);
  *
  *  \param[in]     topk_idx      [T, top_k] int64 sparse routing indices.
  *  \param[out]    token_counts  Per-local-expert token counts [num_local_experts] int32.
- *  \param[in,out] handle_mem    uint8 buffer sized by nvte_ep_get_handle_mem_size().
- *                               MUST be zero-initialized at first call (the leading
- *                               bytes are an internal HandleMemHeader; garbage there
- *                               would be misread as a stale handle).
+ *  \param[in,out] handle_mem    uint8 device buffer sized by nvte_ep_get_handle_mem_size().
+ *                               Holds NCCL EP routing tensors only — no host-side header.
+ *                               No zero-init required.
  *  \param[in]     stream        CUDA stream.
  */
 void nvte_ep_prepare(NVTETensor topk_idx, NVTETensor token_counts, NVTETensor handle_mem,
@@ -137,29 +141,41 @@ void nvte_ep_prepare(NVTETensor topk_idx, NVTETensor token_counts, NVTETensor ha
 /*! \brief Dispatch tokens (and routing weights) to expert ranks.
  *
  *  Sends tokens and topk_weights to the destination expert ranks according
- *  to the routing computed in nvte_ep_prepare. In HT mode, NCCL EP routes
- *  3 inputs (tokens, topk_weights, topk_idx) and writes back 3 corresponding
- *  outputs. Caller passes recv_tokens and recv_topk_weights; recv_topk_idx
- *  is owned internally by the backend (used by combine_bwd).
+ *  to the routing computed in nvte_ep_prepare. In HT EXPERT_MAJOR mode,
+ *  NCCL EP routes 3 inputs (tokens, topk_weights, topk_idx) and writes back
+ *  2 outputs (recv_tokens, recv_topk_weights) — recv_topk_idx is not produced.
+ *
+ *  topk_idx is consumed directly here (not cached by prepare) so the backend
+ *  can be stateless across per-step ops — each call rebuilds a transient
+ *  ncclEpHandle as a host-side view over the device handle_mem buffer.
  *
  *  \param[in]     handle_mem         Handle memory from nvte_ep_prepare.
+ *  \param[in]     topk_idx           [T, top_k] int64 sparse routing indices.
  *  \param[in]     tokens             Input tokens [T, hidden_dim].
  *  \param[in]     topk_weights       SPARSE: [T, top_k] float32; DENSE: pass null NVTETensor.
  *  \param[out]    recv_tokens        Received tokens [recv_T, hidden_dim].
- *  \param[out]    recv_topk_weights  Received per-slot weights [recv_T, top_k] float32.
+ *  \param[out]    recv_topk_weights  Received per-slot weights [recv_T] float32 (HT+EM: 1 weight per slot).
  *                                    Pass null NVTETensor in backward (no weights to scatter back).
  *  \param[in]     stream             CUDA stream.
  */
-void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor tokens, NVTETensor topk_weights,
-                      NVTETensor recv_tokens, NVTETensor recv_topk_weights, cudaStream_t stream);
+void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
+                      NVTETensor topk_weights, NVTETensor recv_tokens, NVTETensor recv_topk_weights,
+                      cudaStream_t stream);
 
-/*! \brief Combine expert outputs with weighted accumulation.
+/*! \brief Combine expert outputs back to originating ranks (unweighted sum).
  *
- *  Gathers expert outputs back to the originating ranks and applies
- *  weighted accumulation using the weights received during nvte_ep_dispatch.
+ *  NCCL EP HT forward combine performs an UNWEIGHTED sum of the top_k expert
+ *  contributions per token. The caller is responsible for pre-multiplying
+ *  expert_out by recv_topk_weights (from nvte_ep_dispatch's 2nd output)
+ *  before calling this if weighted reduction is desired. topk_weights are
+ *  only consumed by combine in the backward path (nvte_ep_combine_bwd).
  *
  *  \param[in]  handle_mem  Handle memory from nvte_ep_prepare.
- *  \param[in]  expert_out  Expert outputs [recv_T, hidden_dim].
+ *  \param[in]  expert_out  Post-hadamard, masked expert outputs
+ *                          [recv_T, hidden_dim] — caller has already applied
+ *                          `expert_out * recv_topk_weights * mask`. NCCL EP
+ *                          combine is an UNWEIGHTED scatter-sum, so caller
+ *                          weighting must happen before this call.
  *  \param[out] result      Combined output [T, hidden_dim].
  *  \param[in]  stream      CUDA stream.
  */
@@ -168,22 +184,26 @@ void nvte_ep_combine(NVTETensor handle_mem, NVTETensor expert_out, NVTETensor re
 
 /*! \brief Backward of dispatch (combine direction in backward pass).
  *
- *  \param[in]  handle_mem  Handle memory from nvte_ep_prepare.
- *  \param[in]  grad        Gradient w.r.t. recv_tokens.
- *  \param[out] result      Gradient w.r.t. tokens.
- *  \param[in]  stream      CUDA stream.
+ *  \param[in]  handle_mem   Handle memory from nvte_ep_prepare.
+ *  \param[in]  grad         Gradient w.r.t. recv_tokens [recv_capacity, hidden_dim].
+ *  \param[out] grad_tokens  Gradient w.r.t. tokens [T, hidden_dim].
+ *  \param[in]  stream       CUDA stream.
  */
-void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTETensor result,
+void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTETensor grad_tokens,
                           cudaStream_t stream);
 
 /*! \brief Backward of combine (dispatch direction in backward pass).
  *
- *  \param[in]  handle_mem  Handle memory from nvte_ep_prepare.
- *  \param[in]  grad        Gradient w.r.t. result.
- *  \param[out] result      Gradient w.r.t. expert_out.
- *  \param[in]  stream      CUDA stream.
+ *  Equivalent to a forward dispatch of `grad` with no topk_weights — the
+ *  output is the gradient of `expert_out` from the forward call. Padded
+ *  slots in `grad_expert_out` receive zero from NCCL EP.
+ *
+ *  \param[in]  handle_mem       Handle memory from nvte_ep_prepare.
+ *  \param[in]  grad             Gradient w.r.t. result [T, hidden_dim].
+ *  \param[out] grad_expert_out  Gradient w.r.t. expert_out [recv_capacity, hidden_dim].
+ *  \param[in]  stream           CUDA stream.
  */
-void nvte_ep_combine_bwd(NVTETensor handle_mem, NVTETensor grad, NVTETensor result,
+void nvte_ep_combine_bwd(NVTETensor handle_mem, NVTETensor grad, NVTETensor grad_expert_out,
                          cudaStream_t stream);
 
 #ifdef __cplusplus

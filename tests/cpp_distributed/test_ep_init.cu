@@ -32,7 +32,7 @@ class EPInitTest : public ::testing::Test {
 
 TEST_F(EPInitTest, InitPath) {
   int nle = g_num_experts / g_ep_size;
-  NVTEEpLayerConfig cfg{nle};
+  NVTEEpLayerConfig cfg{nle, /*top_k=*/2};
   size_t sz = nvte_ep_get_handle_mem_size(cfg);
   ASSERT_GT(sz, 0u) << "handle_mem_size must be > 0 after init";
 
@@ -46,7 +46,7 @@ TEST_F(EPInitTest, InitPath) {
 TEST_F(EPInitTest, NumLocalExperts) {
   // handle_mem_size should be > 0 for any valid num_local_experts value.
   for (int nle : {1, g_num_experts / g_ep_size}) {
-    NVTEEpLayerConfig cfg{nle};
+    NVTEEpLayerConfig cfg{nle, /*top_k=*/2};
     size_t sz = nvte_ep_get_handle_mem_size(cfg);
     ASSERT_GT(sz, 0u) << "num_local_experts=" << nle;
     if (g_process_id == 0)

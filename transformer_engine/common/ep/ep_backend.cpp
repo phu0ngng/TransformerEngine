@@ -12,11 +12,11 @@
  *  Each per-step op creates ephemeral ncclNDTensor_t handles around
  *  user-provided buffers — no allocations, negligible overhead.
  *
- *  HT mode API patterns:
+ *  HT EXPERT_MAJOR API patterns:
  *  - ncclEpInitHandle: maps routing buffers in handle_mem (no collective)
  *  - ncclEpUpdateHandle: AllGather + metadata preprocessing (collective)
  *  - ncclEpDispatch (forward): 3 inputs (tokens, topk_weights, topk_idx),
- *    3 outputs (recv_tokens, recv_topk_weights, recv_topk_idx), 0 local tensors
+ *    2 outputs (recv_tokens, recv_topk_weights), 0 local tensors
  *  - ncclEpDispatch (backward/combine_bwd): 1 input (grad), 1 output (result),
  *    0 local tensors (no topk_weights in backward direction)
  *  - ncclEpCombine: 1 input (expert_out), 1 output (result), 0 local tensors
@@ -25,41 +25,11 @@
 
 #include "ep_backend.h"
 
+#include "../util/cuda_runtime.h"
 #include "../util/logging.h"
 
 namespace transformer_engine {
 namespace ep {
-
-// ---------------------------------------------------------------------------
-// handle_mem header layout
-// ---------------------------------------------------------------------------
-
-/*! \brief Structured header stored at the start of handle_mem.
- *
- *  This header caches everything that dispatch/combine/bwd ops need
- *  to call the NCCL EP API without re-extracting from the original
- *  NVTETensor arguments.
- *
- *  topk_idx data pointer and shape are cached here because dispatch
- *  needs them as an input tensor.  topk_weights are passed directly
- *  to dispatch() as an NVTETensor (not cached in prepare).
- *
- *  handle_mem layout:
- *    [0 .. kHeaderAlignedSize-1]  : HandleMemHeader
- *    [kHeaderAlignedSize ..]      : NCCL EP routing buffers (size = routing_buf_size_)
- */
-struct HandleMemHeader {
-  ncclEpHandle_t handle;  ///< NCCL EP handle; set by reinit_handle, destroyed in destroy_handle
-  ncclNDTensor_t routing_tensor;   ///< Tensor wrapping routing buffer region; destroyed with handle
-  void* topk_idx_data;             ///< Device pointer to topk_idx [T, top_k] int64 (caller-owned)
-  void* token_counts_data;         ///< Device pointer to token_counts [num_local_experts] int32
-  unsigned int num_tokens;         ///< Number of tokens (T)
-  unsigned int top_k;              ///< Top-k value
-  unsigned int num_local_experts;  ///< Number of local experts
-};
-
-// Routing buffers are placed after the header, aligned to 128 bytes.
-static constexpr size_t kHeaderAlignedSize = ((sizeof(HandleMemHeader) + 127) / 128) * 128;
 
 // ---------------------------------------------------------------------------
 // Singleton + bootstrap
@@ -92,6 +62,16 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
              "NCCL EP requires SM_90+ (Hopper or later), "
              "but current device has compute capability ",
              major, ".x");
+
+  // NCCL EP HT mode requires CUDA multicast (NVLS) support — its HT init
+  // hangs forever on hardware where CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED == 0
+  // (e.g. H200 NVL with NVLink Bridge topology). Detect at init and fail fast.
+  NVTE_CHECK(cuda::supports_multicast(device),
+             "NCCL EP HT mode requires CUDA multicast (NVLS) support on device ", device,
+             " but CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED reports 0. "
+             "This typically means the system has a partial NVLink topology "
+             "(e.g. H200 NVL with NVLink Bridge). NCCL EP HT requires a full "
+             "NVLink mesh fabric (e.g. GH200 NVL72 / DGX H200 / DGX H100).");
 }
 
 void EPBackend::initialize(const ncclUniqueId& uid, int world_size, int rank,
@@ -114,7 +94,7 @@ void EPBackend::initialize(const ncclUniqueId& uid, int world_size, int rank,
   NVTE_CHECK_NCCL(ncclCommSplit(world_comm, rank / config.ep_size, rank, &ep_comm, nullptr));
   NVTE_CHECK_NCCL(ncclCommDestroy(world_comm));
 
-  inst.init(ep_comm, config);
+  inst.init(ep_comm, config, /*owns_comm=*/true);
 }
 
 void EPBackend::initialize_with_comm(ncclComm_t ep_comm, NVTEEpGroupConfig config) {
@@ -129,7 +109,7 @@ void EPBackend::initialize_with_comm(ncclComm_t ep_comm, NVTEEpGroupConfig confi
   NVTE_CHECK(comm_size == config.ep_size, "ep_comm size (", comm_size, ") must equal ep_size (",
              config.ep_size, "). Pass the EP sub-communicator, not the world comm.");
 
-  inst.init(ep_comm, config);
+  inst.init(ep_comm, config, /*owns_comm=*/false);
 }
 
 // ---------------------------------------------------------------------------
@@ -176,23 +156,26 @@ void EPBackend::destroy_tensor(ncclNDTensor_t tensor) {
   }
 }
 
-void EPBackend::reinit_handle(HandleMemHeader* hdr, void* handle_mem) {
-  if (hdr->handle != nullptr) {
-    destroy_handle(hdr);
-  }
-  auto* routing_buf = static_cast<uint8_t*>(handle_mem) + kHeaderAlignedSize;
-  const bool use_fp8 = false;
-  hdr->routing_tensor = make_tensor(routing_buf, 1, ncclUint8, NCCL_EP_TENSOR_TAG_NONE,
-                                    static_cast<unsigned int>(routing_buf_size_));
-  NVTE_CHECK_NCCL(
-      ncclEpInitHandle(&hdr->handle, ep_group_, nullptr, -1, use_fp8, hdr->routing_tensor));
+// Build a transient ncclEpHandle that views the existing handle_mem buffer.
+// ncclEpInitHandle for HT-EXPERT_MAJOR is pure host-side pointer arithmetic
+// (see ht_init_handle in nccl_ep.cc): it stores handle_mem->data as a raw
+// pointer in the host-side struct. The routing-tensor wrapper can be freed
+// immediately. Calling Init after a prior UpdateHandle preserves the
+// AllGather results already in the device buffer.
+ncclEpHandle_t EPBackend::open_handle(void* handle_mem, int num_topk) {
+  ncclNDTensor_t routing_tensor = make_tensor(handle_mem, 1, ncclUint8, NCCL_EP_TENSOR_TAG_NONE,
+                                              static_cast<unsigned int>(routing_buf_size_));
+  ncclEpHandle_t handle;
+  NVTE_CHECK_NCCL(ncclEpInitHandle(&handle, ep_group_, nullptr, num_topk,
+                                   /*use_fp8=*/false, routing_tensor));
+  destroy_tensor(routing_tensor);
+  return handle;
 }
 
-void EPBackend::destroy_handle(HandleMemHeader* hdr) {
-  NVTE_CHECK_NCCL(ncclEpHandleDestroy(hdr->handle));
-  hdr->handle = nullptr;
-  destroy_tensor(hdr->routing_tensor);
-  hdr->routing_tensor = nullptr;
+void EPBackend::close_handle(ncclEpHandle_t handle) {
+  if (handle != nullptr) {
+    NVTE_CHECK_NCCL(ncclEpHandleDestroy(handle));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -200,49 +183,56 @@ void EPBackend::destroy_handle(HandleMemHeader* hdr) {
 // ---------------------------------------------------------------------------
 
 EPBackend::~EPBackend() {
+  // Guard against concurrent dispatch/combine calls during teardown.
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (cur_handle_ != nullptr) {
+    ncclEpHandleDestroy(cur_handle_);
+    cur_handle_ = nullptr;
+  }
   // Order matters: ncclEpGroupDestroy reads from ep_comm_, so destroy the
   // group first, then the underlying communicator.
   if (ep_group_ != nullptr) {
-    ncclEpGroupDestroy(ep_group_, 0);
+    ncclEpGroupDestroy(ep_group_);
     ep_group_ = nullptr;
   }
   if (ep_comm_ != nullptr) {
-    ncclCommDestroy(ep_comm_);
+    if (owns_ep_comm_) {
+      ncclCommDestroy(ep_comm_);
+    }
     ep_comm_ = nullptr;
   }
 }
 
-void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
+void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config, bool owns_comm) {
   NVTE_CHECK(!initialized_, "EPBackend already initialized");
 
   group_config_ = group_config;
+  owns_ep_comm_ = owns_comm;
 
   ncclEpGroupConfig_t cfg;
   memset(&cfg, 0, sizeof(cfg));
   cfg.version = 1;
   cfg.algorithm = NCCL_EP_ALGO_HIGH_THROUGHPUT;
+  // TE only supports EXPERT_MAJOR layout under HT.
+  cfg.layout = NCCL_EP_LAYOUT_EXPERT_MAJOR;
   cfg.num_experts = static_cast<unsigned int>(group_config.num_experts);
-  cfg.max_tokens_per_rank = static_cast<unsigned int>(group_config.max_tokens_per_rank);
+  cfg.max_send_tokens_per_rank = static_cast<unsigned int>(group_config.max_tokens_per_rank);
   cfg.token_size_bytes = static_cast<unsigned int>(group_config.hidden_dim * sizeof(nv_bfloat16));
   cfg.rdma_buffer_size = NCCL_EP_AUTO;
   cfg.num_qp_per_rank = NCCL_EP_AUTO;
   cfg.num_channels = NCCL_EP_AUTO;
-  // User-controlled receive-slot budget. 0 → AUTO (NCCL EP defaults to
-  // ep_size * max_tokens_per_rank for HT-FLAT layout).
-  cfg.max_receive_tokens_per_rank =
+  // HT requires >0; pass user value verbatim, NCCL EP errors out on 0.
+  cfg.max_recv_token_slots_per_rank =
       static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);
 
-  cudaStream_t stream;
-  NVTE_CHECK_CUDA(cudaStreamCreate(&stream));
-  NVTE_CHECK_NCCL(ncclEpCreateGroup(&ep_group_, ep_comm, &cfg, stream));
-  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
-  NVTE_CHECK_CUDA(cudaStreamDestroy(stream));
+  NVTE_CHECK_NCCL(
+      ncclEpCreateGroup(&ep_group_, ep_comm, &cfg, /*alloc=*/nullptr, /*free=*/nullptr));
 
-  NVTE_CHECK_NCCL(ncclEpHandleMemSize(ep_group_, nullptr, &routing_buf_size_));
+  // EXPERT_MAJOR HT handle_mem size depends on top_k — sized per call in
+  // get_handle_mem_size() / open_handle().
 
   // Keep ep_comm alive for the EP group's lifetime — ncclEpGroupDestroy
-  // depends on it at teardown. Destroyed in the singleton destructor after
-  // the group itself is destroyed.
+  // depends on it at teardown.
   ep_comm_ = ep_comm;
 
   initialized_ = true;
@@ -252,78 +242,71 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config) {
 // Handle mem size query
 // ---------------------------------------------------------------------------
 
-size_t EPBackend::get_handle_mem_size(NVTEEpLayerConfig /*layer_config*/) {
+size_t EPBackend::get_handle_mem_size(NVTEEpLayerConfig layer_config) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  return kHeaderAlignedSize + routing_buf_size_;
+  NVTE_CHECK(layer_config.top_k > 0, "NVTEEpLayerConfig.top_k must be > 0 for EXPERT_MAJOR HT");
+  size_t bytes = 0;
+  NVTE_CHECK_NCCL(ncclEpHandleMemSize(ep_group_, nullptr, &bytes, layer_config.top_k));
+  routing_buf_size_ = bytes;
+  return bytes;
 }
 
 // ---------------------------------------------------------------------------
 // Per-step operations
 // ---------------------------------------------------------------------------
 
-void EPBackend::prepare(void* handle_mem, const NVTETensor topk_idx, NVTETensor token_counts,
+void EPBackend::prepare(const NVTETensor topk_idx, NVTETensor token_counts, void* handle_mem,
                         cudaStream_t stream) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
-
-  auto* hdr = reinterpret_cast<HandleMemHeader*>(handle_mem);
 
   NVTEShape idx_shape = nvte_tensor_shape(topk_idx);
   void* idx_data = nvte_tensor_data(topk_idx);
   NVTE_CHECK(idx_data != nullptr, "topk_idx data must not be null");
 
   const unsigned int num_tokens = static_cast<unsigned int>(idx_shape.data[0]);
-  unsigned int top_k = 1;
-  if (idx_shape.ndim > 1) {
-    top_k = static_cast<unsigned int>(idx_shape.data[1]);
-  }
-
-  // Derive num_local_experts from the cached group config — caller no longer passes it.
+  const unsigned int top_k = idx_shape.ndim > 1 ? static_cast<unsigned int>(idx_shape.data[1]) : 1;
   const unsigned int num_local_experts =
       static_cast<unsigned int>(group_config_.num_experts / group_config_.ep_size);
-
-  hdr->num_tokens = num_tokens;
-  hdr->top_k = top_k;
-  hdr->num_local_experts = num_local_experts;
-  hdr->topk_idx_data = idx_data;
-  hdr->token_counts_data = (token_counts != nullptr) ? nvte_tensor_data(token_counts) : nullptr;
 
   ncclNDTensor_t nccl_topk_idx =
       make_tensor(idx_data, 2, ncclInt64, NCCL_EP_TENSOR_TAG_TOPK_IDX, num_tokens, top_k);
 
-  // Optionally pass token_counts as RECV_EXPERT_COUNTER so ncclEpUpdateHandle
+  // Optionally surface token_counts as RECV_EXPERT_COUNTER so UpdateHandle
   // populates it during the metadata exchange.
   ncclNDTensor_t handle_local_tensors[1] = {nullptr};
   unsigned int handle_num_local_tensors = 0;
-  if (hdr->token_counts_data != nullptr) {
+  void* token_counts_data = (token_counts != nullptr) ? nvte_tensor_data(token_counts) : nullptr;
+  if (token_counts_data != nullptr) {
     handle_local_tensors[0] =
-        make_tensor(hdr->token_counts_data, 1, ncclInt32,
-                    NCCL_EP_TENSOR_TAG_RECV_EXPERT_COUNTER_DEVICE, hdr->num_local_experts);
+        make_tensor(token_counts_data, 1, ncclInt32, NCCL_EP_TENSOR_TAG_RECV_EXPERT_COUNTER_DEVICE,
+                    num_local_experts);
     handle_num_local_tensors = 1;
   }
 
-  // Init handle: map routing buffers in handle_mem (no collective, no kernels)
-  reinit_handle(hdr, handle_mem);
-
-  // Update handle: AllGather + metadata preprocessing (collective)
-  NVTE_CHECK_NCCL(ncclEpUpdateHandle(hdr->handle, nccl_topk_idx, handle_local_tensors,
+  // Reuse the persistent handle if it already views this handle_mem buffer;
+  // otherwise close any prior handle and open a new one. UpdateHandle then
+  // populates num_tokens / routing state on the live handle.
+  if (cur_handle_ != nullptr && cur_handle_mem_ != handle_mem) {
+    close_handle(cur_handle_);
+    cur_handle_ = nullptr;
+  }
+  if (cur_handle_ == nullptr) {
+    cur_handle_ = open_handle(handle_mem, static_cast<int>(top_k));
+    cur_handle_mem_ = handle_mem;
+  }
+  NVTE_CHECK_NCCL(ncclEpUpdateHandle(cur_handle_, nccl_topk_idx, handle_local_tensors,
                                      handle_num_local_tensors, stream));
 
   destroy_tensor(nccl_topk_idx);
-  if (handle_num_local_tensors > 0) {
-    destroy_tensor(handle_local_tensors[0]);
-  }
+  if (handle_num_local_tensors > 0) destroy_tensor(handle_local_tensors[0]);
 }
 
-void EPBackend::dispatch(void* handle_mem, const NVTETensor tokens, const NVTETensor topk_weights,
-                         NVTETensor recv_tokens, NVTETensor recv_topk_weights,
-                         cudaStream_t stream) {
+void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
+                         const NVTETensor topk_weights, NVTETensor recv_tokens,
+                         NVTETensor recv_topk_weights, cudaStream_t stream) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
-
-  auto* hdr = reinterpret_cast<HandleMemHeader*>(handle_mem);
-  ncclEpHandle_t handle = hdr->handle;
-  NVTE_CHECK(handle != nullptr, "EP handle is null — was prepare() called?");
 
   NVTEShape tok_shape = nvte_tensor_shape(tokens);
   void* tok_data = nvte_tensor_data(tokens);
@@ -344,10 +327,15 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor tokens, const NVTETe
   unsigned int num_inputs = 1;
 
   if (is_forward) {
-    nccl_topk_weights_in = make_tensor(
-        weights_data, 2, ncclFloat32, NCCL_EP_TENSOR_TAG_TOPK_WEIGHTS, hdr->num_tokens, hdr->top_k);
-    nccl_topk_idx_in = make_tensor(hdr->topk_idx_data, 2, ncclInt64, NCCL_EP_TENSOR_TAG_TOPK_IDX,
-                                   hdr->num_tokens, hdr->top_k);
+    NVTE_CHECK(topk_idx != nullptr, "topk_idx required in forward dispatch");
+    NVTEShape idx_shape = nvte_tensor_shape(topk_idx);
+    void* idx_data = nvte_tensor_data(topk_idx);
+    const unsigned int top_k =
+        idx_shape.ndim > 1 ? static_cast<unsigned int>(idx_shape.data[1]) : 1;
+    nccl_topk_weights_in = make_tensor(weights_data, 2, ncclFloat32,
+                                       NCCL_EP_TENSOR_TAG_TOPK_WEIGHTS, num_tokens, top_k);
+    nccl_topk_idx_in =
+        make_tensor(idx_data, 2, ncclInt64, NCCL_EP_TENSOR_TAG_TOPK_IDX, num_tokens, top_k);
     num_inputs = 3;
   }
 
@@ -363,9 +351,8 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor tokens, const NVTETe
       make_tensor(recv_data, 2, nvte_dtype_to_nccl(recv_dtype), NCCL_EP_TENSOR_TAG_TOKENS,
                   recv_capacity, static_cast<unsigned int>(recv_shape.data[1]));
 
-  // HT mode: when 3 inputs (tokens, topk_weights, topk_idx) are passed, NCCL EP
-  // accepts a 3rd null output for recv_topk_idx (we don't need it downstream).
-  // recv_topk_weights is a real output we expose to JAX.
+  // HT EXPERT_MAJOR forward: 2 outputs (tokens, topk_weights). recv_topk_idx
+  // is not required.
   ncclNDTensor_t nccl_topk_weights_out = nullptr;
   unsigned int num_outputs = 1;
 
@@ -375,19 +362,37 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor tokens, const NVTETe
     void* recv_w_data = nvte_tensor_data(recv_topk_weights);
     NVTEShape recv_w_shape = nvte_tensor_shape(recv_topk_weights);
     NVTE_CHECK(recv_w_data != nullptr, "recv_topk_weights data must not be null");
-    nccl_topk_weights_out =
-        make_tensor(recv_w_data, 2, ncclFloat32, NCCL_EP_TENSOR_TAG_TOPK_WEIGHTS, recv_capacity,
-                    static_cast<unsigned int>(recv_w_shape.data[1]));
-    num_outputs = 3;  // tokens, topk_weights, topk_idx (3rd is null)
+    NVTE_CHECK(recv_w_shape.ndim == 1,
+               "HT+EM recv_topk_weights must be 1D [recv_capacity]");
+    nccl_topk_weights_out = make_tensor(recv_w_data, 1, ncclFloat32,
+                                        NCCL_EP_TENSOR_TAG_TOPK_WEIGHTS, recv_capacity);
+    num_outputs = 2;
   }
 
-  const ncclNDTensor_t outputs[] = {nccl_tokens_out, nccl_topk_weights_out, nullptr};
+  // outputs[] contains only the non-null tensors (no trailing nullptr slot).
+  ncclNDTensor_t outputs_buf[2] = {nccl_tokens_out, nullptr};
+  if (is_forward) outputs_buf[1] = nccl_topk_weights_out;
+  const ncclNDTensor_t* outputs = outputs_buf;
 
   ncclEpDispatchConfig_t dispatch_cfg;
   memset(&dispatch_cfg, 0, sizeof(dispatch_cfg));
 
+  // Use the persistent handle populated by prepare(); fall back to opening
+  // a fresh one (backward path: dispatch may run without a prior prepare).
+  ncclEpHandle_t handle = cur_handle_;
+  bool owns_handle = false;
+  if (handle == nullptr || cur_handle_mem_ != handle_mem) {
+    int handle_num_topk = -1;
+    if (is_forward) {
+      NVTEShape idx_shape = nvte_tensor_shape(topk_idx);
+      handle_num_topk = idx_shape.ndim > 1 ? static_cast<int>(idx_shape.data[1]) : 1;
+    }
+    handle = open_handle(handle_mem, handle_num_topk);
+    owns_handle = true;
+  }
   NVTE_CHECK_NCCL(ncclEpDispatch(handle, inputs, num_inputs, outputs, num_outputs, nullptr, 0, 0,
                                  &dispatch_cfg, stream));
+  if (owns_handle) close_handle(handle);
 
   destroy_tensor(nccl_tokens_in);
   if (nccl_topk_weights_in) destroy_tensor(nccl_topk_weights_in);
@@ -400,10 +405,6 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out, NVTETenso
                         cudaStream_t stream) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
-
-  auto* hdr = reinterpret_cast<HandleMemHeader*>(handle_mem);
-  ncclEpHandle_t handle = hdr->handle;
-  NVTE_CHECK(handle != nullptr, "EP handle is null — was prepare() called?");
 
   NVTEShape exp_shape = nvte_tensor_shape(expert_out);
   void* exp_data = nvte_tensor_data(expert_out);
@@ -426,27 +427,27 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out, NVTETenso
   const ncclNDTensor_t inputs[] = {nccl_expert_in};
   const ncclNDTensor_t outputs[] = {nccl_result_out};
 
-  NVTE_CHECK_NCCL(ncclEpCombine(handle, inputs, 1, outputs, 1, nullptr, 0, 0, nullptr, stream));
-
-  // Forward pass done — destroy handle (routing buffers remain in handle_mem for backward)
-  destroy_handle(hdr);
+  // Combine requires the persistent handle from prepare() — HT combine reads
+  // handle->num_tokens which is only populated by ncclEpUpdateHandle.
+  NVTE_CHECK(cur_handle_ != nullptr && cur_handle_mem_ == handle_mem,
+             "ep_combine requires a prior ep_prepare on the same handle_mem");
+  NVTE_CHECK_NCCL(
+      ncclEpCombine(cur_handle_, inputs, 1, outputs, 1, nullptr, 0, 0, nullptr, stream));
 
   destroy_tensor(nccl_expert_in);
   destroy_tensor(nccl_result_out);
 }
 
-void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad, NVTETensor result,
+void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad, NVTETensor grad_tokens,
                              cudaStream_t stream) {
-  combine(handle_mem, grad, result, stream);
+  // Backward of dispatch is a combine in disguise.
+  combine(handle_mem, grad, grad_tokens, stream);
 }
 
-void EPBackend::combine_bwd(void* handle_mem, const NVTETensor grad, NVTETensor result,
+void EPBackend::combine_bwd(void* handle_mem, const NVTETensor grad, NVTETensor grad_expert_out,
                             cudaStream_t stream) {
-  // Re-map routing buffers already in handle_mem (no collective, no alloc)
-  auto* hdr = reinterpret_cast<HandleMemHeader*>(handle_mem);
-  reinit_handle(hdr, handle_mem);
-  // Backward dispatch: no weights → 1-input, 1-output path inside dispatch().
-  dispatch(handle_mem, grad, /*topk_weights=*/nullptr, result,
+  // Backward of combine is a dispatch in the backward direction (no weights, 1 input).
+  dispatch(handle_mem, /*topk_idx=*/nullptr, grad, /*topk_weights=*/nullptr, grad_expert_out,
            /*recv_topk_weights=*/nullptr, stream);
 }
 

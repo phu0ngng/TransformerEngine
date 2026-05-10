@@ -223,11 +223,13 @@ static bool ep_bootstrap(int argc, char* argv[]) {
   ncclUniqueId uid{};
   exchange_unique_id(&uid);
 
-  NVTEEpGroupConfig group_config;
-  group_config.ep_size             = g_ep_size;
-  group_config.num_experts         = g_num_experts;
-  group_config.max_tokens_per_rank = g_max_tokens_per_rank;
-  group_config.hidden_dim          = g_hidden_dim;
+  NVTEEpGroupConfig group_config{};
+  group_config.ep_size                  = g_ep_size;
+  group_config.num_experts              = g_num_experts;
+  group_config.max_tokens_per_rank      = g_max_tokens_per_rank;
+  // Worst-case for top_k fan-out: ep_size * max_tokens_per_rank * 2.
+  group_config.max_recv_tokens_per_rank = g_ep_size * g_max_tokens_per_rank * 2;
+  group_config.hidden_dim               = g_hidden_dim;
 
   if (g_use_comm) {
     ncclComm_t world_comm;

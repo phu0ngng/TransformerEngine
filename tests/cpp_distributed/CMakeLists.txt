@@ -80,16 +80,22 @@ gtest_discover_tests(test_comm_gemm DISCOVERY_TIMEOUT 600)
 option(NVTE_WITH_NCCL_EP "Enable NCCL EP tests" OFF)
 
 if(NVTE_WITH_NCCL_EP)
+  # Honor both -DNCCL_EP_DIR=... cmake-vars and the NCCL_EP_DIR / NCCL_EP_HOME
+  # env-vars; fall back to the in-tree submodule build dir.
+  set(_NCCL_EP_DEFAULT
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/build")
   find_library(NCCL_EP_LIB
                NAMES nccl_ep libnccl_ep
-               HINTS $ENV{NCCL_EP_HOME}/lib $ENV{NCCL_EP_DIR}/lib
+               HINTS ${NCCL_EP_DIR}/lib ${NCCL_EP_HOME}/lib
+                     $ENV{NCCL_EP_HOME}/lib $ENV{NCCL_EP_DIR}/lib
+                     ${_NCCL_EP_DEFAULT}/lib
                PATH_SUFFIXES lib lib64
                REQUIRED)
 
-  # Primary: use the 3rdparty/nccl_ep submodule for headers.
+  # Primary: use the 3rdparty/nccl submodule for headers.
   # Fallback: NCCL_EP_HOME/NCCL_EP_DIR environment variables.
   set(NCCL_EP_SUBMODULE_INCLUDE
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl_ep/contrib/nccl_ep/include")
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/contrib/nccl_ep/include")
 
   if(EXISTS "${NCCL_EP_SUBMODULE_INCLUDE}/nccl_ep.h")
     set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_INCLUDE}")
@@ -118,20 +124,28 @@ if(NVTE_WITH_NCCL_EP)
   set(EP_TEST_COMMON_LIBS
       CUDA::cuda_driver
       CUDA::cudart
+      CUDA::nvrtc
       GTest::gtest
       ${TE_LIB}
       ${NCCL_LIB}
       ${NCCL_EP_LIB})
 
+  # nvrtc symbols are referenced from libtransformer_engine.so but not in its
+  # DT_NEEDED list (loaded via dlopen in Python).  For cpp tests we link nvrtc
+  # explicitly with --no-as-needed so the linker keeps the dependency.
+  set(EP_TEST_LINK_OPTS "LINKER:--no-as-needed")
+
   # ── EP init tests (InitPath, HandleMemSizeQuery) ─────────────────────────────
   add_executable(test_ep_init test_ep_init.cu)
   target_include_directories(test_ep_init PRIVATE ${EP_TEST_COMMON_INCLUDES})
   target_link_libraries(test_ep_init PUBLIC ${EP_TEST_COMMON_LIBS})
+  target_link_options(test_ep_init PUBLIC ${EP_TEST_LINK_OPTS})
 
   # ── EP pipeline tests (dispatch, combine, bwd, integrated) ───────────────────
   add_executable(test_ep_pipeline test_ep_pipeline.cu)
   target_include_directories(test_ep_pipeline PRIVATE ${EP_TEST_COMMON_INCLUDES})
   target_link_libraries(test_ep_pipeline PUBLIC ${EP_TEST_COMMON_LIBS})
+  target_link_options(test_ep_pipeline PUBLIC ${EP_TEST_LINK_OPTS})
 
   # Do NOT use gtest_discover_tests — these binaries require multi-process
   # launch via run_test_ep.sh, not direct single-process execution.

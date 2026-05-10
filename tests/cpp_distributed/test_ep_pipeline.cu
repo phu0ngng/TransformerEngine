@@ -24,9 +24,12 @@
  *
  * With this setup the following exact results are derivable:
  *   dispatch recv:      multiset of source-token values routed to this rank's experts
- *   combine result:     result[t] == tokens[t]  (identity expert, weights sum to 1)
- *   combine_bwd:        grad_expert[slot] == 0.05  (weight * d_result = 0.5 * 0.1)
- *   dispatch_bwd:       grad_tokens[t] == 0.1   (sum over top_k of 0.5*0.1 = 0.1)
+ *   combine result:     result[t] == top_k * tokens[t]  (HT-EM forward combine sums
+ *                       expert outputs without applying weights — caller applies them)
+ *   combine_bwd:        grad_expert[slot] == d_result[t] == 0.1  (HT-EM combine_bwd
+ *                       is a forward dispatch of d_result; weights are NOT applied)
+ *   dispatch_bwd:       grad_tokens[t] == top_k * 0.1 == 0.2  (sum over top_k of
+ *                       grad_expert without weights)
  */
 
 #include "test_ep_common.h"
@@ -134,7 +137,8 @@ struct EPForwardBuffers {
 
   void alloc(int num_tokens, int top_k, int hidden_dim,
              int num_local_experts, int ep_size, int max_tokens_per_rank) {
-    recv_capacity = static_cast<size_t>(ep_size) * max_tokens_per_rank;
+    // Match the slot budget configured in test_ep_common.h (ep_size * max_tokens_per_rank * 2).
+    recv_capacity = static_cast<size_t>(ep_size) * max_tokens_per_rank * 2;
     top_k_ = top_k;
 
     cudaMalloc(&d_topk_idx,          num_tokens * top_k         * sizeof(int64_t));
@@ -142,16 +146,12 @@ struct EPForwardBuffers {
     cudaMalloc(&d_tokens,            num_tokens * hidden_dim    * sizeof(nv_bfloat16));
     cudaMalloc(&d_token_counts,      num_local_experts          * sizeof(int32_t));
     cudaMalloc(&d_recv_tokens,       recv_capacity * hidden_dim * sizeof(nv_bfloat16));
-    cudaMalloc(&d_recv_topk_weights, recv_capacity * top_k      * sizeof(float));
+    cudaMalloc(&d_recv_topk_weights, recv_capacity              * sizeof(float));
     cudaMalloc(&d_result,            num_tokens * hidden_dim    * sizeof(nv_bfloat16));
 
-    NVTEEpLayerConfig cfg{num_local_experts};
+    NVTEEpLayerConfig cfg{num_local_experts, top_k};
     handle_mem_size = nvte_ep_get_handle_mem_size(cfg);
     cudaMalloc(&d_handle_mem, handle_mem_size);
-    // Zero-init: prepare() interprets the leading bytes as HandleMemHeader and
-    // checks hdr->handle to decide whether to destroy a prior handle. Garbage
-    // bytes would trigger ncclEpHandleDestroy on an invalid pointer.
-    cudaMemset(d_handle_mem, 0, handle_mem_size);
   }
 
   void free_all() {
@@ -203,7 +203,7 @@ class EpOpTestBase : public ::testing::Test {
   }
 
   NVTEEpLayerConfig layer_config() const {
-    return NVTEEpLayerConfig{num_local_experts_};
+    return NVTEEpLayerConfig{num_local_experts_, top_k_};
   }
 
   // Run prepare + dispatch, return total tokens received.
@@ -221,13 +221,13 @@ class EpOpTestBase : public ::testing::Test {
     auto recv_tokens_t  = make_nvte_tensor(buf.d_recv_tokens,
                               {buf.recv_capacity, (size_t)hidden_dim_}, kNVTEBFloat16);
     auto recv_topk_weights_t = make_nvte_tensor(buf.d_recv_topk_weights,
-                              {buf.recv_capacity, (size_t)top_k_}, kNVTEFloat32);
+                              {buf.recv_capacity}, kNVTEFloat32);
 
     (void)layer_config();
     EXPECT_NO_THROW(nvte_ep_prepare(topk_idx_t.tensor,
                                     token_counts_t.tensor, handle_mem_t.tensor, stream));
     EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
-    EXPECT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, tokens_t.tensor,
+    EXPECT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, topk_idx_t.tensor, tokens_t.tensor,
                                      topk_weights_t.tensor, recv_tokens_t.tensor, recv_topk_weights_t.tensor, stream));
     EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
 
@@ -272,7 +272,7 @@ TEST_F(EPDispatchTest, PrepareAndDispatch) {
   auto recv_tokens_t  = make_nvte_tensor(buf.d_recv_tokens,
                             {buf.recv_capacity, (size_t)hidden_dim_}, kNVTEBFloat16);
   auto recv_topk_weights_t = make_nvte_tensor(buf.d_recv_topk_weights,
-                            {buf.recv_capacity, (size_t)top_k_}, kNVTEFloat32);
+                            {buf.recv_capacity}, kNVTEFloat32);
 
   // Zero recv buffer so unfilled slots are distinguishable.
   CHECK_CUDA(cudaMemset(buf.d_recv_tokens, 0,
@@ -298,7 +298,7 @@ TEST_F(EPDispatchTest, PrepareAndDispatch) {
     total_recv += exp_counts[i];
   }
 
-  ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, tokens_t.tensor,
+  ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, topk_idx_t.tensor, tokens_t.tensor,
                                    topk_weights_t.tensor, recv_tokens_t.tensor, recv_topk_weights_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
 
@@ -338,8 +338,10 @@ TEST_F(EPDispatchTest, PrepareAndDispatch) {
 
 /*
  * Tests combine in isolation (dispatch is prerequisite setup, not under test).
- * With identity expert and equal weights (weight_k = 1/top_k, sum = 1):
- *   result[t] = sum_k(weight_k * tokens[t]) = tokens[t]
+ * HT-EM forward combine sums expert outputs without applying topk_weights —
+ * the caller is responsible for weighting expert_out beforehand. With identity
+ * expert (expert_out == recv_tokens, each = source token value) and top_k copies:
+ *   result[t] = sum_k expert_out[slot_k(t)] = top_k * tokens[t]
  */
 class EPCombineTest : public EpOpTestBase {};
 
@@ -362,7 +364,7 @@ TEST_F(EPCombineTest, Combine) {
   auto recv_tokens_t  = make_nvte_tensor(buf.d_recv_tokens,
                             {buf.recv_capacity, (size_t)hidden_dim_}, kNVTEBFloat16);
   auto recv_topk_weights_t = make_nvte_tensor(buf.d_recv_topk_weights,
-                            {buf.recv_capacity, (size_t)top_k_}, kNVTEFloat32);
+                            {buf.recv_capacity}, kNVTEFloat32);
   auto result_t       = make_nvte_tensor(buf.d_result,
                             {(size_t)num_tokens_, (size_t)hidden_dim_}, kNVTEBFloat16);
 
@@ -373,7 +375,7 @@ TEST_F(EPCombineTest, Combine) {
   ASSERT_NO_THROW(nvte_ep_prepare(topk_idx_t.tensor,
                                   token_counts_t.tensor, handle_mem_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
-  ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, tokens_t.tensor,
+  ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, topk_idx_t.tensor, tokens_t.tensor,
                                    topk_weights_t.tensor, recv_tokens_t.tensor, recv_topk_weights_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
 
@@ -382,19 +384,19 @@ TEST_F(EPCombineTest, Combine) {
                                   result_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  // result[t] must equal tokens[t] for all t (within BF16 precision).
+  // result[t] must equal top_k * tokens[t] (HT-EM forward combine is unweighted sum).
   std::vector<nv_bfloat16> h_result(num_tokens_ * hidden_dim_);
   CHECK_CUDA(cudaMemcpy(h_result.data(), buf.d_result,
                         h_result.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
   auto h_tok = generate_tokens(g_process_id, num_tokens_, hidden_dim_);
   for (int t = 0; t < num_tokens_; ++t) {
     float got = __bfloat162float(h_result[t * hidden_dim_]);
-    float exp = __bfloat162float(h_tok[t * hidden_dim_]);
-    EXPECT_NEAR(got, exp, 0.002f) << "token " << t << " rank " << g_process_id;
+    float exp = __bfloat162float(h_tok[t * hidden_dim_]) * static_cast<float>(top_k_);
+    EXPECT_NEAR(got, exp, 0.005f) << "token " << t << " rank " << g_process_id;
   }
 
   if (g_process_id == 0)
-    printf("  Combine: passed (result == tokens for all t)\n");
+    printf("  Combine: passed (result == top_k * tokens for all t)\n");
 
   CHECK_CUDA(cudaStreamDestroy(stream));
   buf.free_all();
@@ -407,9 +409,9 @@ TEST_F(EPCombineTest, Combine) {
 /*
  * Runs a full forward pass, then combine_bwd with d_result = 0.1 for all elements.
  *
- * Expected: grad_expert[slot] = weight * d_result[t] = 0.5 * 0.1 = 0.05
- * for every filled slot (one per received token).  Unfilled slots must remain 0
- * (grad_expert is zeroed before the call).
+ * HT-EM combine_bwd is a forward dispatch of d_result (no weighting), so
+ * each filled slot in grad_expert receives d_result[t] = 0.1 directly.
+ * Unfilled slots must remain 0 (grad_expert is zeroed before the call).
  */
 class EPCombineBwdTest : public EpOpTestBase {};
 
@@ -432,7 +434,7 @@ TEST_F(EPCombineBwdTest, CombineBwdCheck) {
   auto recv_tokens_t  = make_nvte_tensor(buf.d_recv_tokens,
                             {buf.recv_capacity, (size_t)hidden_dim_}, kNVTEBFloat16);
   auto recv_topk_weights_t = make_nvte_tensor(buf.d_recv_topk_weights,
-                            {buf.recv_capacity, (size_t)top_k_}, kNVTEFloat32);
+                            {buf.recv_capacity}, kNVTEFloat32);
   auto result_t       = make_nvte_tensor(buf.d_result,
                             {(size_t)num_tokens_, (size_t)hidden_dim_}, kNVTEBFloat16);
 
@@ -444,7 +446,7 @@ TEST_F(EPCombineBwdTest, CombineBwdCheck) {
   ASSERT_NO_THROW(nvte_ep_prepare(topk_idx_t.tensor,
                                   token_counts_t.tensor, handle_mem_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
-  ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, tokens_t.tensor,
+  ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, topk_idx_t.tensor, tokens_t.tensor,
                                    topk_weights_t.tensor, recv_tokens_t.tensor, recv_topk_weights_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
   ASSERT_NO_THROW(nvte_ep_combine(handle_mem_t.tensor, recv_tokens_t.tensor,
@@ -481,13 +483,13 @@ TEST_F(EPCombineBwdTest, CombineBwdCheck) {
                                       grad_expert_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  // All filled slots must be ≈ 0.05 = weight * d_result = 0.5 * 0.1.
+  // HT-EM combine_bwd is unweighted: filled slots receive the raw d_result (0.1).
   // Unfilled slots must remain 0.
   std::vector<nv_bfloat16> h_ge(buf.recv_capacity * hidden_dim_);
   CHECK_CUDA(cudaMemcpy(h_ge.data(), d_grad_expert,
                         h_ge.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
 
-  const float kExpGrad = 0.05f;
+  const float kExpGrad = 0.1f;
   const float kTol     = 0.002f;
   int filled = 0;
   for (size_t s = 0; s < buf.recv_capacity; ++s) {
@@ -503,7 +505,7 @@ TEST_F(EPCombineBwdTest, CombineBwdCheck) {
       << ") != total received tokens (" << total_recv << ")";
 
   if (g_process_id == 0)
-    printf("  CombineBwdCheck: passed (grad_expert[filled] == 0.05, filled=%d)\n", filled);
+    printf("  CombineBwdCheck: passed (grad_expert[filled] == 0.1, filled=%d)\n", filled);
 
   CHECK_CUDA(cudaStreamDestroy(stream));
   CHECK_CUDA(cudaFree(d_grad_result));
@@ -518,11 +520,11 @@ TEST_F(EPCombineBwdTest, CombineBwdCheck) {
 /*
  * Runs full forward + combine_bwd, then dispatch_bwd.
  *
- * Mathematical derivation:
- *   combine_bwd:    d_expert_out[slot] = weight * d_result[t] = 0.5 * 0.1 = 0.05
- *   dispatch_bwd:   d_tokens[t] = sum_k d_expert_in[slot_k(t)] = top_k * 0.05 = 0.1
+ * HT-EM unweighted semantics:
+ *   combine_bwd:    d_expert_out[slot] = d_result[t] = 0.1
+ *   dispatch_bwd:   d_tokens[t] = sum_k d_expert_in[slot_k(t)] = top_k * 0.1 = 0.2
  *
- * Expected: grad_tokens[t] == 0.1 for all t.
+ * Expected: grad_tokens[t] == top_k * 0.1 for all t.
  */
 class EPDispatchBwdTest : public EpOpTestBase {};
 
@@ -545,7 +547,7 @@ TEST_F(EPDispatchBwdTest, DispatchBwdCheck) {
   auto recv_tokens_t  = make_nvte_tensor(buf.d_recv_tokens,
                             {buf.recv_capacity, (size_t)hidden_dim_}, kNVTEBFloat16);
   auto recv_topk_weights_t = make_nvte_tensor(buf.d_recv_topk_weights,
-                            {buf.recv_capacity, (size_t)top_k_}, kNVTEFloat32);
+                            {buf.recv_capacity}, kNVTEFloat32);
   auto result_t       = make_nvte_tensor(buf.d_result,
                             {(size_t)num_tokens_, (size_t)hidden_dim_}, kNVTEBFloat16);
 
@@ -557,7 +559,7 @@ TEST_F(EPDispatchBwdTest, DispatchBwdCheck) {
   ASSERT_NO_THROW(nvte_ep_prepare(topk_idx_t.tensor,
                                   token_counts_t.tensor, handle_mem_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
-  ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, tokens_t.tensor,
+  ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, topk_idx_t.tensor, tokens_t.tensor,
                                    topk_weights_t.tensor, recv_tokens_t.tensor, recv_topk_weights_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
   ASSERT_NO_THROW(nvte_ep_combine(handle_mem_t.tensor, recv_tokens_t.tensor,
@@ -593,18 +595,19 @@ TEST_F(EPDispatchBwdTest, DispatchBwdCheck) {
                                        grad_tokens_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  // grad_tokens[t] == 0.1 for all t (sum_k(weight_k * 0.1) = top_k * 0.05 = 0.1).
+  // grad_tokens[t] == top_k * 0.1 for all t (HT-EM unweighted: sum_k 0.1).
   std::vector<nv_bfloat16> h_gt(num_tokens_ * hidden_dim_);
   CHECK_CUDA(cudaMemcpy(h_gt.data(), d_grad_tokens,
                         h_gt.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
-  const float kExpGrad = 0.1f;
+  const float kExpGrad = static_cast<float>(top_k_) * 0.1f;
   const float kTol     = 0.005f;
   for (int t = 0; t < num_tokens_; ++t)
     EXPECT_NEAR(__bfloat162float(h_gt[t * hidden_dim_]), kExpGrad, kTol)
         << "grad_tokens token " << t << " rank " << g_process_id;
 
   if (g_process_id == 0)
-    printf("  DispatchBwdCheck: passed (grad_tokens == 0.1 for all %d tokens)\n", num_tokens_);
+    printf("  DispatchBwdCheck: passed (grad_tokens == %.2f for all %d tokens)\n",
+           kExpGrad, num_tokens_);
 
   CHECK_CUDA(cudaStreamDestroy(stream));
   CHECK_CUDA(cudaFree(d_grad_result));
@@ -652,7 +655,7 @@ TEST_F(EPPipelineTest, FullForwardBackward) {
   auto recv_tokens_t  = make_nvte_tensor(buf.d_recv_tokens,
                             {buf.recv_capacity, (size_t)hidden_dim_}, kNVTEBFloat16);
   auto recv_topk_weights_t = make_nvte_tensor(buf.d_recv_topk_weights,
-                            {buf.recv_capacity, (size_t)top_k_}, kNVTEFloat32);
+                            {buf.recv_capacity}, kNVTEFloat32);
   auto result_t       = make_nvte_tensor(buf.d_result,
                             {(size_t)num_tokens_, (size_t)hidden_dim_}, kNVTEBFloat16);
   auto grad_result_t  = make_nvte_tensor(d_grad_result,
@@ -670,7 +673,7 @@ TEST_F(EPPipelineTest, FullForwardBackward) {
   ASSERT_NO_THROW(nvte_ep_prepare(topk_idx_t.tensor,
                                   token_counts_t.tensor, handle_mem_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
-  ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, tokens_t.tensor,
+  ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, topk_idx_t.tensor, tokens_t.tensor,
                                    topk_weights_t.tensor, recv_tokens_t.tensor, recv_topk_weights_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
   ASSERT_NO_THROW(nvte_ep_combine(handle_mem_t.tensor, recv_tokens_t.tensor,
