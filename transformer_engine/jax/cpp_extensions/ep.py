@@ -17,7 +17,6 @@ __all__ = [
     "EpConfig",
     "set_ep_config",
     "get_ep_config",
-    "set_ep_num_local_experts",
     "get_ep_num_local_experts",
     "ep_prepare",
     "ep_dispatch_fwd",
@@ -79,33 +78,9 @@ def get_ep_config() -> EpConfig:
     return _ep_config
 
 
-def set_ep_num_local_experts(n: int) -> None:
-    """Back-compat shim — prefer `set_ep_config(EpConfig(...))`.
-
-    Constructs a partial `EpConfig` with only `num_local_experts` populated
-    (other fields = 0). Existing call site is `ep_bootstrap`, which now
-    builds the full config — this shim remains so external callers that
-    wrote against the old API don't break.
-    """
-    set_ep_config(
-        EpConfig(
-            world_size=0,
-            rank=0,
-            ep_size=0,
-            num_experts=0,
-            num_local_experts=int(n),
-            max_tokens_per_rank=0,
-            max_recv_tokens_per_rank=0,
-            hidden_dim=0,
-        )
-    )
-
-
 def get_ep_num_local_experts() -> int:
-    cfg = _ep_config
-    if cfg is None or cfg.num_local_experts <= 0:
-        raise RuntimeError("ep_num_local_experts has not been set. Did you call ep_bootstrap()?")
-    return cfg.num_local_experts
+    """Convenience accessor for `get_ep_config().num_local_experts`."""
+    return get_ep_config().num_local_experts
 
 
 # ── ep_prepare ──────────────────────────────────────────────────────────────────
