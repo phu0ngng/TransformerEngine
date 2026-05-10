@@ -74,6 +74,9 @@ Error_Type EpPrepareFFI(cudaStream_t stream, Buffer_Type topk_idx, Result_Type t
   auto topk_dims = topk_idx.dimensions();
   NVTE_CHECK(topk_dims.size() >= 2,
              "topk_idx must be at least 2D [..., top_k], got ndim=", topk_dims.size());
+  // NCCL EP requires int64 routing indices.
+  NVTE_CHECK(topk_idx.element_type() == ::xla::ffi::DataType::S64,
+             "topk_idx must be int64; enable jax_enable_x64 or convert before calling.");
 
   // Flatten leading dims; keep last dim as top_k.
   std::vector<size_t> topk_shape = {product(topk_dims, 0, topk_dims.size() - 1),
@@ -122,6 +125,8 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
   auto idx_dims = topk_idx.dimensions();
   NVTE_CHECK(idx_dims.size() >= 2,
              "topk_idx must be at least 2D [..., top_k], got ndim=", idx_dims.size());
+  NVTE_CHECK(topk_idx.element_type() == ::xla::ffi::DataType::S64,
+             "topk_idx must be int64; enable jax_enable_x64 or convert before calling.");
   NVTE_CHECK(static_cast<int64_t>(idx_dims.back()) == config.top_k, "top_k attr (", config.top_k,
              ") must match topk_idx last dim (", idx_dims.back(), ")");
   std::vector<size_t> idx_shape = {product(idx_dims, 0, idx_dims.size() - 1),
