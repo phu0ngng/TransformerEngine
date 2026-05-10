@@ -24,10 +24,10 @@
  *
  * With this setup the following exact results are derivable:
  *   dispatch recv:      multiset of source-token values routed to this rank's experts
- *   combine result:     result[t] == top_k * tokens[t]  (HT-EM forward combine sums
+ *   combine result:     result[t] == top_k * tokens[t]  (forward combine sums
  *                       expert outputs without applying weights — caller applies them)
- *   combine_bwd:        grad_expert[slot] == d_result[t] == 0.1  (HT-EM combine_bwd
- *                       is a forward dispatch of d_result; weights are NOT applied)
+ *   combine_bwd:        grad_expert[slot] == d_result[t] == 0.1  (combine_bwd is a
+ *                       forward dispatch of d_result; weights are NOT applied)
  *   dispatch_bwd:       grad_tokens[t] == top_k * 0.1 == 0.2  (sum over top_k of
  *                       grad_expert without weights)
  */
@@ -338,7 +338,7 @@ TEST_F(EPDispatchTest, PrepareAndDispatch) {
 
 /*
  * Tests combine in isolation (dispatch is prerequisite setup, not under test).
- * HT-EM forward combine sums expert outputs without applying topk_weights —
+ * Forward combine sums expert outputs without applying topk_weights —
  * the caller is responsible for weighting expert_out beforehand. With identity
  * expert (expert_out == recv_tokens, each = source token value) and top_k copies:
  *   result[t] = sum_k expert_out[slot_k(t)] = top_k * tokens[t]
@@ -384,7 +384,7 @@ TEST_F(EPCombineTest, Combine) {
                                   result_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  // result[t] must equal top_k * tokens[t] (HT-EM forward combine is unweighted sum).
+  // result[t] must equal top_k * tokens[t] (forward combine is unweighted sum).
   std::vector<nv_bfloat16> h_result(num_tokens_ * hidden_dim_);
   CHECK_CUDA(cudaMemcpy(h_result.data(), buf.d_result,
                         h_result.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
@@ -409,7 +409,7 @@ TEST_F(EPCombineTest, Combine) {
 /*
  * Runs a full forward pass, then combine_bwd with d_result = 0.1 for all elements.
  *
- * HT-EM combine_bwd is a forward dispatch of d_result (no weighting), so
+ * combine_bwd is a forward dispatch of d_result (no weighting), so
  * each filled slot in grad_expert receives d_result[t] = 0.1 directly.
  * Unfilled slots must remain 0 (grad_expert is zeroed before the call).
  */
@@ -483,7 +483,7 @@ TEST_F(EPCombineBwdTest, CombineBwdCheck) {
                                       grad_expert_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  // HT-EM combine_bwd is unweighted: filled slots receive the raw d_result (0.1).
+  // combine_bwd is unweighted: filled slots receive the raw d_result (0.1).
   // Unfilled slots must remain 0.
   std::vector<nv_bfloat16> h_ge(buf.recv_capacity * hidden_dim_);
   CHECK_CUDA(cudaMemcpy(h_ge.data(), d_grad_expert,
@@ -520,7 +520,7 @@ TEST_F(EPCombineBwdTest, CombineBwdCheck) {
 /*
  * Runs full forward + combine_bwd, then dispatch_bwd.
  *
- * HT-EM unweighted semantics:
+ * Unweighted semantics:
  *   combine_bwd:    d_expert_out[slot] = d_result[t] = 0.1
  *   dispatch_bwd:   d_tokens[t] = sum_k d_expert_in[slot_k(t)] = top_k * 0.1 = 0.2
  *
@@ -595,7 +595,7 @@ TEST_F(EPDispatchBwdTest, DispatchBwdCheck) {
                                        grad_tokens_t.tensor, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
 
-  // grad_tokens[t] == top_k * 0.1 for all t (HT-EM unweighted: sum_k 0.1).
+  // grad_tokens[t] == top_k * 0.1 for all t (unweighted: sum_k 0.1).
   std::vector<nv_bfloat16> h_gt(num_tokens_ * hidden_dim_);
   CHECK_CUDA(cudaMemcpy(h_gt.data(), d_grad_tokens,
                         h_gt.size() * sizeof(nv_bfloat16), cudaMemcpyDeviceToHost));
