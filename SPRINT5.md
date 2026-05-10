@@ -448,6 +448,47 @@ f5d1d10d ep: document non-uniform router-grad bias in ep_dispatch public docstri
 51272da7 ep: clarify PAD=32 rationale in _dispatch_bwd (NCCL EP 16B row alignment)
 ```
 
+Commit log (follow-up session on NVLS-capable 4× H200 with NV18 full-mesh):
+
+Validation matrix re-run after dev box upgraded from H200 NVL (no NVLS) to
+4× H200 with NV18 full-mesh NVLink. Surfaced a pre-existing NCCL EP bug
+under HT+EM with NLE>1 (the regression-relevant config promoted in
+`f770c419`). Patched in NCCL EP submodule, re-ran the full matrix:
+
+- `tests/cpp_distributed/run_test_ep.sh 4 build` → 5/5 × 2 init paths PASS.
+- `tests/jax/multi_process_launch_ep.sh` → 8/8 PASS (incl.
+  `test_dispatch_recv_topk_weights`, `test_public_combine_masked_round_trip`,
+  `test_router_grad_through_combine` — the three that exercised the NLE>1
+  per-slot weights bug).
+- `examples/jax/ep/run_test_ep.sh` → `test_moe_fwd` + `test_moe_fwd_bwd` PASS.
+
+```
+0cb0c951 (3rdparty/nccl) ep: populate local_expert_routing_map per recv-slot under expert-major
+c6e31038 (te root)      ep: bump 3rdparty/nccl to per-slot routing_map fix
+```
+
+Root cause of the NCCL EP bug (now fixed): in `hybrid_ep.cuh::scan` the
+`local_expert_routing_map` was populated at row index
+`final_ex_scan[local_rank]` — a per-source-token, per-dest-rank prefix scan.
+Under FLAT (one slot per source token) that index equals the recv-slot
+index, so the kernel works. Under EXPERT_MAJOR with NLE>1, each source
+token can produce multiple slots (one per matching local expert) in
+distinct expert zones, and the per-source-token prefix index diverges from
+the recv-slot index. Both readers
+(`dense_to_sparse_prob_kernel` for fwd dispatch and
+`sparse_to_dense_prob_combine_kernel` for combine bwd) iterate per recv
+slot and read `routing_map[slot, *]`, so they got garbage rows under EM
+NLE>1 → recv_topk_weights only populated for the first source's allotment
+in each expert zone → public TE-EP `_combine_fwd` lost half (or more) of
+the per-slot weighting.
+
+Fix is contained to the population path: gate the existing Step 2 write
+to FLAT only (`remap_alignment == 0`), and add a per-slot write inside
+Step 4's existing EM loop where `em_slot = cur_expert_slot[k]++` already
+produces the correct recv-slot index. No allocation change (the buffer
+was always sized `[max_recv_tokens, experts_per_rank]`); no consumer
+change.
+
 
 ### [x] Step 1: Remove `set_ep_num_local_experts` shim (item #1)
 
@@ -533,12 +574,12 @@ Verify: header is comment-only change.
 
 When resuming on NVLS-capable hardware (GH200 / DGX H200 / DGX H100):
 
-1. **Validate everything from this sprint** — run the full test matrix
-   to confirm the doc changes did not regress and the
-   examples/jax/ep top_k fix doesn't surface a new buffer overflow
-   somewhere downstream. (`tests/cpp_distributed/run_test_ep.sh 4 build`
-   + `tests/jax/multi_process_launch_ep.sh` +
-   `examples/jax/ep/run_test_ep.sh`.)
+1. ~~**Validate everything from this sprint**~~ — DONE (commit
+   `c6e31038`). Full test matrix green on 4× H200 with NV18 full-mesh
+   NVLink. The NLE>1 promotion in `f770c419` exposed an upstream NCCL EP
+   bug; fixed in `0cb0c951` and bumped via `c6e31038`. Validation results
+   are in the "Commit log (follow-up session on NVLS-capable …)" block
+   above.
 
 2. **[BUG] Non-uniform `topk_weights` router-grad (item #5)** — design
    and land a per-slot bwd path. Add a regression test with
