@@ -127,7 +127,7 @@ class EpPreparePrimitive(BasePrimitive):
         top_k = int(topk_idx_aval.shape[-1])
         handle_mem_size = transformer_engine_jax.get_ep_handle_mem_size(
             top_k,
-            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+            dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
         )
         token_counts_aval = jax.core.ShapedArray((num_local_experts,), jnp.int32)
         handle_mem_aval = jax.core.ShapedArray((handle_mem_size,), jnp.uint8)
@@ -138,7 +138,7 @@ class EpPreparePrimitive(BasePrimitive):
         return ffi.ffi_lowering(EpPreparePrimitive.name)(
             ctx,
             topk_idx,
-            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+            dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
         )
 
     @staticmethod
@@ -146,7 +146,7 @@ class EpPreparePrimitive(BasePrimitive):
         assert EpPreparePrimitive.inner_primitive is not None
         return EpPreparePrimitive.inner_primitive.bind(
             topk_idx,
-            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+            dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
         )
 
     @staticmethod
@@ -492,7 +492,7 @@ def ep_prepare(topk_idx, dispatch_output_per_expert_alignment=0):
     """
     return EpPreparePrimitive.outer_primitive.bind(
         topk_idx,
-        dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+        dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
     )
 
 

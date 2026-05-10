@@ -187,7 +187,7 @@ def _dispatch_fwd(
     hidden_dim = int(tokens.shape[-1])
     token_counts, handle_mem = tex.ep_prepare(
         topk_idx,
-        dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+        dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
     )
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
         handle_mem, topk_idx, tokens, topk_weights, recv_capacity, top_k
@@ -201,6 +201,8 @@ def _dispatch_fwd(
 
 
 def _dispatch_bwd(recv_capacity, dispatch_output_per_expert_alignment, res, g_outputs):
+    # alignment is baked into handle_mem at fwd-prepare time; recv_capacity is
+    # implicit in g_outputs[0].shape.
     del recv_capacity, dispatch_output_per_expert_alignment
     handle_mem, out_leading, top_k, hidden_dim = res
     g_recv_tokens = g_outputs[0]
