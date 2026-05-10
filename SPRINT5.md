@@ -441,6 +441,13 @@ fae49690 ep: cross-check EpDispatchConfig.top_k attr against topk_idx last dim
 aedf2768 ep: drop unused set_ep_num_local_experts back-compat shim
 ```
 
+Commit log (follow-up session, doc-only items from "Remaining for next session"):
+
+```
+f5d1d10d ep: document non-uniform router-grad bias in ep_dispatch public docstring
+51272da7 ep: clarify PAD=32 rationale in _dispatch_bwd (NCCL EP 16B row alignment)
+```
+
 
 ### [x] Step 1: Remove `set_ep_num_local_experts` shim (item #1)
 
@@ -538,19 +545,19 @@ When resuming on NVLS-capable hardware (GH200 / DGX H200 / DGX H100):
    `w[t, k] = (1.0 + 0.5 * k) / norm`, finite-diff matches analytical
    grad within bf16 tol. Today's `_dispatch_bwd` averages across
    top_k — biased gradient. **This is a real correctness bug**;
-   it is NOT safe to fix without hardware validation. Until then,
-   document the limitation in `ep.py::ep_dispatch` and assert in
-   `_dispatch_bwd` that `g_recv_topk_weights` is approximately
-   uniform across top_k OR detect at dispatch time that
-   `topk_weights[t, k]` is constant in `k` and short-circuit.
+   it is NOT safe to fix without hardware validation. Public-API
+   limitation now documented (commit `f5d1d10d`); the actual per-slot
+   bwd path and the assertion / short-circuit detection still need
+   hardware validation. Options for the fix were sketched in the
+   SPRINT5 issue #5 body (a/b/c).
 
 3. **[BUG] PAD=32 hardcode in `_dispatch_bwd` (item #5 sibling)** —
-   `transformer_engine/jax/ep.py:177` hardcodes PAD=32 (chosen because
-   `32 * 2 = 64 byte aligned`). NCCL EP combine asserts on a
-   16-byte-or-larger alignment per the SPRINT3 audit; whether 32 *
-   sizeof(bf16) is the right value for all hidden_dim configurations
-   remains unverified. Test under `hidden_dim=64`, `hidden_dim=128`,
-   `hidden_dim=4096` and confirm the PAD isn't biting.
+   `transformer_engine/jax/ep.py:188` hardcodes PAD=32. The actual
+   NCCL EP constraint is row-size >= 16 B, so PAD>=8 is the strict
+   minimum and 32 is conservative. Comment now reflects that
+   (commit `51272da7`); a hardware sweep over
+   `hidden_dim ∈ {64, 128, 4096}` to confirm the value isn't biting
+   still pending.
 
 4. **Item #4 sharding hooks** — proper sharding rules for all five
    primitives once the EpConfig-driven `[ep_size, nle]` token_counts
