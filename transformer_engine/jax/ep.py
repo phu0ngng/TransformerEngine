@@ -112,7 +112,9 @@ def ep_prepare(topk_idx):
     """Routing preparation: AllGather routing map, compute per-expert token counts.
 
     Args:
-        topk_idx: [T, top_k] int64 sparse routing indices.
+        topk_idx: [..., top_k] int64 sparse routing indices. The leading dims
+            (e.g. (T,) or (B, S)) are flattened by the FFI; top_k is the last
+            dim and must match what the dispatch will send.
 
     Returns:
         token_counts: [num_local_experts] int32 — tokens per local expert.
@@ -131,14 +133,15 @@ def ep_dispatch(topk_idx, tokens, topk_weights, recv_capacity):
     """Prepare routing and dispatch tokens + weights to expert ranks.
 
     Args:
-        topk_idx:      [T, top_k] int64 sparse routing indices.
-        tokens:        [T, H] token activations.
-        topk_weights:  [T, top_k] float32 routing weights (sent alongside tokens).
+        topk_idx:      [..., top_k] int64 sparse routing indices. Leading dims
+                       (e.g. (T,) or (B, S)) are flattened by the FFI.
+        tokens:        [..., H] token activations. Same leading dims as topk_idx.
+        topk_weights:  [..., top_k] float32 routing weights (sent alongside tokens).
         recv_capacity: STATIC int — number of recv slots = recv_tokens.shape[0].
-                       Set to ceil(T * overalloc_factor) for a balanced buffer.
+                       Set to ceil(T_flat * overalloc_factor) for a balanced buffer.
 
     Returns:
-        Tuple of (recv_tokens [recv_capacity, H],
+        Tuple of (recv_tokens [recv_capacity, H] (always 2D),
                   recv_topk_weights [recv_capacity] float32 (1 weight per slot),
                   handle_mem [N] uint8,
                   token_counts [num_local_experts] int32).
@@ -215,7 +218,11 @@ def ep_combine(handle_mem, token_counts, expert_out, recv_topk_weights, num_loca
         token_counts:       [num_local_experts] int32 from ep_prepare. Used to mask
                             the in-JAX hadamard so the overallocated tail of
                             expert_out is not multiplied by garbage weights.
-        expert_out:         [recv_capacity, H] post-FFN activations (always 2D).
+        expert_out:         [recv_capacity, H] post-FFN activations. ALWAYS 2D —
+                            unlike the dispatch input `tokens`, the FFN output
+                            keeps the EM-grouped recv-side layout. If the caller
+                            reshaped between dispatch and combine, flatten back
+                            to 2D before this call.
         recv_topk_weights:  [recv_capacity] float32 routing weights (1 per slot).
         num_local_tokens:   STATIC int OR tuple. int → 2D output [T, H].
                             tuple (B, S, ...) → N-D output [..., H] with the

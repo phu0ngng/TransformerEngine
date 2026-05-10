@@ -152,8 +152,12 @@ void nvte_ep_prepare(NVTETensor topk_idx, NVTETensor token_counts, NVTETensor ha
  *  \param[in]     topk_weights       SPARSE: [T, top_k] float32; DENSE: pass null NVTETensor.
  *  \param[out]    recv_tokens        Received tokens [recv_T, hidden_dim].
  *  \param[out]    recv_topk_weights  Received per-slot weights [recv_T] float32
- *                                    (1 weight per slot). Pass null NVTETensor
- *                                    in backward (no weights to scatter back).
+ *                                    (1D, 1 weight per slot under HT+EM —
+ *                                    EM packs each recv slot as one
+ *                                    (source_token, local_expert) pair so the
+ *                                    redundant top_k axis is dropped). Pass
+ *                                    null NVTETensor in backward (no weights
+ *                                    to scatter back).
  *  \param[in]     stream             CUDA stream.
  */
 void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
