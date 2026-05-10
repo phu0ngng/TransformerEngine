@@ -27,7 +27,8 @@ import unittest
 
 import jax
 
-# Enable int64 so topk_idx survives as int64 through JAX (NCCL EP reads kInt64).
+# TODO: drop this once the FFI does int32→int64 upcast on the C++ side
+# (a JAX-side cast inside sharded_impl doesn't survive x64=False canonicalization).
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
