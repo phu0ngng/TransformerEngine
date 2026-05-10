@@ -1,7 +1,18 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""JAX/TE custom ops for Expert Parallelism (EP)"""
+"""JAX/TE custom ops for Expert Parallelism (EP).
+
+Sharding note: every primitive's `partition` rule below is a placeholder.
+It echoes the input shardings unchanged and declares replicated outputs
+(`PartitionSpec(None)` / `PartitionSpec(None, None)`). The rules are
+correct for the current single-process / no-mesh launch but are NOT a
+production sharding plan. Once EpConfig-driven sharding (token_counts
+reshape→[ep_size, nle], per-axis replication of handle_mem, etc.) is
+designed, these rules need to be revisited end-to-end. Passing
+non-replicated inputs today is unsupported and may produce silently
+wrong NCCL EP routing.
+"""
 
 from dataclasses import dataclass
 
@@ -47,7 +58,16 @@ __all__ = [
 
 @dataclass(frozen=True)
 class EpConfig:
-    """Immutable Python-side view of the EP bootstrap config."""
+    """Immutable Python-side view of the EP bootstrap config.
+
+    Today only `num_local_experts` is consumed by JAX abstract-eval (sizes
+    `token_counts`); `ep_size`, `num_experts`, and the per-rank token bounds
+    are recorded for the planned EpConfig-driven sharding rules
+    (`token_counts` reshape→[ep_size, nle]) and for any future
+    Python-side replay of the routing meta. `world_size`/`rank` round-trip
+    the bootstrap signature and are reserved for multi-EP-group plans
+    (not in scope today).
+    """
 
     world_size: int
     rank: int
@@ -224,7 +244,7 @@ register_primitive(EpDispatchPrimitive)
 
 
 # ── ep_combine ──────────────────────────────────────────────────────────────────
-# Inputs:  handle_mem [N] uint8, expert_out [recv_capacity, H]
+# Inputs:  handle_mem [N] uint8, expert_out [recv_capacity, H]   (ALWAYS 2D)
 # Outputs: result [..., H]    (N-D; out_leading_shape passed by caller)
 #
 # NOTE: `expert_out` here is the *post-hadamard, masked* buffer, i.e. the
@@ -232,6 +252,10 @@ register_primitive(EpDispatchPrimitive)
 # The public-API `ep_combine` in transformer_engine/jax/ep.py applies the
 # hadamard before calling this primitive. NCCL EP combine itself is an
 # unweighted scatter-sum.
+#
+# Asymmetry vs ep_dispatch: dispatch accepts N-D `tokens` and flattens
+# leading dims internally; combine REQUIRES 2D `expert_out`. The recv-side
+# EM-grouped layout is intrinsically 2D and the FFN output keeps that shape.
 #
 # `recv_capacity` is implicit — read from expert_out.shape[0].
 # `out_leading_shape` is a static tuple (e.g. (T,) or (B, S)) that determines
