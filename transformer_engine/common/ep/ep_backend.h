@@ -9,14 +9,21 @@
  *
  *  Internal to transformer_engine/common/ep/. Not part of the public API.
  *
- *  Handle lifecycle: the persistent state lives in handle_mem (caller-owned
- *  device buffer of size ncclEpHandleMemSize). The host-side ncclEpHandle_t is
- *  built on the fly per op via ncclEpInitHandle (pure pointer arithmetic over
- *  handle_mem) and torn down with ncclEpHandleDestroy at the end of each op.
- *  This keeps EPBackend stateless across ops.
- *  - prepare():     open + ncclEpUpdateHandle (collective; AllGather routing → handle_mem) + close
- *  - dispatch():    open + ncclEpDispatch + close
- *  - combine():     open + ncclEpCombine + close
+ *  Handle lifecycle: NCCL EP keeps device-side routing state in handle_mem
+ *  (caller-owned uint8 buffer of size ncclEpHandleMemSize). The host-side
+ *  ncclEpHandle_t is opened by prepare() (pure pointer arithmetic over
+ *  handle_mem; no device allocation) and KEPT ALIVE in `cur_handle_` so that
+ *  combine() can read host-side fields populated by ncclEpUpdateHandle
+ *  (notably handle->num_tokens). The handle is closed only when prepare()
+ *  observes a different handle_mem pointer, or in ~EPBackend().
+ *  - prepare():     open (or reuse) cur_handle_ + ncclEpUpdateHandle
+ *                   (collective; AllGather routing → handle_mem)
+ *  - dispatch():    reuse cur_handle_ + ncclEpDispatch (forward path);
+ *                   opens a transient handle if no prior prepare exists
+ *                   (used by combine_bwd which goes through dispatch)
+ *  - combine():     reuse cur_handle_ + ncclEpCombine
+ *                   (asserts cur_handle_ != nullptr — combine REQUIRES a prior
+ *                    prepare on the same handle_mem)
  *  - dispatch_bwd → combine();   combine_bwd → dispatch() with no weights.
  */
 

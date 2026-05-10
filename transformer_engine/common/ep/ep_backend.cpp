@@ -12,14 +12,25 @@
  *  Each per-step op creates ephemeral ncclNDTensor_t handles around
  *  user-provided buffers — no allocations, negligible overhead.
  *
+ *  Persistent host-side handle: prepare() opens an ncclEpHandle_t the first
+ *  time it sees a new handle_mem pointer and stores it in cur_handle_.
+ *  Subsequent prepare()/dispatch()/combine() calls on the same handle_mem
+ *  reuse it — combine() reads host-side fields set by ncclEpUpdateHandle
+ *  (handle->num_tokens) and would assert if rebuilt per op. ~EPBackend()
+ *  closes any live handle.
+ *
  *  API patterns:
  *  - ncclEpInitHandle: maps routing buffers in handle_mem (no collective)
  *  - ncclEpUpdateHandle: AllGather + metadata preprocessing (collective)
  *  - ncclEpDispatch (forward): 3 inputs (tokens, topk_weights, topk_idx),
  *    2 outputs (recv_tokens, recv_topk_weights), 0 local tensors
  *  - ncclEpDispatch (backward/combine_bwd): 1 input (grad), 1 output (result),
- *    0 local tensors (no topk_weights in backward direction)
- *  - ncclEpCombine: 1 input (expert_out), 1 output (result), 0 local tensors
+ *    0 local tensors (no topk_weights in backward direction).
+ *    combine_bwd opens a transient handle if cur_handle_ is unset, since the
+ *    backward direction doesn't strictly require a prior prepare on the same
+ *    buffer.
+ *  - ncclEpCombine: 1 input (expert_out), 1 output (result), 0 local tensors.
+ *    Requires cur_handle_ from a prior prepare on the same handle_mem.
  *  - All dispatch/combine outputs are 2D tensors
  */
 
