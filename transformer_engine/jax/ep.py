@@ -145,6 +145,17 @@ def ep_dispatch(topk_idx, tokens, topk_weights, recv_capacity):
                   recv_topk_weights [recv_capacity] float32 (1 weight per slot),
                   handle_mem [N] uint8,
                   token_counts [num_local_experts] int32).
+
+    Backward limitation (router gradient):
+        `grad_topk_weights` is exact for routers where `topk_weights[t, k]` is
+        uniform across `k` (e.g. `1 / top_k`). For non-uniform routers (the
+        per-`k` cotangents differ at the same source token) the returned
+        `grad_topk_weights[t, k]` is the per-token AVERAGE of the per-`k`
+        gradients — direction is approximate, magnitude is biased. The router
+        will train but updates will be noisier than analytical. See
+        `_dispatch_bwd` for the underlying constraint (NCCL EP combine sums
+        top_k slot contributions per source token, so per-`k` identity is
+        lost in the bwd direction).
     """
     return _dispatch_fwd(topk_idx, tokens, topk_weights, recv_capacity)[0]
 
