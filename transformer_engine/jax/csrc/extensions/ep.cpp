@@ -105,7 +105,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
 // Inputs:  handle_mem [N] uint8
 //          tokens [..., H]            (N-D, flattened internally)
 //          topk_idx [..., top_k]      (N-D, flattened internally)
-//          topk_weights [..., top_k] float32 (N-D, flattened internally; may be empty)
+//          topk_weights [..., top_k] float32 (N-D, flattened internally; required)
 // Outputs: recv_tokens [recv_capacity, H]      (always 2D)
 //          recv_topk_weights [recv_capacity] f32 (always 1D, 1 weight per slot)
 
