@@ -25,10 +25,11 @@ OVERALL_RET=0
 for SCRIPT_NAME in $SCRIPT_NAMES; do
   echo "=== Running ${SCRIPT_NAME} ==="
   # NCCL EP needs all GPUs visible per process (peer-access enable loop) — pin via JAX local_device_ids instead of CUDA_VISIBLE_DEVICES.
+  # Capture per-rank logs so non-rank-0 crashes are visible.
   for ((i=1; i<NUM_RUNS; i++))
   do
       timeout --foreground --signal=KILL "${TEST_TIMEOUT_S}" \
-          python $SCRIPT_NAME 127.0.0.1:12345 $i $NUM_RUNS > /dev/null 2>&1 &
+          python $SCRIPT_NAME 127.0.0.1:12345 $i $NUM_RUNS > stdout_rank_${i}.txt 2>&1 &
   done
 
   timeout --foreground --signal=KILL "${TEST_TIMEOUT_S}" \
@@ -50,8 +51,14 @@ for SCRIPT_NAME in $SCRIPT_NAMES; do
     echo "       in NCCL_DEBUG=INFO output.)"
     RET=1
   fi
+  if [ "$RET" -ne 0 ]; then
+    for ((i=1; i<NUM_RUNS; i++)); do
+      echo "--- rank $i log ---"
+      cat stdout_rank_${i}.txt 2>/dev/null || echo "(no log)"
+    done
+  fi
 
-  rm -f stdout_multi_process.txt
+  rm -f stdout_multi_process.txt stdout_rank_*.txt
   if [ "$RET" -ne 0 ]; then
     OVERALL_RET=1
   fi
