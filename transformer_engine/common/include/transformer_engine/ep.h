@@ -57,6 +57,15 @@ typedef struct {
                               nvte_ep_initialize time). Kept for ABI stability. */
   int top_k;             /*!< Per-token expert fan-out. Required (handle_mem size scales
                               with top_k). */
+  size_t dispatch_output_per_expert_alignment;
+  /*!< HT EXPERT_MAJOR per-expert zone alignment in tokens
+                              (pow2; 0/1 = NCCL EP default = no padding). Padded slots
+                              are zero-filled by dispatch. Forwarded verbatim to
+                              ncclEpHandleConfig_t. Per-handle (= per-prepare): pass the
+                              same value to nvte_ep_get_handle_mem_size (to size the
+                              buffer) and to nvte_ep_prepare (to open the handle).
+                              Set per downstream-kernel stride needs (e.g. group GEMM
+                              tile alignment). */
   /* topk_format   — reserved; only sparse int64 routing supported today */
   /* scaling_mode  — reserved; FP8 block-scaling support planned */
 } NVTEEpLayerConfig;
@@ -130,10 +139,14 @@ size_t nvte_ep_get_handle_mem_size(NVTEEpLayerConfig layer_config);
  *  \param[in,out] handle_mem    uint8 device buffer sized by nvte_ep_get_handle_mem_size().
  *                               Holds NCCL EP routing tensors only — no host-side header.
  *                               No zero-init required.
+ *  \param[in]     dispatch_output_per_expert_alignment
+ *                               HT EXPERT_MAJOR per-expert zone alignment in tokens
+ *                               (pow2; 0/1 = no padding). Must match the value passed
+ *                               to nvte_ep_get_handle_mem_size when sizing handle_mem.
  *  \param[in]     stream        CUDA stream.
  */
 void nvte_ep_prepare(NVTETensor topk_idx, NVTETensor token_counts, NVTETensor handle_mem,
-                     cudaStream_t stream);
+                     size_t dispatch_output_per_expert_alignment, cudaStream_t stream);
 
 /*! \brief Dispatch tokens (and routing weights) to expert ranks.
  *

@@ -172,11 +172,14 @@ void EPBackend::destroy_tensor(ncclNDTensor_t tensor) {
 // handle_mem->data as a raw pointer in the host-side struct. The routing-tensor
 // wrapper can be freed immediately. Calling Init after a prior UpdateHandle
 // preserves the AllGather results already in the device buffer.
-ncclEpHandle_t EPBackend::open_handle(void* handle_mem, int num_topk) {
+ncclEpHandle_t EPBackend::open_handle(void* handle_mem, int num_topk,
+                                      size_t dispatch_output_per_expert_alignment) {
   ncclNDTensor_t routing_tensor = make_tensor(handle_mem, 1, ncclUint8, NCCL_EP_TENSOR_TAG_NONE,
                                               static_cast<unsigned int>(routing_buf_size_));
+  ncclEpHandleConfig_t hcfg{};
+  hcfg.dispatch_output_per_expert_alignment = dispatch_output_per_expert_alignment;
   ncclEpHandle_t handle;
-  NVTE_CHECK_NCCL(ncclEpInitHandle(&handle, ep_group_, nullptr, num_topk,
+  NVTE_CHECK_NCCL(ncclEpInitHandle(&handle, ep_group_, &hcfg, num_topk,
                                    /*use_fp8=*/false, routing_tensor));
   destroy_tensor(routing_tensor);
   return handle;
@@ -254,8 +257,10 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config, bool ow
 size_t EPBackend::get_handle_mem_size(NVTEEpLayerConfig layer_config) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(layer_config.top_k > 0, "NVTEEpLayerConfig.top_k must be > 0");
+  ncclEpHandleConfig_t hcfg{};
+  hcfg.dispatch_output_per_expert_alignment = layer_config.dispatch_output_per_expert_alignment;
   size_t bytes = 0;
-  NVTE_CHECK_NCCL(ncclEpHandleMemSize(ep_group_, nullptr, &bytes, layer_config.top_k));
+  NVTE_CHECK_NCCL(ncclEpHandleMemSize(ep_group_, &hcfg, &bytes, layer_config.top_k));
   routing_buf_size_ = bytes;
   return bytes;
 }
@@ -265,7 +270,7 @@ size_t EPBackend::get_handle_mem_size(NVTEEpLayerConfig layer_config) {
 // ---------------------------------------------------------------------------
 
 void EPBackend::prepare(const NVTETensor topk_idx, NVTETensor token_counts, void* handle_mem,
-                        cudaStream_t stream) {
+                        size_t dispatch_output_per_expert_alignment, cudaStream_t stream) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
 
@@ -301,7 +306,8 @@ void EPBackend::prepare(const NVTETensor topk_idx, NVTETensor token_counts, void
     cur_handle_ = nullptr;
   }
   if (cur_handle_ == nullptr) {
-    cur_handle_ = open_handle(handle_mem, static_cast<int>(top_k));
+    cur_handle_ =
+        open_handle(handle_mem, static_cast<int>(top_k), dispatch_output_per_expert_alignment);
     cur_handle_mem_ = handle_mem;
   }
   NVTE_CHECK_NCCL(ncclEpUpdateHandle(cur_handle_, nccl_topk_idx, handle_local_tensors,
@@ -386,6 +392,9 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
 
   // Use the persistent handle populated by prepare(); fall back to opening
   // a fresh one (backward path: dispatch may run without a prior prepare).
+  // The fallback assumes alignment = 0 (NCCL EP default = no padding); a
+  // caller that wants > 0 alignment must run prepare first so cur_handle_
+  // carries the correct ncclEpHandleConfig.
   ncclEpHandle_t handle = cur_handle_;
   bool owns_handle = false;
   if (handle == nullptr || cur_handle_mem_ != handle_mem) {
@@ -394,7 +403,7 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
       NVTEShape idx_shape = nvte_tensor_shape(topk_idx);
       handle_num_topk = idx_shape.ndim > 1 ? static_cast<int>(idx_shape.data[1]) : 1;
     }
-    handle = open_handle(handle_mem, handle_num_topk);
+    handle = open_handle(handle_mem, handle_num_topk, /*alignment=*/0);
     owns_handle = true;
   }
   NVTE_CHECK_NCCL(ncclEpDispatch(handle, inputs, num_inputs, outputs, num_outputs, nullptr, 0, 0,

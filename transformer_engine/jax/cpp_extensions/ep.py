@@ -66,7 +66,9 @@ class EpConfig:
     (`token_counts` reshape→[ep_size, nle]) and for any future
     Python-side replay of the routing meta. `world_size`/`rank` round-trip
     the bootstrap signature and are reserved for multi-EP-group plans
-    (not in scope today).
+    (not in scope today). The per-handle EM zone alignment knob is plumbed
+    through `ep_prepare(...)` (NOT this bootstrap-time struct) since it is
+    a per-prepare property of the NCCL EP handle.
     """
 
     world_size: int
@@ -112,44 +114,54 @@ def get_ep_num_local_experts() -> int:
 class EpPreparePrimitive(BasePrimitive):
     name = "te_ep_prepare_ffi"
     multiple_results = True
-    impl_static_args = ()
+    impl_static_args = (1,)  # dispatch_output_per_expert_alignment
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(topk_idx_aval):
+    def abstract(topk_idx_aval, *, dispatch_output_per_expert_alignment):
         num_local_experts = get_ep_num_local_experts()
         assert (
             len(topk_idx_aval.shape) >= 2
         ), f"topk_idx must be at least 2D [..., top_k], got shape {topk_idx_aval.shape}"
         top_k = int(topk_idx_aval.shape[-1])
-        handle_mem_size = transformer_engine_jax.get_ep_handle_mem_size(top_k)
+        handle_mem_size = transformer_engine_jax.get_ep_handle_mem_size(
+            top_k,
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+        )
         token_counts_aval = jax.core.ShapedArray((num_local_experts,), jnp.int32)
         handle_mem_aval = jax.core.ShapedArray((handle_mem_size,), jnp.uint8)
         return token_counts_aval, handle_mem_aval
 
     @staticmethod
-    def lowering(ctx, topk_idx):
-        return ffi.ffi_lowering(EpPreparePrimitive.name)(ctx, topk_idx)
+    def lowering(ctx, topk_idx, *, dispatch_output_per_expert_alignment):
+        return ffi.ffi_lowering(EpPreparePrimitive.name)(
+            ctx,
+            topk_idx,
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+        )
 
     @staticmethod
-    def impl(topk_idx):
+    def impl(topk_idx, dispatch_output_per_expert_alignment):
         assert EpPreparePrimitive.inner_primitive is not None
-        return EpPreparePrimitive.inner_primitive.bind(topk_idx)
+        return EpPreparePrimitive.inner_primitive.bind(
+            topk_idx,
+            dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+        )
 
     @staticmethod
-    def batcher(batched_args, batch_dims):
+    def batcher(batched_args, batch_dims, *, dispatch_output_per_expert_alignment):
         raise NotImplementedError("EpPreparePrimitive does not support vmap")
 
     @staticmethod
-    def partition(mesh, arg_infos, result_infos):
+    def partition(dispatch_output_per_expert_alignment, mesh, arg_infos, result_infos):
         del result_infos
         arg_shardings = (arg_infos[0].sharding,)
         tc_sharding = NamedSharding(mesh, PartitionSpec(None))
         hm_sharding = NamedSharding(mesh, PartitionSpec(None))
 
         def sharded_impl(topk_idx):
-            return EpPreparePrimitive.impl(topk_idx)
+            return EpPreparePrimitive.impl(topk_idx, dispatch_output_per_expert_alignment)
 
         return mesh, sharded_impl, (tc_sharding, hm_sharding), arg_shardings
 
@@ -467,12 +479,21 @@ register_primitive(EpCombineBwdPrimitive)
 # ── Public API wrappers ─────────────────────────────────────────────────────────
 
 
-def ep_prepare(topk_idx):
+def ep_prepare(topk_idx, dispatch_output_per_expert_alignment=0):
     """Routing prep: AllGather + metadata exchange.
+
+    Args:
+      topk_idx: int64 [..., top_k] routing indices.
+      dispatch_output_per_expert_alignment: per-handle EM zone alignment in
+        tokens (pow2; 0/1 = no padding). Threaded through to NCCL EP's
+        ncclEpInitHandle/ncclEpUpdateHandle as the per-handle padding knob.
 
     Returns (token_counts [num_local_experts] int32, handle_mem [N] uint8).
     """
-    return EpPreparePrimitive.outer_primitive.bind(topk_idx)
+    return EpPreparePrimitive.outer_primitive.bind(
+        topk_idx,
+        dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+    )
 
 
 def ep_dispatch_fwd(handle_mem, topk_idx, tokens, topk_weights, recv_capacity, top_k):

@@ -149,7 +149,7 @@ struct EPForwardBuffers {
     cudaMalloc(&d_recv_topk_weights, recv_capacity              * sizeof(float));
     cudaMalloc(&d_result,            num_tokens * hidden_dim    * sizeof(nv_bfloat16));
 
-    NVTEEpLayerConfig cfg{num_local_experts, top_k};
+    NVTEEpLayerConfig cfg{num_local_experts, top_k, /*alignment=*/0};
     handle_mem_size = nvte_ep_get_handle_mem_size(cfg);
     cudaMalloc(&d_handle_mem, handle_mem_size);
   }
@@ -203,7 +203,7 @@ class EpOpTestBase : public ::testing::Test {
   }
 
   NVTEEpLayerConfig layer_config() const {
-    return NVTEEpLayerConfig{num_local_experts_, top_k_};
+    return NVTEEpLayerConfig{num_local_experts_, top_k_, /*alignment=*/0};
   }
 
   // Run prepare + dispatch, return total tokens received.
@@ -225,7 +225,8 @@ class EpOpTestBase : public ::testing::Test {
 
     (void)layer_config();
     EXPECT_NO_THROW(nvte_ep_prepare(topk_idx_t.tensor,
-                                    token_counts_t.tensor, handle_mem_t.tensor, stream));
+                                    token_counts_t.tensor, handle_mem_t.tensor,
+                                    /*dispatch_output_per_expert_alignment=*/0, stream));
     EXPECT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
     EXPECT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, topk_idx_t.tensor, tokens_t.tensor,
                                      topk_weights_t.tensor, recv_tokens_t.tensor, recv_topk_weights_t.tensor, stream));
@@ -283,7 +284,8 @@ TEST_F(EPDispatchTest, PrepareAndDispatch) {
   CHECK_CUDA(cudaStreamCreate(&stream));
 
   ASSERT_NO_THROW(nvte_ep_prepare(topk_idx_t.tensor,
-                                  token_counts_t.tensor, handle_mem_t.tensor, stream));
+                                  token_counts_t.tensor, handle_mem_t.tensor,
+                                  /*dispatch_output_per_expert_alignment=*/0, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
 
   // 1. Verify token counts.
@@ -373,7 +375,8 @@ TEST_F(EPCombineTest, Combine) {
   CHECK_CUDA(cudaStreamCreate(&stream));
 
   ASSERT_NO_THROW(nvte_ep_prepare(topk_idx_t.tensor,
-                                  token_counts_t.tensor, handle_mem_t.tensor, stream));
+                                  token_counts_t.tensor, handle_mem_t.tensor,
+                                  /*dispatch_output_per_expert_alignment=*/0, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
   ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, topk_idx_t.tensor, tokens_t.tensor,
                                    topk_weights_t.tensor, recv_tokens_t.tensor, recv_topk_weights_t.tensor, stream));
@@ -444,7 +447,8 @@ TEST_F(EPCombineBwdTest, CombineBwdCheck) {
 
   // Forward.
   ASSERT_NO_THROW(nvte_ep_prepare(topk_idx_t.tensor,
-                                  token_counts_t.tensor, handle_mem_t.tensor, stream));
+                                  token_counts_t.tensor, handle_mem_t.tensor,
+                                  /*dispatch_output_per_expert_alignment=*/0, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
   ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, topk_idx_t.tensor, tokens_t.tensor,
                                    topk_weights_t.tensor, recv_tokens_t.tensor, recv_topk_weights_t.tensor, stream));
@@ -557,7 +561,8 @@ TEST_F(EPDispatchBwdTest, DispatchBwdCheck) {
 
   // Forward.
   ASSERT_NO_THROW(nvte_ep_prepare(topk_idx_t.tensor,
-                                  token_counts_t.tensor, handle_mem_t.tensor, stream));
+                                  token_counts_t.tensor, handle_mem_t.tensor,
+                                  /*dispatch_output_per_expert_alignment=*/0, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
   ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, topk_idx_t.tensor, tokens_t.tensor,
                                    topk_weights_t.tensor, recv_tokens_t.tensor, recv_topk_weights_t.tensor, stream));
@@ -671,7 +676,8 @@ TEST_F(EPPipelineTest, FullForwardBackward) {
 
   // Forward.
   ASSERT_NO_THROW(nvte_ep_prepare(topk_idx_t.tensor,
-                                  token_counts_t.tensor, handle_mem_t.tensor, stream));
+                                  token_counts_t.tensor, handle_mem_t.tensor,
+                                  /*dispatch_output_per_expert_alignment=*/0, stream));
   CHECK_CUDA(cudaStreamSynchronize(stream));
   ASSERT_NO_THROW(nvte_ep_dispatch(handle_mem_t.tensor, topk_idx_t.tensor, tokens_t.tensor,
                                    topk_weights_t.tensor, recv_tokens_t.tensor, recv_topk_weights_t.tensor, stream));

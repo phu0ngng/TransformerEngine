@@ -136,7 +136,8 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
         pybind11::arg("world_size"), pybind11::arg("rank"), pybind11::arg("ep_size"),
         pybind11::arg("num_experts"), pybind11::arg("max_tokens_per_rank"),
         pybind11::arg("max_recv_tokens_per_rank"), pybind11::arg("hidden_dim"));
-  m.def("get_ep_handle_mem_size", &EpGetHandleMemSize, pybind11::arg("top_k"));
+  m.def("get_ep_handle_mem_size", &EpGetHandleMemSize, pybind11::arg("top_k"),
+        pybind11::arg("dispatch_output_per_expert_alignment") = 0);
 #endif  // NVTE_WITH_NCCL_EP
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())

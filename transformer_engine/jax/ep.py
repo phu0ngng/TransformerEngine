@@ -55,6 +55,10 @@ def ep_bootstrap(
                                    has no default and errors out on 0. Size for worst-case
                                    top_k fan-out (e.g. ep_size * max_tokens_per_rank * top_k).
         hidden_dim:                Token hidden dimension.
+
+    Per-handle EM zone alignment is a per-prepare knob — see
+    ``ep_prepare(..., dispatch_output_per_expert_alignment=...)`` and
+    ``ep_dispatch(..., dispatch_output_per_expert_alignment=...)``.
     """
     UID_SIZE = 128
     if rank == 0:
@@ -108,19 +112,27 @@ def ep_bootstrap(
 # tests). For the normal MoE flow, use ep_dispatch — which folds prepare in.
 
 
-def ep_prepare(topk_idx):
+def ep_prepare(topk_idx, dispatch_output_per_expert_alignment=0):
     """Routing preparation: AllGather routing map, compute per-expert token counts.
 
     Args:
         topk_idx: [..., top_k] int64 sparse routing indices. The leading dims
             (e.g. (T,) or (B, S)) are flattened by the FFI; top_k is the last
             dim and must match what the dispatch will send.
+        dispatch_output_per_expert_alignment: per-handle EM zone alignment in
+            tokens (pow2; 0/1 = no padding). Threaded through to NCCL EP's
+            handle config — each EM zone is padded to this many tokens with
+            zero-filled trailing slots. Static across a prepare → dispatch →
+            combine cycle (the same handle_mem carries it).
 
     Returns:
         token_counts: [num_local_experts] int32 — tokens per local expert.
         handle_mem:   [N] uint8 — routing state for dispatch/combine/bwd.
     """
-    return tex.ep_prepare(topk_idx)
+    return tex.ep_prepare(
+        topk_idx,
+        dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+    )
 
 
 # ── ep_dispatch (custom_vjp; folds prepare in; returns 4 outputs) ────────────
@@ -128,8 +140,10 @@ def ep_prepare(topk_idx):
 # anticipates that so the public surface won't change when the fusion lands.
 
 
-@partial(jax.custom_vjp, nondiff_argnums=(3,))
-def ep_dispatch(topk_idx, tokens, topk_weights, recv_capacity):
+@partial(jax.custom_vjp, nondiff_argnums=(3, 4))
+def ep_dispatch(
+    topk_idx, tokens, topk_weights, recv_capacity, dispatch_output_per_expert_alignment=0
+):
     """Prepare routing and dispatch tokens + weights to expert ranks.
 
     Args:
@@ -139,6 +153,10 @@ def ep_dispatch(topk_idx, tokens, topk_weights, recv_capacity):
         topk_weights:  [..., top_k] float32 routing weights (sent alongside tokens).
         recv_capacity: STATIC int — number of recv slots = recv_tokens.shape[0].
                        Set to ceil(T_flat * overalloc_factor) for a balanced buffer.
+        dispatch_output_per_expert_alignment: STATIC int. Per-handle EM zone
+                       alignment in tokens (pow2; 0/1 = no padding). Forwarded
+                       to the inner ``ep_prepare`` so the produced handle uses
+                       this alignment for both fwd and bwd.
 
     Returns:
         Tuple of (recv_tokens [recv_capacity, H] (always 2D),
@@ -157,13 +175,20 @@ def ep_dispatch(topk_idx, tokens, topk_weights, recv_capacity):
         top_k slot contributions per source token, so per-`k` identity is
         lost in the bwd direction).
     """
-    return _dispatch_fwd(topk_idx, tokens, topk_weights, recv_capacity)[0]
+    return _dispatch_fwd(
+        topk_idx, tokens, topk_weights, recv_capacity, dispatch_output_per_expert_alignment
+    )[0]
 
 
-def _dispatch_fwd(topk_idx, tokens, topk_weights, recv_capacity):
+def _dispatch_fwd(
+    topk_idx, tokens, topk_weights, recv_capacity, dispatch_output_per_expert_alignment
+):
     top_k = int(topk_weights.shape[-1])
     hidden_dim = int(tokens.shape[-1])
-    token_counts, handle_mem = tex.ep_prepare(topk_idx)
+    token_counts, handle_mem = tex.ep_prepare(
+        topk_idx,
+        dispatch_output_per_expert_alignment=int(dispatch_output_per_expert_alignment),
+    )
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
         handle_mem, topk_idx, tokens, topk_weights, recv_capacity, top_k
     )
@@ -175,8 +200,8 @@ def _dispatch_fwd(topk_idx, tokens, topk_weights, recv_capacity):
     return primal, (handle_mem, out_leading, top_k, hidden_dim)
 
 
-def _dispatch_bwd(recv_capacity, res, g_outputs):
-    del recv_capacity
+def _dispatch_bwd(recv_capacity, dispatch_output_per_expert_alignment, res, g_outputs):
+    del recv_capacity, dispatch_output_per_expert_alignment
     handle_mem, out_leading, top_k, hidden_dim = res
     g_recv_tokens = g_outputs[0]
     g_recv_topk_weights = g_outputs[1]  # 1D [recv_capacity] f32

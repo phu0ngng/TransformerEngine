@@ -202,7 +202,7 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(FusedMoEAuxLossBackwardHandler);
 void EpInitialize(pybind11::bytes unique_id_bytes, int world_size, int rank, int ep_size,
                   int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
                   int hidden_dim);
-size_t EpGetHandleMemSize(int top_k);
+size_t EpGetHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment);
 
 // EP FFI handlers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(EpPrepareHandler);

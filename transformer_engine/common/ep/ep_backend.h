@@ -62,7 +62,7 @@ class EPBackend {
   size_t get_handle_mem_size(NVTEEpLayerConfig layer_config);
 
   void prepare(const NVTETensor topk_idx, NVTETensor token_counts, void* handle_mem,
-               cudaStream_t stream);
+               size_t dispatch_output_per_expert_alignment, cudaStream_t stream);
 
   void dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
                 const NVTETensor topk_weights, NVTETensor recv_tokens, NVTETensor recv_topk_weights,
@@ -106,7 +106,8 @@ class EPBackend {
   // num_topk must match what was used during prepare()'s ncclEpUpdateHandle so
   // ncclEpDispatch's internal assertion (topk_weights.sizes[1] == handle->num_topk)
   // passes. Pass -1 for paths that don't carry per-token weights (combine, bwd dispatch).
-  ncclEpHandle_t open_handle(void* handle_mem, int num_topk);
+  ncclEpHandle_t open_handle(void* handle_mem, int num_topk,
+                             size_t dispatch_output_per_expert_alignment);
   void close_handle(ncclEpHandle_t handle);
 
   ncclEpGroup_t ep_group_{nullptr};

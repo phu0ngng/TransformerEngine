@@ -38,10 +38,11 @@ size_t nvte_ep_get_handle_mem_size(NVTEEpLayerConfig layer_config) {
 }
 
 void nvte_ep_prepare(NVTETensor topk_idx, NVTETensor token_counts, NVTETensor handle_mem,
-                     cudaStream_t stream) {
+                     size_t dispatch_output_per_expert_alignment, cudaStream_t stream) {
   void* mem_ptr = nvte_tensor_data(handle_mem);
   NVTE_CHECK(mem_ptr != nullptr, "handle_mem tensor data must not be null");
-  EPBackend::get().prepare(topk_idx, token_counts, mem_ptr, stream);
+  EPBackend::get().prepare(topk_idx, token_counts, mem_ptr, dispatch_output_per_expert_alignment,
+                           stream);
 }
 
 void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,

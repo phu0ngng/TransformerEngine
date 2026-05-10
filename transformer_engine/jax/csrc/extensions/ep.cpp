@@ -18,8 +18,12 @@ namespace jax {
 
 // ── Config structs ────────────────────────────────────────────────────────────
 
-// EpPrepare has no per-call config — token_counts size and handle_mem size are
-// derived from the cached group config inside the C++ backend.
+// EpPrepare carries the per-handle dispatch_output_per_expert_alignment knob;
+// token_counts size and handle_mem size still come from the cached group config.
+
+struct EpPrepareConfig {
+  int64_t dispatch_output_per_expert_alignment;
+};
 
 struct EpDispatchConfig {
   int64_t recv_capacity;  // recv_tokens first dim (= recv_topk_weights size)
@@ -54,9 +58,9 @@ void EpInitialize(pybind11::bytes unique_id_bytes_obj, int world_size, int rank,
   nvte_ep_initialize(reinterpret_cast<const uint8_t*>(uid_str.data()), world_size, rank, cfg);
 }
 
-size_t EpGetHandleMemSize(int top_k) {
+size_t EpGetHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment) {
   // num_local_experts is no longer used by the backend; pass 0 as a placeholder.
-  NVTEEpLayerConfig layer_cfg{0, top_k};
+  NVTEEpLayerConfig layer_cfg{0, top_k, dispatch_output_per_expert_alignment};
   return nvte_ep_get_handle_mem_size(layer_cfg);
 }
 
@@ -66,7 +70,7 @@ size_t EpGetHandleMemSize(int top_k) {
 //          handle_mem [handle_mem_size] uint8
 
 Error_Type EpPrepareFFI(cudaStream_t stream, Buffer_Type topk_idx, Result_Type token_counts,
-                        Result_Type handle_mem) {
+                        Result_Type handle_mem, EpPrepareConfig config) {
   auto topk_dims = topk_idx.dimensions();
   NVTE_CHECK(topk_dims.size() >= 2,
              "topk_idx must be at least 2D [..., top_k], got ndim=", topk_dims.size());
@@ -82,19 +86,20 @@ Error_Type EpPrepareFFI(cudaStream_t stream, Buffer_Type topk_idx, Result_Type t
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem->element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem->untyped_data(), hm_shape, DType::kByte);
 
-  nvte_ep_prepare(topk_idx_.data(), token_counts_.data(), handle_mem_.data(), stream);
+  nvte_ep_prepare(topk_idx_.data(), token_counts_.data(), handle_mem_.data(),
+                  static_cast<size_t>(config.dispatch_output_per_expert_alignment), stream);
 
   return ffi_with_cuda_error_check();
 }
 
-XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    EpPrepareHandler, EpPrepareFFI,
-    FFI::Bind()
-        .Ctx<FFI_Stream_Type>()  // stream
-        .Arg<Buffer_Type>()      // topk_idx
-        .Ret<Buffer_Type>()      // token_counts (shape from JAX abstract())
-        .Ret<Buffer_Type>(),     // handle_mem    (size queried in JAX abstract())
-    FFI_CudaGraph_Traits);
+XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()  // stream
+                                  .Arg<Buffer_Type>()      // topk_idx
+                                  .Ret<Buffer_Type>()      // token_counts
+                                  .Ret<Buffer_Type>()      // handle_mem
+                                  .Attrs<EpPrepareConfig>(),
+                              FFI_CudaGraph_Traits);
 
 // ── ep_dispatch ───────────────────────────────────────────────────────────────
 // Inputs:  handle_mem [N] uint8
@@ -300,6 +305,10 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineBwdHandler, EpCombineBwdFFI,
 
 }  // namespace jax
 }  // namespace transformer_engine
+
+XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(
+    transformer_engine::jax::EpPrepareConfig,
+    ::xla::ffi::StructMember<int64_t>("dispatch_output_per_expert_alignment"));
 
 XLA_FFI_REGISTER_STRUCT_ATTR_DECODING(transformer_engine::jax::EpDispatchConfig,
                                       ::xla::ffi::StructMember<int64_t>("recv_capacity"),
