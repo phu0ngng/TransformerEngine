@@ -65,7 +65,7 @@ class TestEP(unittest.TestCase):
         cls.num_experts = cls.num_procs
         cls.num_local_experts = cls.num_experts // cls.ep_size  # = 1
         cls.max_tokens_per_rank = cls.num_tokens
-        # HT FLAT recv layout: each rank may receive up to ep_size * max_tokens_per_rank
+        # NCCL EP recv layout: each rank may receive up to ep_size * max_tokens_per_rank
         # slots (worst case all sources route everything to this rank).
         cls.recv_capacity = cls.num_procs * cls.num_tokens
 
@@ -75,7 +75,7 @@ class TestEP(unittest.TestCase):
             ep_size=cls.ep_size,
             num_experts=cls.num_experts,
             max_tokens_per_rank=cls.max_tokens_per_rank,
-            max_recv_tokens_per_rank=cls.recv_capacity,  # HT requires > 0
+            max_recv_tokens_per_rank=cls.recv_capacity,  # must be > 0
             hidden_dim=cls.hidden_dim,
         )
 
@@ -131,7 +131,7 @@ class TestEP(unittest.TestCase):
         topk_idx = jnp.asarray(self._routing(self.rank))
         token_counts, handle_mem = ep_prepare(topk_idx)
         token_counts.block_until_ready()
-        # HT EXPERT_MAJOR: token_counts are PADDED (sum equals dispatch output slot count).
+        # token_counts are PADDED (sum equals dispatch output slot count).
         # Verify sane bounds: ≥ unpadded routing total, ≤ recv_capacity.
         unpadded = int(self._expected_token_counts()[0])
         got = int(np.asarray(token_counts)[0])
@@ -154,7 +154,7 @@ class TestEP(unittest.TestCase):
         )
         recv_tokens.block_until_ready()
 
-        # HT EXPERT_MAJOR pads slots; encoding is 1-indexed so 0 = padding/empty.
+        # NCCL EP pads slots; encoding is 1-indexed so 0 = padding/empty.
         # Scan all rows, drop padding via decode==None, compare multiset to routing replay.
         recv_np = np.asarray(recv_tokens.astype(jnp.float32))
         decoded = []
@@ -322,6 +322,38 @@ class TestEP(unittest.TestCase):
                 f"in _dispatch_bwd or _combine_bwd."
             ),
         )
+
+    # ── Test 7: 3D fwd/bwd preserves [B, S, H] shape end-to-end ───────────────
+
+    def test_full_fwd_bwd_3d(self):
+        """3D variant of test_full_fwd_bwd: tokens are [B, S, H] all the way
+        through ep_dispatch / ep_combine, never reshaped on the JAX side. Verifies
+        the FFI flattens leading dims internally (no AllGather injected by XLA)."""
+        B, S = 2, 4   # B*S == self.num_tokens (=8)
+        assert B * S == self.num_tokens
+
+        # Reshape inputs to 3D — but only at the test boundary; the primitives
+        # see them as N-D throughout.
+        topk_idx_2d = jnp.asarray(self._routing(self.rank))             # [T, K]
+        topk_w_2d = self._make_topk_weights()                            # [T, K]
+        tokens_2d = self._make_tokens()                                  # [T, H]
+
+        topk_idx_3d = topk_idx_2d.reshape(B, S, self.top_k)
+        topk_w_3d = topk_w_2d.reshape(B, S, self.top_k)
+        tokens_3d = tokens_2d.reshape(B, S, self.hidden_dim)
+
+        def loss_fn(toks_3d):
+            recv_t, recv_w, hm, tc = ep_dispatch(
+                topk_idx_3d, toks_3d, topk_w_3d, self.recv_capacity
+            )
+            # Public ep_combine — pass leading dims as a tuple to get 3D output.
+            out = ep_combine(hm, tc, recv_t, recv_w, (B, S))
+            self.assertEqual(out.shape, (B, S, self.hidden_dim))
+            return 0.5 * (out.astype(jnp.float32) ** 2).sum()
+
+        _, grad_3d = jax.value_and_grad(loss_fn)(tokens_3d)
+        grad_3d.block_until_ready()
+        self.assertEqual(grad_3d.shape, (B, S, self.hidden_dim))
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────

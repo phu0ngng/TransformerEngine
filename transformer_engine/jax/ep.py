@@ -45,8 +45,8 @@ def ep_bootstrap(world_size, rank, ep_size, num_experts, max_tokens_per_rank,
         max_tokens_per_rank:       Static upper bound on tokens this rank SENDS per dispatch.
         max_recv_tokens_per_rank:  Static upper bound on tokens this rank RECEIVES per
                                    dispatch (= recv_capacity_max). MUST be > 0 — NCCL EP
-                                   HT mode has no default and errors out on 0. Size for
-                                   worst-case top_k fan-out (e.g. ep_size * max_tokens_per_rank * top_k).
+                                   has no default and errors out on 0. Size for worst-case
+                                   top_k fan-out (e.g. ep_size * max_tokens_per_rank * top_k).
         hidden_dim:                Token hidden dimension.
     """
     UID_SIZE = 128
@@ -120,7 +120,7 @@ def ep_dispatch(topk_idx, tokens, topk_weights, recv_capacity):
 
     Returns:
         Tuple of (recv_tokens [recv_capacity, H],
-                  recv_topk_weights [recv_capacity] float32  (HT+EM: 1 weight per slot),
+                  recv_topk_weights [recv_capacity] float32 (1 weight per slot),
                   handle_mem [N] uint8,
                   token_counts [num_local_experts] int32).
     """
@@ -133,22 +133,25 @@ def _dispatch_fwd(topk_idx, tokens, topk_weights, recv_capacity):
     recv_tokens, recv_topk_weights = tex.ep_dispatch_fwd(
         handle_mem, topk_idx, tokens, topk_weights, recv_capacity, top_k
     )
-    num_local_tokens = tokens.shape[0]
+    # Save the full leading-dim shape (e.g. (T,) or (B, S)) so the bwd can
+    # restore N-D output without forcing a JAX-side reshape that would break
+    # sharding patterns and trigger an unwanted AllGather.
+    out_leading = tuple(tokens.shape[:-1])
     primal = (recv_tokens, recv_topk_weights, handle_mem, token_counts)
-    return primal, (handle_mem, num_local_tokens, top_k)
+    return primal, (handle_mem, out_leading, top_k)
 
 
 def _dispatch_bwd(recv_capacity, res, g_outputs):
     del recv_capacity
-    handle_mem, num_local_tokens, top_k = res
+    handle_mem, out_leading, top_k = res
     g_recv_tokens = g_outputs[0]
     g_recv_topk_weights = g_outputs[1]  # 1D [recv_capacity] f32
 
-    grad_tokens = tex.ep_dispatch_bwd(handle_mem, g_recv_tokens, num_local_tokens)
+    grad_tokens = tex.ep_dispatch_bwd(handle_mem, g_recv_tokens, out_leading)
 
-    # NCCL EP HT combine asserts bf16 and 16B-aligned hidden width — broadcast
-    # the f32 1D weight cotangent to 2D bf16 [recv_cap, PAD] (every column = the
-    # scalar), combine to [T, PAD], take col 0. Combine sums top_k slot
+    # NCCL EP combine asserts bf16 and 16B-aligned hidden width — broadcast the
+    # f32 1D weight cotangent to 2D bf16 [recv_cap, PAD] (every column = the
+    # scalar), combine to [T_flat, PAD], take col 0. Combine sums top_k slot
     # contributions per token, so the result is top_k * grad_recv_w[slot_for_t,k].
     # Broadcast back across top_k as grad / top_k — exact magnitude for uniform
     # routers, approximate (per-token average) for non-uniform.
@@ -157,11 +160,15 @@ def _dispatch_bwd(recv_capacity, res, g_outputs):
         g_recv_topk_weights.astype(jnp.bfloat16)[:, None],
         (g_recv_topk_weights.shape[0], PAD),
     )
-    grad_w_padded = tex.ep_dispatch_bwd(handle_mem, g_w_padded, num_local_tokens)
-    # All cols carry the same value (we broadcast); use col 0 / top_k.
-    grad_w_per_tok = grad_w_padded[:, 0].astype(jnp.float32) / float(top_k)  # [T]
+    # Combine the weights cotangent as a flat 1-D leading-dim tensor; reshape after.
+    T_flat = 1
+    for d in out_leading:
+        T_flat *= int(d)
+    grad_w_padded = tex.ep_dispatch_bwd(handle_mem, g_w_padded, (T_flat,))
+    grad_w_per_tok = grad_w_padded[:, 0].astype(jnp.float32) / float(top_k)  # [T_flat]
+    # Reshape to leading dims + add top_k axis broadcast.
     grad_topk_weights = jnp.broadcast_to(
-        grad_w_per_tok[:, None], (num_local_tokens, top_k)
+        grad_w_per_tok.reshape(out_leading + (1,)), out_leading + (top_k,)
     ).astype(jnp.float32)
 
     return (None, grad_tokens, grad_topk_weights)
@@ -189,22 +196,23 @@ def ep_combine(handle_mem, token_counts, expert_out, recv_topk_weights, num_loca
         token_counts:       [num_local_experts] int32 from ep_prepare. Used to mask
                             the in-JAX hadamard so the overallocated tail of
                             expert_out is not multiplied by garbage weights.
-        expert_out:         [recv_capacity, H] post-FFN activations.
-        recv_topk_weights:  [recv_capacity] float32 routing weights from
-                            ep_dispatch's 2nd output (HT+EM: 1 weight per slot).
-        num_local_tokens:   STATIC int — T (rows in returned result).
+        expert_out:         [recv_capacity, H] post-FFN activations (always 2D).
+        recv_topk_weights:  [recv_capacity] float32 routing weights (1 per slot).
+        num_local_tokens:   STATIC int OR tuple. int → 2D output [T, H].
+                            tuple (B, S, ...) → N-D output [..., H] with the
+                            same leading shape (preserves sharding pattern).
 
     Returns:
-        result: [num_local_tokens, H] combined output.
+        result: [..., H] combined output (shape determined by num_local_tokens).
     """
     return _combine_fwd(handle_mem, token_counts, expert_out, recv_topk_weights,
                         num_local_tokens)[0]
 
 
 def _make_valid_mask(token_counts, recv_capacity, dtype):
-    # HT+EM packs tokens for all local experts contiguously (alignment=1,
-    # NCCL EP default when no handle config is supplied). Real tokens occupy
-    # slots 0..sum(counts)-1; the trailing tail is zero-filled padding.
+    # NCCL EP packs tokens for all local experts contiguously (alignment=1,
+    # default when no handle config is supplied). Real tokens occupy slots
+    # 0..sum(counts)-1; the trailing tail is zero-filled padding.
     total_valid = jnp.sum(token_counts.astype(jnp.int32))
     arange = jnp.arange(recv_capacity, dtype=jnp.int32)
     return (arange < total_valid).astype(dtype)[:, None]
@@ -212,7 +220,6 @@ def _make_valid_mask(token_counts, recv_capacity, dtype):
 
 def _combine_fwd(handle_mem, token_counts, expert_out, recv_topk_weights, num_local_tokens):
     recv_capacity = expert_out.shape[0]
-    # HT+EM: recv_topk_weights is 1D [recv_capacity], one weight per slot.
     w = recv_topk_weights.astype(expert_out.dtype)[:, None]
     mask = _make_valid_mask(token_counts, recv_capacity, expert_out.dtype)
     weighted = expert_out * w * mask
@@ -222,6 +229,7 @@ def _combine_fwd(handle_mem, token_counts, expert_out, recv_topk_weights, num_lo
 
 def _combine_bwd(_, res, g_result):
     handle_mem, recv_topk_weights, expert_out, token_counts, recv_capacity = res
+    # g_result may be N-D [..., H]; combine_bwd accepts that and returns 2D.
     grad_weighted = tex.ep_combine_bwd(handle_mem, g_result, recv_capacity)
     w = recv_topk_weights.astype(grad_weighted.dtype)[:, None]
     mask = _make_valid_mask(token_counts, recv_capacity, grad_weighted.dtype)

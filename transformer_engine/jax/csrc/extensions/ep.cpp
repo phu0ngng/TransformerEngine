@@ -23,7 +23,7 @@ namespace jax {
 
 struct EpDispatchConfig {
   int64_t recv_capacity;  // recv_tokens first dim (= recv_topk_weights size)
-  int64_t top_k;          // routing top_k (recv_topk_weights is 1D under HT+EM)
+  int64_t top_k;          // routing top_k (recv_topk_weights is 1D)
 };
 
 struct EpCombineConfig {
@@ -61,7 +61,7 @@ size_t EpGetHandleMemSize(int top_k) {
 }
 
 // ── ep_prepare ────────────────────────────────────────────────────────────────
-// Inputs:  topk_idx [T, top_k] int64
+// Inputs:  topk_idx [..., top_k] int64  (N-D leading dims flattened internally)
 // Outputs: token_counts [num_local_experts] int32
 //          handle_mem [handle_mem_size] uint8
 
@@ -70,11 +70,12 @@ Error_Type EpPrepareFFI(cudaStream_t stream,
                         Result_Type token_counts,
                         Result_Type handle_mem) {
   auto topk_dims = topk_idx.dimensions();
-  NVTE_CHECK(topk_dims.size() == 2, "topk_idx must be 2D [T, top_k], got ndim=",
-             topk_dims.size());
+  NVTE_CHECK(topk_dims.size() >= 2,
+             "topk_idx must be at least 2D [..., top_k], got ndim=", topk_dims.size());
 
-  std::vector<size_t> topk_shape = {static_cast<size_t>(topk_dims[0]),
-                                    static_cast<size_t>(topk_dims[1])};
+  // Flatten leading dims; keep last dim as top_k.
+  std::vector<size_t> topk_shape = {product(topk_dims, 0, topk_dims.size() - 1),
+                                    static_cast<size_t>(topk_dims.back())};
   auto topk_idx_ =
       TensorWrapper(topk_idx.untyped_data(), topk_shape, DType::kInt64);
 
@@ -102,10 +103,11 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
 
 // ── ep_dispatch ───────────────────────────────────────────────────────────────
 // Inputs:  handle_mem [N] uint8
-//          tokens [T, H]
-//          topk_weights [T, top_k] float32
-// Outputs: recv_tokens [recv_capacity, H]
-//          recv_topk_weights [recv_capacity] float32  (HT+EM: 1 weight per slot)
+//          tokens [..., H]            (N-D, flattened internally)
+//          topk_idx [..., top_k]      (N-D, flattened internally)
+//          topk_weights [..., top_k] float32 (N-D, flattened internally; may be empty)
+// Outputs: recv_tokens [recv_capacity, H]      (always 2D)
+//          recv_topk_weights [recv_capacity] f32 (always 1D, 1 weight per slot)
 
 Error_Type EpDispatchFFI(cudaStream_t stream,
                          Buffer_Type handle_mem,
@@ -116,39 +118,49 @@ Error_Type EpDispatchFFI(cudaStream_t stream,
                          Result_Type recv_topk_weights,
                          EpDispatchConfig config) {
   auto token_dims = tokens.dimensions();
-  NVTE_CHECK(token_dims.size() == 2, "tokens must be 2D [T, H], got ndim=",
-             token_dims.size());
+  NVTE_CHECK(token_dims.size() >= 2,
+             "tokens must be at least 2D [..., H], got ndim=", token_dims.size());
 
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem.element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem.untyped_data(), hm_shape, DType::kByte);
 
   auto idx_dims = topk_idx.dimensions();
-  NVTE_CHECK(idx_dims.size() == 2, "topk_idx must be 2D [T, top_k], got ndim=",
-             idx_dims.size());
-  std::vector<size_t> idx_shape = {static_cast<size_t>(idx_dims[0]),
-                                   static_cast<size_t>(idx_dims[1])};
+  NVTE_CHECK(idx_dims.size() >= 2,
+             "topk_idx must be at least 2D [..., top_k], got ndim=", idx_dims.size());
+  std::vector<size_t> idx_shape = {product(idx_dims, 0, idx_dims.size() - 1),
+                                   static_cast<size_t>(idx_dims.back())};
   auto topk_idx_ = TensorWrapper(topk_idx.untyped_data(), idx_shape, DType::kInt64);
 
-  std::vector<size_t> tok_shape = {static_cast<size_t>(token_dims[0]),
-                                   static_cast<size_t>(token_dims[1])};
+  const size_t T_flat = product(token_dims, 0, token_dims.size() - 1);
+  const size_t H = static_cast<size_t>(token_dims.back());
+  std::vector<size_t> tok_shape = {T_flat, H};
   auto token_dtype = convert_ffi_datatype_to_te_dtype(tokens.element_type());
   auto tokens_ = TensorWrapper(tokens.untyped_data(), tok_shape, token_dtype);
 
   // topk_weights may be empty (null tensor passed for dense routing)
   void* topk_w_ptr = topk_weights.element_count() > 0 ? topk_weights.untyped_data() : nullptr;
-  std::vector<size_t> tw_shape = {topk_weights.element_count() > 0
-                                      ? static_cast<size_t>(topk_weights.dimensions()[0])
-                                      : 0,
-                                  topk_weights.element_count() > 0
-                                      ? static_cast<size_t>(topk_weights.dimensions()[1])
-                                      : 0};
+  std::vector<size_t> tw_shape;
+  if (topk_weights.element_count() > 0) {
+    auto tw_dims = topk_weights.dimensions();
+    NVTE_CHECK(tw_dims.size() >= 2,
+               "topk_weights must be at least 2D [..., top_k], got ndim=", tw_dims.size());
+    tw_shape = {product(tw_dims, 0, tw_dims.size() - 1),
+                static_cast<size_t>(tw_dims.back())};
+  } else {
+    tw_shape = {0, 0};
+  }
   auto topk_weights_ = TensorWrapper(topk_w_ptr, tw_shape, DType::kFloat32);
 
-  std::vector<size_t> recv_shape = {static_cast<size_t>(config.recv_capacity),
-                                    static_cast<size_t>(token_dims[1])};
+  auto recv_dims = recv_tokens->dimensions();
+  NVTE_CHECK(recv_dims.size() == 2,
+             "recv_tokens must be 2D [recv_capacity, H], got ndim=", recv_dims.size());
+  std::vector<size_t> recv_shape = {static_cast<size_t>(config.recv_capacity), H};
   auto recv_tokens_ =
       TensorWrapper(recv_tokens->untyped_data(), recv_shape, token_dtype);
 
+  auto recv_w_dims = recv_topk_weights->dimensions();
+  NVTE_CHECK(recv_w_dims.size() == 1,
+             "recv_topk_weights must be 1D [recv_capacity], got ndim=", recv_w_dims.size());
   std::vector<size_t> recv_w_shape = {static_cast<size_t>(config.recv_capacity)};
   auto recv_topk_weights_ =
       TensorWrapper(recv_topk_weights->untyped_data(), recv_w_shape, DType::kFloat32);
@@ -174,8 +186,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
 
 // ── ep_combine ────────────────────────────────────────────────────────────────
 // Inputs:  handle_mem [N] uint8
-//          expert_out [recv_capacity, H]
-// Outputs: result [num_local_tokens, H]
+//          expert_out [recv_capacity, H]   (always 2D)
+// Outputs: result     [..., H]             (N-D; leading dims flattened internally)
 
 Error_Type EpCombineFFI(cudaStream_t stream,
                         Buffer_Type handle_mem,
@@ -183,7 +195,8 @@ Error_Type EpCombineFFI(cudaStream_t stream,
                         Result_Type result,
                         EpCombineConfig config) {
   auto eo_dims = expert_out.dimensions();
-  NVTE_CHECK(eo_dims.size() == 2, "expert_out must be 2D, got ndim=", eo_dims.size());
+  NVTE_CHECK(eo_dims.size() == 2,
+             "expert_out must be 2D [recv_capacity, H], got ndim=", eo_dims.size());
 
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem.element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem.untyped_data(), hm_shape, DType::kByte);
@@ -193,8 +206,14 @@ Error_Type EpCombineFFI(cudaStream_t stream,
   auto eo_dtype = convert_ffi_datatype_to_te_dtype(expert_out.element_type());
   auto expert_out_ = TensorWrapper(expert_out.untyped_data(), eo_shape, eo_dtype);
 
-  std::vector<size_t> res_shape = {static_cast<size_t>(config.num_local_tokens),
-                                   static_cast<size_t>(eo_dims[1])};
+  auto res_dims = result->dimensions();
+  NVTE_CHECK(res_dims.size() >= 2,
+             "result must be at least 2D [..., H], got ndim=", res_dims.size());
+  const size_t res_T_flat = product(res_dims, 0, res_dims.size() - 1);
+  NVTE_CHECK(static_cast<int64_t>(res_T_flat) == config.num_local_tokens,
+             "result leading-dim product (", res_T_flat,
+             ") must equal num_local_tokens (", config.num_local_tokens, ")");
+  std::vector<size_t> res_shape = {res_T_flat, static_cast<size_t>(eo_dims[1])};
   auto result_ = TensorWrapper(result->untyped_data(), res_shape, eo_dtype);
 
   nvte_ep_combine(handle_mem_.data(), expert_out_.data(), result_.data(), stream);
@@ -214,8 +233,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
 
 // ── ep_dispatch_bwd ───────────────────────────────────────────────────────────
 // Inputs:  handle_mem [N] uint8
-//          grad [recv_capacity, H]  (grad w.r.t. recv_tokens)
-// Outputs: grad_tokens [num_local_tokens, H]
+//          grad [recv_capacity, H]  (grad w.r.t. recv_tokens; always 2D)
+// Outputs: grad_tokens [..., H]     (N-D; matches original tokens shape)
 
 Error_Type EpDispatchBwdFFI(cudaStream_t stream,
                              Buffer_Type handle_mem,
@@ -223,7 +242,8 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream,
                              Result_Type grad_tokens,
                              EpDispatchBwdConfig config) {
   auto grad_dims = grad.dimensions();
-  NVTE_CHECK(grad_dims.size() == 2, "grad must be 2D, got ndim=", grad_dims.size());
+  NVTE_CHECK(grad_dims.size() == 2,
+             "grad must be 2D [recv_capacity, H], got ndim=", grad_dims.size());
 
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem.element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem.untyped_data(), hm_shape, DType::kByte);
@@ -233,8 +253,14 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream,
   auto g_dtype = convert_ffi_datatype_to_te_dtype(grad.element_type());
   auto grad_ = TensorWrapper(grad.untyped_data(), g_shape, g_dtype);
 
-  std::vector<size_t> out_shape = {static_cast<size_t>(config.num_local_tokens),
-                                   static_cast<size_t>(grad_dims[1])};
+  auto out_dims = grad_tokens->dimensions();
+  NVTE_CHECK(out_dims.size() >= 2,
+             "grad_tokens must be at least 2D [..., H], got ndim=", out_dims.size());
+  const size_t T_flat = product(out_dims, 0, out_dims.size() - 1);
+  NVTE_CHECK(static_cast<int64_t>(T_flat) == config.num_local_tokens,
+             "grad_tokens leading-dim product (", T_flat,
+             ") must equal num_local_tokens (", config.num_local_tokens, ")");
+  std::vector<size_t> out_shape = {T_flat, static_cast<size_t>(grad_dims[1])};
   auto grad_tokens_ = TensorWrapper(grad_tokens->untyped_data(), out_shape, g_dtype);
 
   nvte_ep_dispatch_bwd(handle_mem_.data(), grad_.data(), grad_tokens_.data(), stream);
@@ -254,8 +280,8 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
 
 // ── ep_combine_bwd ────────────────────────────────────────────────────────────
 // Inputs:  handle_mem [N] uint8
-//          grad [num_local_tokens, H]  (grad w.r.t. result)
-// Outputs: grad_expert_out [recv_capacity, H]
+//          grad [..., H]            (N-D grad w.r.t. result; flattened internally)
+// Outputs: grad_expert_out [recv_capacity, H]   (always 2D)
 
 Error_Type EpCombineBwdFFI(cudaStream_t stream,
                             Buffer_Type handle_mem,
@@ -263,18 +289,22 @@ Error_Type EpCombineBwdFFI(cudaStream_t stream,
                             Result_Type grad_expert_out,
                             EpCombineBwdConfig config) {
   auto grad_dims = grad.dimensions();
-  NVTE_CHECK(grad_dims.size() == 2, "grad must be 2D, got ndim=", grad_dims.size());
+  NVTE_CHECK(grad_dims.size() >= 2,
+             "grad must be at least 2D [..., H], got ndim=", grad_dims.size());
 
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem.element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem.untyped_data(), hm_shape, DType::kByte);
 
-  std::vector<size_t> g_shape = {static_cast<size_t>(grad_dims[0]),
-                                 static_cast<size_t>(grad_dims[1])};
+  const size_t T_flat = product(grad_dims, 0, grad_dims.size() - 1);
+  const size_t H = static_cast<size_t>(grad_dims.back());
+  std::vector<size_t> g_shape = {T_flat, H};
   auto g_dtype = convert_ffi_datatype_to_te_dtype(grad.element_type());
   auto grad_ = TensorWrapper(grad.untyped_data(), g_shape, g_dtype);
 
-  std::vector<size_t> out_shape = {static_cast<size_t>(config.recv_capacity),
-                                   static_cast<size_t>(grad_dims[1])};
+  auto out_dims = grad_expert_out->dimensions();
+  NVTE_CHECK(out_dims.size() == 2,
+             "grad_expert_out must be 2D [recv_capacity, H], got ndim=", out_dims.size());
+  std::vector<size_t> out_shape = {static_cast<size_t>(config.recv_capacity), H};
   auto grad_expert_out_ =
       TensorWrapper(grad_expert_out->untyped_data(), out_shape, g_dtype);
 

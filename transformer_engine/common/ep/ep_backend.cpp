@@ -5,14 +5,14 @@
  ************************************************************************/
 
 /*! \file ep_backend.cpp
- *  \brief EPBackend implementation (HT mode only).
+ *  \brief EPBackend implementation.
  *
  *  Wraps ncclEpCreateGroup, ncclEpInitHandle, ncclEpUpdateHandle,
  *  ncclEpDispatch, ncclEpCombine, and their destroy counterparts.
  *  Each per-step op creates ephemeral ncclNDTensor_t handles around
  *  user-provided buffers — no allocations, negligible overhead.
  *
- *  HT EXPERT_MAJOR API patterns:
+ *  API patterns:
  *  - ncclEpInitHandle: maps routing buffers in handle_mem (no collective)
  *  - ncclEpUpdateHandle: AllGather + metadata preprocessing (collective)
  *  - ncclEpDispatch (forward): 3 inputs (tokens, topk_weights, topk_idx),
@@ -63,14 +63,14 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
              "but current device has compute capability ",
              major, ".x");
 
-  // NCCL EP HT mode requires CUDA multicast (NVLS) support — its HT init
-  // hangs forever on hardware where CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED == 0
-  // (e.g. H200 NVL with NVLink Bridge topology). Detect at init and fail fast.
+  // NCCL EP requires CUDA multicast (NVLS) support — init hangs forever on
+  // hardware where CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED == 0 (e.g. H200 NVL
+  // with NVLink Bridge topology). Detect at init and fail fast.
   NVTE_CHECK(cuda::supports_multicast(device),
-             "NCCL EP HT mode requires CUDA multicast (NVLS) support on device ", device,
+             "NCCL EP requires CUDA multicast (NVLS) support on device ", device,
              " but CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED reports 0. "
              "This typically means the system has a partial NVLink topology "
-             "(e.g. H200 NVL with NVLink Bridge). NCCL EP HT requires a full "
+             "(e.g. H200 NVL with NVLink Bridge). NCCL EP requires a full "
              "NVLink mesh fabric (e.g. GH200 NVL72 / DGX H200 / DGX H100).");
 }
 
@@ -157,11 +157,10 @@ void EPBackend::destroy_tensor(ncclNDTensor_t tensor) {
 }
 
 // Build a transient ncclEpHandle that views the existing handle_mem buffer.
-// ncclEpInitHandle for HT-EXPERT_MAJOR is pure host-side pointer arithmetic
-// (see ht_init_handle in nccl_ep.cc): it stores handle_mem->data as a raw
-// pointer in the host-side struct. The routing-tensor wrapper can be freed
-// immediately. Calling Init after a prior UpdateHandle preserves the
-// AllGather results already in the device buffer.
+// ncclEpInitHandle is pure host-side pointer arithmetic: it stores
+// handle_mem->data as a raw pointer in the host-side struct. The routing-tensor
+// wrapper can be freed immediately. Calling Init after a prior UpdateHandle
+// preserves the AllGather results already in the device buffer.
 ncclEpHandle_t EPBackend::open_handle(void* handle_mem, int num_topk) {
   ncclNDTensor_t routing_tensor = make_tensor(handle_mem, 1, ncclUint8, NCCL_EP_TENSOR_TAG_NONE,
                                               static_cast<unsigned int>(routing_buf_size_));
@@ -213,7 +212,6 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config, bool ow
   memset(&cfg, 0, sizeof(cfg));
   cfg.version = 1;
   cfg.algorithm = NCCL_EP_ALGO_HIGH_THROUGHPUT;
-  // TE only supports EXPERT_MAJOR layout under HT.
   cfg.layout = NCCL_EP_LAYOUT_EXPERT_MAJOR;
   cfg.num_experts = static_cast<unsigned int>(group_config.num_experts);
   cfg.max_send_tokens_per_rank = static_cast<unsigned int>(group_config.max_tokens_per_rank);
@@ -221,15 +219,15 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config, bool ow
   cfg.rdma_buffer_size = NCCL_EP_AUTO;
   cfg.num_qp_per_rank = NCCL_EP_AUTO;
   cfg.num_channels = NCCL_EP_AUTO;
-  // HT requires >0; pass user value verbatim, NCCL EP errors out on 0.
+  // Must be > 0; NCCL EP errors out on 0.
   cfg.max_recv_token_slots_per_rank =
       static_cast<unsigned int>(group_config.max_recv_tokens_per_rank);
 
   NVTE_CHECK_NCCL(
       ncclEpCreateGroup(&ep_group_, ep_comm, &cfg, /*alloc=*/nullptr, /*free=*/nullptr));
 
-  // EXPERT_MAJOR HT handle_mem size depends on top_k — sized per call in
-  // get_handle_mem_size() / open_handle().
+  // handle_mem size depends on top_k — sized per call in get_handle_mem_size()
+  // / open_handle().
 
   // Keep ep_comm alive for the EP group's lifetime — ncclEpGroupDestroy
   // depends on it at teardown.
@@ -244,7 +242,7 @@ void EPBackend::init(ncclComm_t ep_comm, NVTEEpGroupConfig group_config, bool ow
 
 size_t EPBackend::get_handle_mem_size(NVTEEpLayerConfig layer_config) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
-  NVTE_CHECK(layer_config.top_k > 0, "NVTEEpLayerConfig.top_k must be > 0 for EXPERT_MAJOR HT");
+  NVTE_CHECK(layer_config.top_k > 0, "NVTEEpLayerConfig.top_k must be > 0");
   size_t bytes = 0;
   NVTE_CHECK_NCCL(ncclEpHandleMemSize(ep_group_, nullptr, &bytes, layer_config.top_k));
   routing_buf_size_ = bytes;
@@ -351,8 +349,7 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
       make_tensor(recv_data, 2, nvte_dtype_to_nccl(recv_dtype), NCCL_EP_TENSOR_TAG_TOKENS,
                   recv_capacity, static_cast<unsigned int>(recv_shape.data[1]));
 
-  // HT EXPERT_MAJOR forward: 2 outputs (tokens, topk_weights). recv_topk_idx
-  // is not required.
+  // Forward: 2 outputs (tokens, topk_weights). recv_topk_idx not required.
   ncclNDTensor_t nccl_topk_weights_out = nullptr;
   unsigned int num_outputs = 1;
 
@@ -363,7 +360,7 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
     NVTEShape recv_w_shape = nvte_tensor_shape(recv_topk_weights);
     NVTE_CHECK(recv_w_data != nullptr, "recv_topk_weights data must not be null");
     NVTE_CHECK(recv_w_shape.ndim == 1,
-               "HT+EM recv_topk_weights must be 1D [recv_capacity]");
+               "recv_topk_weights must be 1D [recv_capacity]");
     nccl_topk_weights_out = make_tensor(recv_w_data, 1, ncclFloat32,
                                         NCCL_EP_TENSOR_TAG_TOPK_WEIGHTS, recv_capacity);
     num_outputs = 2;
@@ -427,7 +424,7 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out, NVTETenso
   const ncclNDTensor_t inputs[] = {nccl_expert_in};
   const ncclNDTensor_t outputs[] = {nccl_result_out};
 
-  // Combine requires the persistent handle from prepare() — HT combine reads
+  // Combine requires the persistent handle from prepare() — combine reads
   // handle->num_tokens which is only populated by ncclEpUpdateHandle.
   NVTE_CHECK(cur_handle_ != nullptr && cur_handle_mem_ == handle_mem,
              "ep_combine requires a prior ep_prepare on the same handle_mem");

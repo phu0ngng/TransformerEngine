@@ -13,8 +13,6 @@
  *
  *  All per-step ops (prepare, dispatch, combine, and their backward
  *  variants) are allocation-free and CUDA graph-capturable.
- *
- *  High Throughput (HT) mode only.
  */
 
 #ifndef TRANSFORMER_ENGINE_EP_H_
@@ -42,10 +40,9 @@ typedef struct {
   int max_tokens_per_rank;      /*!< Static upper bound on tokens this rank will SEND
                             *   per dispatch. Fixed for CUDA graph. */
   int max_recv_tokens_per_rank; /*!< Static upper bound on tokens this rank will RECEIVE
-                                 *   per dispatch (= recv_capacity_max). Required for HT
-                                 *   (must be > 0) — NCCL EP HT mode has no auto-default.
-                                 *   Size for worst-case top_k fan-out
-                                 *   (e.g. ep_size * max_tokens_per_rank * top_k). */
+                                 *   per dispatch (= recv_capacity_max). Must be > 0
+                                 *   (NCCL EP has no auto-default). Size for worst-case
+                                 *   top_k fan-out (e.g. ep_size * max_tokens_per_rank * top_k). */
   int hidden_dim;               /*!< Token hidden dimension. */
 } NVTEEpGroupConfig;
 
@@ -58,8 +55,8 @@ typedef struct {
   int num_local_experts; /*!< Reserved; not consumed by the backend today
                               (derived from group_config.num_experts / ep_size at
                               nvte_ep_initialize time). Kept for ABI stability. */
-  int top_k;             /*!< Per-token expert fan-out. Required for EXPERT_MAJOR HT layout
-                              (handle_mem size scales with top_k). */
+  int top_k;             /*!< Per-token expert fan-out. Required (handle_mem size scales
+                              with top_k). */
   /* topk_format   — reserved; only sparse int64 routing supported today */
   /* scaling_mode  — reserved; FP8 block-scaling support planned */
 } NVTEEpLayerConfig;
@@ -141,9 +138,9 @@ void nvte_ep_prepare(NVTETensor topk_idx, NVTETensor token_counts, NVTETensor ha
 /*! \brief Dispatch tokens (and routing weights) to expert ranks.
  *
  *  Sends tokens and topk_weights to the destination expert ranks according
- *  to the routing computed in nvte_ep_prepare. In HT EXPERT_MAJOR mode,
- *  NCCL EP routes 3 inputs (tokens, topk_weights, topk_idx) and writes back
- *  2 outputs (recv_tokens, recv_topk_weights) — recv_topk_idx is not produced.
+ *  to the routing computed in nvte_ep_prepare. NCCL EP routes 3 inputs
+ *  (tokens, topk_weights, topk_idx) and writes back 2 outputs
+ *  (recv_tokens, recv_topk_weights).
  *
  *  topk_idx is consumed directly here (not cached by prepare) so the backend
  *  can be stateless across per-step ops — each call rebuilds a transient
@@ -154,8 +151,9 @@ void nvte_ep_prepare(NVTETensor topk_idx, NVTETensor token_counts, NVTETensor ha
  *  \param[in]     tokens             Input tokens [T, hidden_dim].
  *  \param[in]     topk_weights       SPARSE: [T, top_k] float32; DENSE: pass null NVTETensor.
  *  \param[out]    recv_tokens        Received tokens [recv_T, hidden_dim].
- *  \param[out]    recv_topk_weights  Received per-slot weights [recv_T] float32 (HT+EM: 1 weight per slot).
- *                                    Pass null NVTETensor in backward (no weights to scatter back).
+ *  \param[out]    recv_topk_weights  Received per-slot weights [recv_T] float32
+ *                                    (1 weight per slot). Pass null NVTETensor
+ *                                    in backward (no weights to scatter back).
  *  \param[in]     stream             CUDA stream.
  */
 void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
@@ -164,7 +162,7 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
 
 /*! \brief Combine expert outputs back to originating ranks (unweighted sum).
  *
- *  NCCL EP HT forward combine performs an UNWEIGHTED sum of the top_k expert
+ *  NCCL EP forward combine performs an UNWEIGHTED sum of the top_k expert
  *  contributions per token. The caller is responsible for pre-multiplying
  *  expert_out by recv_topk_weights (from nvte_ep_dispatch's 2nd output)
  *  before calling this if weighted reduction is desired. topk_weights are

@@ -9,11 +9,11 @@
  *
  *  Internal to transformer_engine/common/ep/. Not part of the public API.
  *
- *  Handle lifecycle (HT mode): the persistent state lives in handle_mem
- *  (caller-owned device buffer of size ncclEpHandleMemSize). The host-side
- *  ncclEpHandle_t is built on the fly per op via ncclEpInitHandle (pure pointer
- *  arithmetic over handle_mem) and torn down with ncclEpHandleDestroy at the
- *  end of each op. This keeps EPBackend stateless across ops.
+ *  Handle lifecycle: the persistent state lives in handle_mem (caller-owned
+ *  device buffer of size ncclEpHandleMemSize). The host-side ncclEpHandle_t is
+ *  built on the fly per op via ncclEpInitHandle (pure pointer arithmetic over
+ *  handle_mem) and torn down with ncclEpHandleDestroy at the end of each op.
+ *  This keeps EPBackend stateless across ops.
  *  - prepare():     open + ncclEpUpdateHandle (collective; AllGather routing → handle_mem) + close
  *  - dispatch():    open + ncclEpDispatch + close
  *  - combine():     open + ncclEpCombine + close
@@ -114,7 +114,7 @@ class EPBackend {
   std::mutex mutex_;
   // Persistent handle from the most recent prepare(). NCCL stores num_tokens
   // / num_topk on the host-side handle struct (set during ncclEpUpdateHandle),
-  // and HT combine asserts on it — so we keep the handle alive across the
+  // and combine asserts on it — so we keep the handle alive across the
   // prepare → dispatch → combine cycle instead of reopening per op.
   ncclEpHandle_t cur_handle_{nullptr};
   void* cur_handle_mem_{nullptr};
