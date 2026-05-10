@@ -85,8 +85,8 @@ def _initialize_distributed(args):
     assert (
         args.num_experts % ep_size == 0
     ), f"num_experts ({args.num_experts}) must be divisible by ep_size ({ep_size})"
-    # Worst-case recv: every source rank sends its full quota to this rank.
-    recv_capacity = ep_size * args.num_tokens
+    # Worst-case recv: every source rank sends its full quota times top_k fan-out.
+    recv_capacity = ep_size * args.num_tokens * args.top_k
     args.recv_capacity = recv_capacity
 
     ep_bootstrap(
