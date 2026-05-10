@@ -32,7 +32,7 @@ for SCRIPT_NAME in $SCRIPT_NAMES; do
   done
 
   timeout --foreground --signal=KILL "${TEST_TIMEOUT_S}" \
-      python $SCRIPT_NAME 127.0.0.1:12345 0 $NUM_RUNS | tee stdout_multi_process.txt
+      python $SCRIPT_NAME 127.0.0.1:12345 0 $NUM_RUNS 2>&1 | tee stdout_multi_process.txt
 
   wait
 
