@@ -126,6 +126,7 @@ class EPBackend {
   // prepare → dispatch → combine cycle instead of reopening per op.
   ncclEpHandle_t cur_handle_{nullptr};
   void* cur_handle_mem_{nullptr};
+  size_t cur_handle_alignment_{0};
 };
 
 }  // namespace ep

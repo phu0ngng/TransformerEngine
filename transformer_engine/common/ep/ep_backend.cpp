@@ -298,10 +298,11 @@ void EPBackend::prepare(const NVTETensor topk_idx, NVTETensor token_counts, void
     handle_num_local_tensors = 1;
   }
 
-  // Reuse the persistent handle if it already views this handle_mem buffer;
-  // otherwise close any prior handle and open a new one. UpdateHandle then
-  // populates num_tokens / routing state on the live handle.
-  if (cur_handle_ != nullptr && cur_handle_mem_ != handle_mem) {
+  // Reuse the persistent handle iff it views this handle_mem AND was opened
+  // with the same alignment; otherwise close it and open afresh. The
+  // alignment is baked into ncclEpInitHandle, so changes need a re-open.
+  if (cur_handle_ != nullptr && (cur_handle_mem_ != handle_mem ||
+                                 cur_handle_alignment_ != dispatch_output_per_expert_alignment)) {
     close_handle(cur_handle_);
     cur_handle_ = nullptr;
   }
@@ -309,6 +310,7 @@ void EPBackend::prepare(const NVTETensor topk_idx, NVTETensor token_counts, void
     cur_handle_ =
         open_handle(handle_mem, static_cast<int>(top_k), dispatch_output_per_expert_alignment);
     cur_handle_mem_ = handle_mem;
+    cur_handle_alignment_ = dispatch_output_per_expert_alignment;
   }
   NVTE_CHECK_NCCL(ncclEpUpdateHandle(cur_handle_, nccl_topk_idx, handle_local_tensors,
                                      handle_num_local_tensors, stream));
@@ -390,25 +392,13 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
   ncclEpDispatchConfig_t dispatch_cfg;
   memset(&dispatch_cfg, 0, sizeof(dispatch_cfg));
 
-  // Use the persistent handle populated by prepare(); fall back to opening
-  // a fresh one (backward path: dispatch may run without a prior prepare).
-  // The fallback assumes alignment = 0 (NCCL EP default = no padding); a
-  // caller that wants > 0 alignment must run prepare first so cur_handle_
-  // carries the correct ncclEpHandleConfig.
-  ncclEpHandle_t handle = cur_handle_;
-  bool owns_handle = false;
-  if (handle == nullptr || cur_handle_mem_ != handle_mem) {
-    int handle_num_topk = -1;
-    if (is_forward) {
-      NVTEShape idx_shape = nvte_tensor_shape(topk_idx);
-      handle_num_topk = idx_shape.ndim > 1 ? static_cast<int>(idx_shape.data[1]) : 1;
-    }
-    handle = open_handle(handle_mem, handle_num_topk, /*alignment=*/0);
-    owns_handle = true;
-  }
-  NVTE_CHECK_NCCL(ncclEpDispatch(handle, inputs, num_inputs, outputs, num_outputs, nullptr, 0, 0,
-                                 &dispatch_cfg, stream));
-  if (owns_handle) close_handle(handle);
+  // Persistent handle populated by prepare() is required — same contract as
+  // combine(). combine_bwd reaches this path through dispatch() and must run
+  // after a prepare on the same handle_mem so the alignment matches.
+  NVTE_CHECK(cur_handle_ != nullptr && cur_handle_mem_ == handle_mem,
+             "ep dispatch (incl. combine_bwd) requires a prior ep_prepare on the same handle_mem");
+  NVTE_CHECK_NCCL(ncclEpDispatch(cur_handle_, inputs, num_inputs, outputs, num_outputs, nullptr, 0,
+                                 0, &dispatch_cfg, stream));
 
   destroy_tensor(nccl_tokens_in);
   if (nccl_topk_weights_in) destroy_tensor(nccl_topk_weights_in);
