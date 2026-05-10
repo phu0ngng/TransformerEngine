@@ -188,7 +188,7 @@ def _dispatch_bwd(recv_capacity, res, g_outputs):
     # contributions per token, so the result is top_k * grad_recv_w[slot_for_t,k].
     # Broadcast back across top_k as grad / top_k — exact magnitude for uniform
     # routers, approximate (per-token average) for non-uniform.
-    PAD = 32  # 32 * 2 bytes = 64-byte aligned, matches typical hidden width
+    PAD = 32  # NCCL EP combine requires row >= 16 B; PAD>=8 is the strict minimum, 32 is conservative.
     g_w_padded = jnp.broadcast_to(
         g_recv_topk_weights.astype(jnp.bfloat16)[:, None],
         (g_recv_topk_weights.shape[0], PAD),
