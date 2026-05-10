@@ -359,10 +359,9 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
     void* recv_w_data = nvte_tensor_data(recv_topk_weights);
     NVTEShape recv_w_shape = nvte_tensor_shape(recv_topk_weights);
     NVTE_CHECK(recv_w_data != nullptr, "recv_topk_weights data must not be null");
-    NVTE_CHECK(recv_w_shape.ndim == 1,
-               "recv_topk_weights must be 1D [recv_capacity]");
-    nccl_topk_weights_out = make_tensor(recv_w_data, 1, ncclFloat32,
-                                        NCCL_EP_TENSOR_TAG_TOPK_WEIGHTS, recv_capacity);
+    NVTE_CHECK(recv_w_shape.ndim == 1, "recv_topk_weights must be 1D [recv_capacity]");
+    nccl_topk_weights_out =
+        make_tensor(recv_w_data, 1, ncclFloat32, NCCL_EP_TENSOR_TAG_TOPK_WEIGHTS, recv_capacity);
     num_outputs = 2;
   }
 

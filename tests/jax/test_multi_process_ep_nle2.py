@@ -17,6 +17,7 @@ import sys
 import unittest
 
 import jax
+
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
@@ -119,8 +120,11 @@ class TestEPNLE2(unittest.TestCase):
         # Counts may be padded by NCCL EP, but each must be ≥ unpadded and the
         # sum must fit recv_capacity.
         for e in range(self.num_local_experts):
-            self.assertGreaterEqual(int(got[e]), int(unpadded[e]),
-                f"rank {self.rank} expert {e}: padded {got[e]} < unpadded {unpadded[e]}")
+            self.assertGreaterEqual(
+                int(got[e]),
+                int(unpadded[e]),
+                f"rank {self.rank} expert {e}: padded {got[e]} < unpadded {unpadded[e]}",
+            )
         self.assertLessEqual(int(got.sum()), self.recv_capacity)
 
     # ── Test 2: dispatch round-trip with identity expert ─────────────────────
@@ -144,8 +148,10 @@ class TestEPNLE2(unittest.TestCase):
 
         expected = np.asarray(tokens.astype(jnp.float32)) * float(self.top_k)
         np.testing.assert_allclose(
-            np.asarray(result.astype(jnp.float32)), expected,
-            atol=2e-2, rtol=2e-2,
+            np.asarray(result.astype(jnp.float32)),
+            expected,
+            atol=2e-2,
+            rtol=2e-2,
             err_msg=f"rank {self.rank}: NLE=2 identity round-trip mismatch",
         )
 
@@ -164,20 +170,20 @@ class TestEPNLE2(unittest.TestCase):
         topk_weights = self._make_topk_weights()
         tokens = self._make_tokens()
 
-        recv_t, recv_w, hm, tc = ep_dispatch(
-            topk_idx, tokens, topk_weights, self.recv_capacity
-        )
+        recv_t, recv_w, hm, tc = ep_dispatch(topk_idx, tokens, topk_weights, self.recv_capacity)
         out = ep_combine(hm, tc, recv_t, recv_w, self.num_tokens)
         out.block_until_ready()
 
         expected = np.asarray(tokens.astype(jnp.float32))
         np.testing.assert_allclose(
-            np.asarray(out.astype(jnp.float32)), expected,
-            atol=5e-2, rtol=5e-2,
+            np.asarray(out.astype(jnp.float32)),
+            expected,
+            atol=5e-2,
+            rtol=5e-2,
             err_msg=(
                 f"rank {self.rank}: NLE=2 public combine mismatch. If this "
-                f"fails with garbage values in the output, the mask in "
-                f"_make_valid_mask is failing to zero a padded slot."
+                "fails with garbage values in the output, the mask in "
+                "_make_valid_mask is failing to zero a padded slot."
             ),
         )
 
@@ -197,9 +203,7 @@ class TestEPNLE2(unittest.TestCase):
 
         def loss_fn(g_):
             scaled = base_weights * g_[:, None]
-            recv_t, recv_w, hm, tc = ep_dispatch(
-                topk_idx, tokens, scaled, self.recv_capacity
-            )
+            recv_t, recv_w, hm, tc = ep_dispatch(topk_idx, tokens, scaled, self.recv_capacity)
             out = ep_combine(hm, tc, recv_t, recv_w, self.num_tokens)
             return 0.5 * (out.astype(jnp.float32) ** 2).sum()
 
@@ -211,8 +215,10 @@ class TestEPNLE2(unittest.TestCase):
         expected = np.asarray(g) * sq_per_token
 
         np.testing.assert_allclose(
-            np.asarray(grad_g.astype(jnp.float32)), expected,
-            atol=5e-2, rtol=5e-2,
+            np.asarray(grad_g.astype(jnp.float32)),
+            expected,
+            atol=5e-2,
+            rtol=5e-2,
             err_msg=f"rank {self.rank}: NLE=2 router grad mismatch",
         )
 
@@ -230,9 +236,7 @@ class TestEPNLE2(unittest.TestCase):
         tokens = self._make_tokens()
 
         def loss_fn(toks):
-            recv_t, recv_w, hm, tc = ep_dispatch(
-                topk_idx, toks, topk_weights, self.recv_capacity
-            )
+            recv_t, recv_w, hm, tc = ep_dispatch(topk_idx, toks, topk_weights, self.recv_capacity)
             out = ep_combine(hm, tc, recv_t, recv_w, self.num_tokens)
             return 0.5 * (out.astype(jnp.float32) ** 2).sum()
 
@@ -241,8 +245,10 @@ class TestEPNLE2(unittest.TestCase):
 
         expected = np.asarray(tokens.astype(jnp.float32))
         np.testing.assert_allclose(
-            np.asarray(grad_tokens.astype(jnp.float32)), expected,
-            atol=5e-2, rtol=5e-2,
+            np.asarray(grad_tokens.astype(jnp.float32)),
+            expected,
+            atol=5e-2,
+            rtol=5e-2,
             err_msg=f"rank {self.rank}: NLE=2 fwd+bwd grad mismatch",
         )
 

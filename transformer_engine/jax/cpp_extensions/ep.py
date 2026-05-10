@@ -53,9 +53,7 @@ def set_ep_num_local_experts(n: int) -> None:
 
 def get_ep_num_local_experts() -> int:
     if _ep_num_local_experts <= 0:
-        raise RuntimeError(
-            "ep_num_local_experts has not been set. Did you call ep_bootstrap()?"
-        )
+        raise RuntimeError("ep_num_local_experts has not been set. Did you call ep_bootstrap()?")
     return _ep_num_local_experts
 
 
@@ -75,9 +73,9 @@ class EpPreparePrimitive(BasePrimitive):
     @staticmethod
     def abstract(topk_idx_aval):
         num_local_experts = get_ep_num_local_experts()
-        assert len(topk_idx_aval.shape) >= 2, (
-            f"topk_idx must be at least 2D [..., top_k], got shape {topk_idx_aval.shape}"
-        )
+        assert (
+            len(topk_idx_aval.shape) >= 2
+        ), f"topk_idx must be at least 2D [..., top_k], got shape {topk_idx_aval.shape}"
         top_k = int(topk_idx_aval.shape[-1])
         handle_mem_size = transformer_engine_jax.get_ep_handle_mem_size(top_k)
         token_counts_aval = jax.core.ShapedArray((num_local_experts,), jnp.int32)
@@ -137,9 +135,9 @@ class EpDispatchPrimitive(BasePrimitive):
         handle_mem_aval, topk_idx_aval, tokens_aval, topk_weights_aval, *, recv_capacity, top_k
     ):
         del handle_mem_aval, topk_idx_aval, topk_weights_aval, top_k
-        assert len(tokens_aval.shape) >= 2, (
-            f"tokens must be at least 2D [..., H], got shape {tokens_aval.shape}"
-        )
+        assert (
+            len(tokens_aval.shape) >= 2
+        ), f"tokens must be at least 2D [..., H], got shape {tokens_aval.shape}"
         tok_dtype = dtypes.canonicalize_dtype(tokens_aval.dtype)
         hidden_dim = tokens_aval.shape[-1]
         recv_tokens_aval = jax.core.ShapedArray((recv_capacity, hidden_dim), tok_dtype)
@@ -235,9 +233,9 @@ class EpCombinePrimitive(BasePrimitive):
     @staticmethod
     def abstract(handle_mem_aval, expert_out_aval, *, out_leading_shape):
         del handle_mem_aval
-        assert len(expert_out_aval.shape) == 2, (
-            f"expert_out must be 2D [recv_capacity, H], got shape {expert_out_aval.shape}"
-        )
+        assert (
+            len(expert_out_aval.shape) == 2
+        ), f"expert_out must be 2D [recv_capacity, H], got shape {expert_out_aval.shape}"
         eo_dtype = dtypes.canonicalize_dtype(expert_out_aval.dtype)
         hidden_dim = expert_out_aval.shape[1]
         out_shape = tuple(out_leading_shape) + (hidden_dim,)
@@ -246,7 +244,9 @@ class EpCombinePrimitive(BasePrimitive):
     @staticmethod
     def lowering(ctx, handle_mem, expert_out, *, out_leading_shape):
         return ffi.ffi_lowering(EpCombinePrimitive.name)(
-            ctx, handle_mem, expert_out,
+            ctx,
+            handle_mem,
+            expert_out,
             num_local_tokens=_prod(out_leading_shape),
         )
 
@@ -254,7 +254,9 @@ class EpCombinePrimitive(BasePrimitive):
     def impl(handle_mem, expert_out, out_leading_shape):
         assert EpCombinePrimitive.inner_primitive is not None
         return EpCombinePrimitive.inner_primitive.bind(
-            handle_mem, expert_out, out_leading_shape=out_leading_shape,
+            handle_mem,
+            expert_out,
+            out_leading_shape=out_leading_shape,
         )
 
     @staticmethod
@@ -297,9 +299,9 @@ class EpDispatchBwdPrimitive(BasePrimitive):
     @staticmethod
     def abstract(handle_mem_aval, grad_aval, *, out_leading_shape):
         del handle_mem_aval
-        assert len(grad_aval.shape) == 2, (
-            f"grad must be 2D [recv_capacity, H], got shape {grad_aval.shape}"
-        )
+        assert (
+            len(grad_aval.shape) == 2
+        ), f"grad must be 2D [recv_capacity, H], got shape {grad_aval.shape}"
         g_dtype = dtypes.canonicalize_dtype(grad_aval.dtype)
         hidden_dim = grad_aval.shape[1]
         out_shape = tuple(out_leading_shape) + (hidden_dim,)
@@ -308,7 +310,9 @@ class EpDispatchBwdPrimitive(BasePrimitive):
     @staticmethod
     def lowering(ctx, handle_mem, grad, *, out_leading_shape):
         return ffi.ffi_lowering(EpDispatchBwdPrimitive.name)(
-            ctx, handle_mem, grad,
+            ctx,
+            handle_mem,
+            grad,
             num_local_tokens=_prod(out_leading_shape),
         )
 
@@ -316,7 +320,9 @@ class EpDispatchBwdPrimitive(BasePrimitive):
     def impl(handle_mem, grad, out_leading_shape):
         assert EpDispatchBwdPrimitive.inner_primitive is not None
         return EpDispatchBwdPrimitive.inner_primitive.bind(
-            handle_mem, grad, out_leading_shape=out_leading_shape,
+            handle_mem,
+            grad,
+            out_leading_shape=out_leading_shape,
         )
 
     @staticmethod
@@ -359,9 +365,9 @@ class EpCombineBwdPrimitive(BasePrimitive):
     @staticmethod
     def abstract(handle_mem_aval, grad_aval, *, recv_capacity):
         del handle_mem_aval
-        assert len(grad_aval.shape) >= 2, (
-            f"grad must be at least 2D [..., H], got shape {grad_aval.shape}"
-        )
+        assert (
+            len(grad_aval.shape) >= 2
+        ), f"grad must be at least 2D [..., H], got shape {grad_aval.shape}"
         g_dtype = dtypes.canonicalize_dtype(grad_aval.dtype)
         hidden_dim = grad_aval.shape[-1]
         return jax.core.ShapedArray((recv_capacity, hidden_dim), g_dtype)
@@ -369,14 +375,19 @@ class EpCombineBwdPrimitive(BasePrimitive):
     @staticmethod
     def lowering(ctx, handle_mem, grad, *, recv_capacity):
         return ffi.ffi_lowering(EpCombineBwdPrimitive.name)(
-            ctx, handle_mem, grad, recv_capacity=recv_capacity,
+            ctx,
+            handle_mem,
+            grad,
+            recv_capacity=recv_capacity,
         )
 
     @staticmethod
     def impl(handle_mem, grad, recv_capacity):
         assert EpCombineBwdPrimitive.inner_primitive is not None
         return EpCombineBwdPrimitive.inner_primitive.bind(
-            handle_mem, grad, recv_capacity=recv_capacity,
+            handle_mem,
+            grad,
+            recv_capacity=recv_capacity,
         )
 
     @staticmethod
@@ -420,8 +431,12 @@ def ep_dispatch_fwd(handle_mem, topk_idx, tokens, topk_weights, recv_capacity, t
     Returns (recv_tokens [recv_capacity, H], recv_topk_weights [recv_capacity] f32).
     """
     return EpDispatchPrimitive.outer_primitive.bind(
-        handle_mem, topk_idx, tokens, topk_weights,
-        recv_capacity=recv_capacity, top_k=top_k,
+        handle_mem,
+        topk_idx,
+        tokens,
+        topk_weights,
+        recv_capacity=recv_capacity,
+        top_k=top_k,
     )
 
 
@@ -438,7 +453,9 @@ def ep_combine_fwd(handle_mem, expert_out, num_local_tokens):
     """
     out_leading = _normalize_leading_shape(num_local_tokens)
     return EpCombinePrimitive.outer_primitive.bind(
-        handle_mem, expert_out, out_leading_shape=out_leading,
+        handle_mem,
+        expert_out,
+        out_leading_shape=out_leading,
     )
 
 
@@ -450,7 +467,9 @@ def ep_dispatch_bwd(handle_mem, grad, num_local_tokens):
     """
     out_leading = _normalize_leading_shape(num_local_tokens)
     return EpDispatchBwdPrimitive.outer_primitive.bind(
-        handle_mem, grad, out_leading_shape=out_leading,
+        handle_mem,
+        grad,
+        out_leading_shape=out_leading,
     )
 
 
@@ -460,5 +479,7 @@ def ep_combine_bwd(handle_mem, grad, recv_capacity):
     Returns grad_expert_out [recv_capacity, H].
     """
     return EpCombineBwdPrimitive.outer_primitive.bind(
-        handle_mem, grad, recv_capacity=recv_capacity,
+        handle_mem,
+        grad,
+        recv_capacity=recv_capacity,
     )

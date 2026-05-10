@@ -15,6 +15,7 @@ import sys
 import unittest
 
 import jax
+
 # int64 is required: NCCL EP reads topk_idx as kInt64 through the FFI.
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
@@ -86,9 +87,7 @@ class TestEPPipeline(unittest.TestCase):
         tokens_np = rng_rank.standard_normal((T, H), dtype=np.float32) * 0.5
         tokens = jnp.asarray(tokens_np, dtype=jnp.bfloat16)
 
-        topk_idx_np = make_routing(
-            self.rank, T, K, self.args.num_experts, self.num_local_experts
-        )
+        topk_idx_np = make_routing(self.rank, T, K, self.args.num_experts, self.num_local_experts)
         topk_idx = jnp.asarray(topk_idx_np)
 
         # Equal weights: simplest case where reference math is straightforward.
@@ -112,28 +111,25 @@ class TestEPPipeline(unittest.TestCase):
         # Local experts only — slice the global kernel along the expert axis.
         E_local = self.num_local_experts
         local_kernels = jax.lax.dynamic_slice(
-            kernels, (self.rank * E_local, 0, 0),
-            (E_local, kernels.shape[1], kernels.shape[2])
+            kernels, (self.rank * E_local, 0, 0), (E_local, kernels.shape[1], kernels.shape[2])
         )
         expert_out = _batched_expert_linear(recv_tokens, local_kernels, E_local)
-        result = ep_combine(
-            handle_mem, token_counts, expert_out, recv_topk_weights, T
-        )
+        result = ep_combine(handle_mem, token_counts, expert_out, recv_topk_weights, T)
         return result
 
     # ── Test 1: forward numerics ──────────────────────────────────────────────
 
     def test_moe_fwd(self):
-        tokens_np, tokens, topk_idx_np, topk_idx, w_np, topk_weights, kernels_np = self._make_inputs()
+        tokens_np, tokens, topk_idx_np, topk_idx, w_np, topk_weights, kernels_np = (
+            self._make_inputs()
+        )
         kernels = jnp.asarray(kernels_np, dtype=jnp.bfloat16)
 
         out = self._moe_step(tokens, topk_idx, topk_weights, kernels)
         out.block_until_ready()
 
         # AllGather inputs across processes for the reference.
-        gathered_tokens = np.asarray(
-            jmu.process_allgather(tokens.astype(jnp.float32))
-        )  # [W, T, H]
+        gathered_tokens = np.asarray(jmu.process_allgather(tokens.astype(jnp.float32)))  # [W, T, H]
         gathered_idx = np.asarray(jmu.process_allgather(topk_idx))  # [W, T, K]
         gathered_w = np.asarray(jmu.process_allgather(topk_weights))  # [W, T, K]
 
@@ -144,7 +140,8 @@ class TestEPPipeline(unittest.TestCase):
 
         if self.args.enable_result_check:
             assert_allclose(
-                np.asarray(out.astype(jnp.float32)), ref_out_self,
+                np.asarray(out.astype(jnp.float32)),
+                ref_out_self,
                 dtype=jnp.bfloat16,
                 err_msg=f"rank {self.rank}: MoE forward mismatch",
             )
@@ -152,7 +149,9 @@ class TestEPPipeline(unittest.TestCase):
     # ── Test 2: forward + backward through tokens ─────────────────────────────
 
     def test_moe_fwd_bwd(self):
-        tokens_np, tokens, topk_idx_np, topk_idx, w_np, topk_weights, kernels_np = self._make_inputs()
+        tokens_np, tokens, topk_idx_np, topk_idx, w_np, topk_weights, kernels_np = (
+            self._make_inputs()
+        )
         kernels = jnp.asarray(kernels_np, dtype=jnp.bfloat16)
 
         def loss_fn(toks):
@@ -183,7 +182,8 @@ class TestEPPipeline(unittest.TestCase):
 
         if self.args.enable_result_check:
             assert_allclose(
-                np.asarray(grad_tokens.astype(jnp.float32)), ref_grad,
+                np.asarray(grad_tokens.astype(jnp.float32)),
+                ref_grad,
                 dtype=jnp.bfloat16,
                 err_msg=f"rank {self.rank}: grad_tokens mismatch",
             )

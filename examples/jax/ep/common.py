@@ -76,15 +76,15 @@ def _initialize_distributed(args):
         process_id=args.process_id,
         local_device_ids=device_ids,
     )
-    assert jax.local_device_count() == 1, (
-        f"EP example requires 1 GPU per process, found {jax.local_device_count()}"
-    )
+    assert (
+        jax.local_device_count() == 1
+    ), f"EP example requires 1 GPU per process, found {jax.local_device_count()}"
 
     # EP communicator. Uses world_size == ep_size (single EP group spans all ranks).
     ep_size = args.num_processes
-    assert args.num_experts % ep_size == 0, (
-        f"num_experts ({args.num_experts}) must be divisible by ep_size ({ep_size})"
-    )
+    assert (
+        args.num_experts % ep_size == 0
+    ), f"num_experts ({args.num_experts}) must be divisible by ep_size ({ep_size})"
     # Worst-case recv: every source rank sends its full quota to this rank.
     recv_capacity = ep_size * args.num_tokens
     args.recv_capacity = recv_capacity
@@ -153,7 +153,9 @@ def ep_parser(description="EP MoE pipeline example"):
     p.add_argument("--hidden-dim", type=int, default=32)
     p.add_argument("--hidden-out", type=int, default=32)
     p.add_argument(
-        "--num-experts", type=int, default=None,
+        "--num-experts",
+        type=int,
+        default=None,
         help="Defaults to num_processes (one expert per rank).",
     )
     p.add_argument("--enable-result-check", action="store_true", default=True)

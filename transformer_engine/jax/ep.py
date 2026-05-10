@@ -24,8 +24,15 @@ __all__ = [
 # ── Bootstrap ────────────────────────────────────────────────────────────────
 
 
-def ep_bootstrap(world_size, rank, ep_size, num_experts, max_tokens_per_rank,
-                 max_recv_tokens_per_rank, hidden_dim):
+def ep_bootstrap(
+    world_size,
+    rank,
+    ep_size,
+    num_experts,
+    max_tokens_per_rank,
+    max_recv_tokens_per_rank,
+    hidden_dim,
+):
     """Initialize the EP communicator.
 
     Generates a ncclUniqueId on rank 0, broadcasts to all ranks via
@@ -53,6 +60,7 @@ def ep_bootstrap(world_size, rank, ep_size, num_experts, max_tokens_per_rank,
     if rank == 0:
         try:
             from nccl import get_unique_id
+
             uid_bytes = bytes(get_unique_id())[:UID_SIZE]
         except ImportError:
             libnccl = ctypes.CDLL("libnccl.so.2", use_errno=True)
@@ -78,9 +86,9 @@ def ep_bootstrap(world_size, rank, ep_size, num_experts, max_tokens_per_rank,
         hidden_dim,
     )
 
-    assert num_experts % ep_size == 0, (
-        f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size})"
-    )
+    assert (
+        num_experts % ep_size == 0
+    ), f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size})"
     tex.ep.set_ep_num_local_experts(num_experts // ep_size)
 
 
@@ -205,8 +213,9 @@ def ep_combine(handle_mem, token_counts, expert_out, recv_topk_weights, num_loca
     Returns:
         result: [..., H] combined output (shape determined by num_local_tokens).
     """
-    return _combine_fwd(handle_mem, token_counts, expert_out, recv_topk_weights,
-                        num_local_tokens)[0]
+    return _combine_fwd(handle_mem, token_counts, expert_out, recv_topk_weights, num_local_tokens)[
+        0
+    ]
 
 
 def _make_valid_mask(token_counts, recv_capacity, dtype):
@@ -238,10 +247,14 @@ def _combine_bwd(_, res, g_result):
     #   grad_w (per-slot) = sum_H(grad_weighted * expert_out * mask)
     grad_expert_out = grad_weighted * w * mask
     grad_recv_topk_weights = (
-        grad_weighted.astype(jnp.float32)
-        * expert_out.astype(jnp.float32)
-        * mask.astype(jnp.float32)
-    ).sum(axis=-1).astype(recv_topk_weights.dtype)  # [recv_capacity]
+        (
+            grad_weighted.astype(jnp.float32)
+            * expert_out.astype(jnp.float32)
+            * mask.astype(jnp.float32)
+        )
+        .sum(axis=-1)
+        .astype(recv_topk_weights.dtype)
+    )  # [recv_capacity]
     grad_handle_mem = jnp.zeros_like(handle_mem)
     grad_token_counts = jnp.zeros_like(token_counts)
     return (grad_handle_mem, grad_token_counts, grad_expert_out, grad_recv_topk_weights)

@@ -20,6 +20,7 @@ import sys
 import unittest
 
 import jax
+
 # Enable int64 so topk_idx survives as int64 through JAX (NCCL EP reads kInt64).
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
@@ -135,10 +136,14 @@ class TestEP(unittest.TestCase):
         # Verify sane bounds: ≥ unpadded routing total, ≤ recv_capacity.
         unpadded = int(self._expected_token_counts()[0])
         got = int(np.asarray(token_counts)[0])
-        self.assertGreaterEqual(got, unpadded,
-                                f"rank {self.rank}: padded count {got} < unpadded {unpadded}")
-        self.assertLessEqual(got, self.recv_capacity,
-                             f"rank {self.rank}: padded count {got} > recv_capacity {self.recv_capacity}")
+        self.assertGreaterEqual(
+            got, unpadded, f"rank {self.rank}: padded count {got} < unpadded {unpadded}"
+        )
+        self.assertLessEqual(
+            got,
+            self.recv_capacity,
+            f"rank {self.rank}: padded count {got} > recv_capacity {self.recv_capacity}",
+        )
         self.assertGreater(int(handle_mem.shape[0]), 0)
         self.assertEqual(handle_mem.dtype, jnp.uint8)
 
@@ -149,9 +154,7 @@ class TestEP(unittest.TestCase):
         topk_weights = self._make_topk_weights()
         tokens = self._make_tokens()
 
-        recv_tokens, _, _, _ = ep_dispatch(
-            topk_idx, tokens, topk_weights, self.recv_capacity
-        )
+        recv_tokens, _, _, _ = ep_dispatch(topk_idx, tokens, topk_weights, self.recv_capacity)
         recv_tokens.block_until_ready()
 
         # NCCL EP pads slots; encoding is 1-indexed so 0 = padding/empty.
@@ -164,8 +167,9 @@ class TestEP(unittest.TestCase):
                 decoded.append(d)
         decoded.sort()
         expected = sorted(self._expected_recv_pairs())
-        self.assertEqual(decoded, expected,
-                         f"rank {self.rank}: decoded recv slots != expected routing")
+        self.assertEqual(
+            decoded, expected, f"rank {self.rank}: decoded recv slots != expected routing"
+        )
         self.assertEqual(recv_tokens.shape, (self.recv_capacity, self.hidden_dim))
 
     # ── Test 3: ep_dispatch recv_topk_weights numeric ─────────────────────────
@@ -191,9 +195,12 @@ class TestEP(unittest.TestCase):
                 continue  # padding slot
             if np.isclose(rw[i], expected_w, atol=1e-5):
                 n_match += 1
-        self.assertEqual(n_match, n_expected,
-                         f"rank {self.rank}: filled rows with weight {expected_w} "
-                         f"= {n_match}, expected {n_expected}")
+        self.assertEqual(
+            n_match,
+            n_expected,
+            f"rank {self.rank}: filled rows with weight {expected_w} "
+            f"= {n_match}, expected {n_expected}",
+        )
 
     # ── Test 4: combine round-trip with identity expert ───────────────────────
 
@@ -214,8 +221,10 @@ class TestEP(unittest.TestCase):
 
         expected = np.asarray(tokens.astype(jnp.float32)) * float(self.top_k)
         np.testing.assert_allclose(
-            np.asarray(result.astype(jnp.float32)), expected,
-            atol=2e-2, rtol=2e-2,
+            np.asarray(result.astype(jnp.float32)),
+            expected,
+            atol=2e-2,
+            rtol=2e-2,
             err_msg=f"rank {self.rank}: identity round-trip mismatch",
         )
 
@@ -235,8 +244,7 @@ class TestEP(unittest.TestCase):
             return tex.ep_combine_fwd(hm, expert_out, num_local_tokens)
 
         def _combine_raw_fwd(hm, expert_out, num_local_tokens):
-            return tex.ep_combine_fwd(hm, expert_out, num_local_tokens), \
-                   (hm, expert_out.shape[0])
+            return tex.ep_combine_fwd(hm, expert_out, num_local_tokens), (hm, expert_out.shape[0])
 
         def _combine_raw_bwd(num_local_tokens, res, g):
             del num_local_tokens
@@ -251,9 +259,7 @@ class TestEP(unittest.TestCase):
         tokens = self._make_tokens()
 
         def loss_fn(toks):
-            recv_t, _, hm, _ = ep_dispatch(
-                topk_idx, toks, topk_weights, self.recv_capacity
-            )
+            recv_t, _, hm, _ = ep_dispatch(topk_idx, toks, topk_weights, self.recv_capacity)
             res = _combine_raw(hm, recv_t, self.num_tokens)
             return 0.5 * (res.astype(jnp.float32) ** 2).sum()
 
@@ -263,11 +269,12 @@ class TestEP(unittest.TestCase):
         scale = float(self.top_k) ** 2
         expected = np.asarray(tokens.astype(jnp.float32)) * scale
         np.testing.assert_allclose(
-            np.asarray(grad_tokens.astype(jnp.float32)), expected,
-            atol=5e-2, rtol=5e-2,
+            np.asarray(grad_tokens.astype(jnp.float32)),
+            expected,
+            atol=5e-2,
+            rtol=5e-2,
             err_msg=f"rank {self.rank}: full fwd+bwd grad mismatch",
         )
-
 
     # ── Test 6: router gradient via public ep_combine ─────────────────────────
 
@@ -290,15 +297,11 @@ class TestEP(unittest.TestCase):
         tokens = self._make_tokens()
         # Learnable per-token gate; use distinct values so we'd notice if grads
         # collapse to a constant.
-        g = jnp.asarray(
-            np.linspace(0.7, 1.3, self.num_tokens, dtype=np.float32)
-        )
+        g = jnp.asarray(np.linspace(0.7, 1.3, self.num_tokens, dtype=np.float32))
 
         def loss_fn(g_):
             scaled = base_weights * g_[:, None]
-            recv_t, recv_w, hm, tc = ep_dispatch(
-                topk_idx, tokens, scaled, self.recv_capacity
-            )
+            recv_t, recv_w, hm, tc = ep_dispatch(topk_idx, tokens, scaled, self.recv_capacity)
             # Identity expert: feed recv_tokens straight back into combine.
             out = ep_combine(hm, tc, recv_t, recv_w, self.num_tokens)
             return 0.5 * (out.astype(jnp.float32) ** 2).sum()
@@ -314,12 +317,14 @@ class TestEP(unittest.TestCase):
         expected = np.asarray(g) * sq_per_token
 
         np.testing.assert_allclose(
-            np.asarray(grad_g.astype(jnp.float32)), expected,
-            atol=5e-2, rtol=5e-2,
+            np.asarray(grad_g.astype(jnp.float32)),
+            expected,
+            atol=5e-2,
+            rtol=5e-2,
             err_msg=(
                 f"rank {self.rank}: router grad mismatch. If this fails with "
-                f"all-zero grad_g, the topk_weights cotangent is being dropped "
-                f"in _dispatch_bwd or _combine_bwd."
+                "all-zero grad_g, the topk_weights cotangent is being dropped "
+                "in _dispatch_bwd or _combine_bwd."
             ),
         )
 
@@ -329,14 +334,14 @@ class TestEP(unittest.TestCase):
         """3D variant of test_full_fwd_bwd: tokens are [B, S, H] all the way
         through ep_dispatch / ep_combine, never reshaped on the JAX side. Verifies
         the FFI flattens leading dims internally (no AllGather injected by XLA)."""
-        B, S = 2, 4   # B*S == self.num_tokens (=8)
+        B, S = 2, 4  # B*S == self.num_tokens (=8)
         assert B * S == self.num_tokens
 
         # Reshape inputs to 3D — but only at the test boundary; the primitives
         # see them as N-D throughout.
-        topk_idx_2d = jnp.asarray(self._routing(self.rank))             # [T, K]
-        topk_w_2d = self._make_topk_weights()                            # [T, K]
-        tokens_2d = self._make_tokens()                                  # [T, H]
+        topk_idx_2d = jnp.asarray(self._routing(self.rank))  # [T, K]
+        topk_w_2d = self._make_topk_weights()  # [T, K]
+        tokens_2d = self._make_tokens()  # [T, H]
 
         topk_idx_3d = topk_idx_2d.reshape(B, S, self.top_k)
         topk_w_3d = topk_w_2d.reshape(B, S, self.top_k)
