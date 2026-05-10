@@ -429,6 +429,19 @@ this. Verified, no action.
 
 ## Steps & status
 
+Commit log (this session):
+
+```
+9fa225e2 docs: add SPRINT5.md (review pass after SPRINT4 churn)
+4a672266 ep: clarify EpConfig field intent and partition rule placeholders
+fae49690 ep: cross-check EpDispatchConfig.top_k attr against topk_idx last dim
+74f3f16b ep: document N-D dispatch shapes and 2D combine asymmetry in public API
+346c5fa1 ep: rewrite stale ep_backend block comments to match persistent-handle design
+0a4d0517 ep: scale recv_capacity by top_k in MoE example for NLE>1 safety
+aedf2768 ep: drop unused set_ep_num_local_experts back-compat shim
+```
+
+
 ### [x] Step 1: Remove `set_ep_num_local_experts` shim (item #1)
 
 Files: `transformer_engine/jax/cpp_extensions/ep.py` — drop from
