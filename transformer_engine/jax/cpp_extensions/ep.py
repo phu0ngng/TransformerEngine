@@ -3,6 +3,8 @@
 # See LICENSE for license information.
 """JAX/TE custom ops for Expert Parallelism (EP)"""
 
+from dataclasses import dataclass
+
 import jax
 import jax.numpy as jnp
 from jax import dtypes, ffi
@@ -12,6 +14,9 @@ import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
 
 __all__ = [
+    "EpConfig",
+    "set_ep_config",
+    "get_ep_config",
     "set_ep_num_local_experts",
     "get_ep_num_local_experts",
     "ep_prepare",
@@ -27,34 +32,80 @@ __all__ = [
 ]
 
 
-# ── Module-level cache of num_local_experts ─────────────────────────────────
+# ── Module-level EP config ──────────────────────────────────────────────────
 #
-# `num_local_experts` is no longer threaded through `ep_prepare` — it is
-# already cached on the C++ side at nvte_ep_initialize() time (derived from
-# group_config.num_experts / group_config.ep_size). The high-level
-# ep_bootstrap() in transformer_engine.jax.ep stores it here so the
-# JAX abstract-eval rule can use it to size the token_counts output without
-# adding a parameter back to the primitive.
+# `EpConfig` mirrors the bootstrap surface (NVTEEpGroupConfig + world/rank).
+# The C++ `EPBackend` is the runtime source of truth; this Python copy is
+# read by JAX abstract-eval / sharding helpers that need the static shape
+# metadata (`num_local_experts` for token_counts, `ep_size` for future
+# token_counts reshape→[ep_size, nle] sharding patterns, etc.).
+#
+# TE-EP supports a single EP group per process — this config, the C++
+# Meyers singleton, and `initialize_ep_communicator` all share the same
+# single-group assumption. Calling `ep_bootstrap` twice in the same
+# process is not supported.
 
-_ep_num_local_experts: int = 0
+
+@dataclass(frozen=True)
+class EpConfig:
+    """Immutable Python-side view of the EP bootstrap config."""
+
+    world_size: int
+    rank: int
+    ep_size: int
+    num_experts: int
+    num_local_experts: int
+    max_tokens_per_rank: int
+    max_recv_tokens_per_rank: int
+    hidden_dim: int
+
+
+_ep_config: EpConfig = None
+
+
+def set_ep_config(config: EpConfig) -> None:
+    """Cache the EP config for use by abstract-eval / sharding helpers.
+
+    Called once by `ep_bootstrap`. Must not be called twice — see
+    `EpConfig` docstring for the single-group-per-process limitation.
+    """
+    global _ep_config
+    _ep_config = config
+
+
+def get_ep_config() -> EpConfig:
+    if _ep_config is None:
+        raise RuntimeError("EpConfig has not been set. Did you call ep_bootstrap()?")
+    return _ep_config
 
 
 def set_ep_num_local_experts(n: int) -> None:
-    """Cache the per-rank local-expert count for use by EpPreparePrimitive.abstract.
+    """Back-compat shim — prefer `set_ep_config(EpConfig(...))`.
 
-    NOTE: TE-EP supports a single EP group per process. This cache, the C++
-    `EPBackend` Meyers singleton, and `transformer_engine_jax.initialize_ep_communicator`
-    all share the same single-group assumption — calling `ep_bootstrap` twice in
-    the same process is not supported.
+    Constructs a partial `EpConfig` with only `num_local_experts` populated
+    (other fields = 0). Existing call site is `ep_bootstrap`, which now
+    builds the full config — this shim remains so external callers that
+    wrote against the old API don't break.
     """
-    global _ep_num_local_experts
-    _ep_num_local_experts = int(n)
+    set_ep_config(
+        EpConfig(
+            world_size=0,
+            rank=0,
+            ep_size=0,
+            num_experts=0,
+            num_local_experts=int(n),
+            max_tokens_per_rank=0,
+            max_recv_tokens_per_rank=0,
+            hidden_dim=0,
+        )
+    )
 
 
 def get_ep_num_local_experts() -> int:
-    if _ep_num_local_experts <= 0:
+    cfg = _ep_config
+    if cfg is None or cfg.num_local_experts <= 0:
         raise RuntimeError("ep_num_local_experts has not been set. Did you call ep_bootstrap()?")
-    return _ep_num_local_experts
+    return cfg.num_local_experts
 
 
 # ── ep_prepare ──────────────────────────────────────────────────────────────────

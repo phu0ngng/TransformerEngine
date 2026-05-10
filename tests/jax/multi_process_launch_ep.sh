@@ -4,10 +4,7 @@
 
 #!/bin/bash
 
-# EP suites: NLE=1 (test_multi_process_ep.py) and NLE>1 (test_multi_process_ep_nle2.py).
-# Each runs in its own process group because EPBackend is a per-process singleton.
-SCRIPT_NAMES_DEFAULT="test_multi_process_ep.py test_multi_process_ep_nle2.py"
-SCRIPT_NAMES="${SCRIPT_NAMES:-${SCRIPT_NAMES_DEFAULT}}"
+SCRIPT_NAMES="${SCRIPT_NAMES:-test_multi_process_ep.py}"
 TEST_TIMEOUT_S="${TEST_TIMEOUT_S:-180}"
 
 

@@ -41,8 +41,8 @@ def ep_bootstrap(
 
     Limitation: TE-EP currently supports ONE EP group per process. The
     underlying C++ `EPBackend` is a Meyers singleton and the JAX-side
-    `set_ep_num_local_experts` cache is process-global. Multi-EP-group
-    workflows in a single process are NOT supported today.
+    `EpConfig` cache (set via `set_ep_config`) is process-global.
+    Multi-EP-group workflows in a single process are NOT supported today.
 
     Args:
         world_size:                Total number of ranks (= jax.process_count()).
@@ -89,7 +89,18 @@ def ep_bootstrap(
     assert (
         num_experts % ep_size == 0
     ), f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size})"
-    tex.ep.set_ep_num_local_experts(num_experts // ep_size)
+    tex.ep.set_ep_config(
+        tex.ep.EpConfig(
+            world_size=world_size,
+            rank=rank,
+            ep_size=ep_size,
+            num_experts=num_experts,
+            num_local_experts=num_experts // ep_size,
+            max_tokens_per_rank=max_tokens_per_rank,
+            max_recv_tokens_per_rank=max_recv_tokens_per_rank,
+            hidden_dim=hidden_dim,
+        )
+    )
 
 
 # ── ep_prepare (low-level, no custom_vjp) ────────────────────────────────────

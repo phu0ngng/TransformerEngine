@@ -3,6 +3,12 @@
 # See LICENSE for license information.
 """Multi-process EP tests with deterministic numeric assertions.
 
+Default config exercises `num_local_experts == 2` (num_experts =
+num_procs * 2) — the multi-local-expert recv layout where token_counts
+is a vector and the combine mask must cover every filled slot across
+every local expert. This is the regression-relevant configuration; the
+single-local-expert case is a degenerate sub-set.
+
 Launched via tests/jax/multi_process_launch_ep.sh (one process per GPU,
 JAX coordinator on 127.0.0.1:12345).
 
@@ -10,10 +16,10 @@ Routing recipe is fully deterministic so every non-padded recv slot is
 addressable as (src_rank, src_t, k) and every output value is computable
 locally on each rank — no process_allgather needed for the reference.
 
-  topk_idx[t, k]     = (rank + k) % num_experts   # round-robin top-k experts
+  topk_idx[t, k]     = (src_rank * NLE + t * top_k + k) % num_experts
   topk_weights[t, k] = 1.0 / top_k
 
-  tokens[t, h]       = encode(rank, t, h) = rank * RANK_STRIDE + t * T_STRIDE + h
+  tokens[t, h]       = encode(rank, t, h) = rank * T_STRIDE + t + 1
 """
 
 import sys
@@ -57,18 +63,17 @@ class TestEP(unittest.TestCase):
     num_tokens: int = 8
     top_k: int = 2
     hidden_dim: int = 32
+    num_local_experts: int = 2  # NLE=2 is the default regression config.
 
     @classmethod
     def setUpClass(cls):
         cls.num_procs = jax.process_count()
         cls.rank = jax.process_index()
         cls.ep_size = cls.num_procs
-        cls.num_experts = cls.num_procs
-        cls.num_local_experts = cls.num_experts // cls.ep_size  # = 1
+        cls.num_experts = cls.num_procs * cls.num_local_experts
         cls.max_tokens_per_rank = cls.num_tokens
-        # NCCL EP recv layout: each rank may receive up to ep_size * max_tokens_per_rank
-        # slots (worst case all sources route everything to this rank).
-        cls.recv_capacity = cls.num_procs * cls.num_tokens
+        # Worst case: every src token's full top_k fan-out lands on this rank.
+        cls.recv_capacity = cls.num_procs * cls.num_tokens * cls.top_k
 
         ep_bootstrap(
             world_size=cls.num_procs,
@@ -103,28 +108,32 @@ class TestEP(unittest.TestCase):
         return jnp.asarray(np_tok, dtype=jnp.bfloat16)
 
     def _expected_token_counts(self):
-        """Replay routing: how many tokens this rank receives per local expert."""
-        my_expert = self.rank  # 1 expert per rank → expert_id == rank
-        K, E, NLE = self.top_k, self.num_experts, self.num_local_experts
-        cnt = 0
+        """Per-local-expert unpadded counts at this rank (length NLE)."""
+        base = self.rank * self.num_local_experts
+        K = self.top_k
+        cnt = np.zeros(self.num_local_experts, dtype=np.int32)
         for src in range(self.num_procs):
+            idx = self._routing(src)
             for t in range(self.num_tokens):
                 for k in range(K):
-                    if (src * NLE + t * K + k) % E == my_expert:
-                        cnt += 1
-        return np.array([cnt], dtype=np.int32)
+                    e = int(idx[t, k])
+                    if base <= e < base + self.num_local_experts:
+                        cnt[e - base] += 1
+        return cnt
 
     def _expected_recv_pairs(self):
         """Multiset of (src_rank, src_t) that should appear in recv_tokens."""
-        my_expert = self.rank
-        K, E, NLE = self.top_k, self.num_experts, self.num_local_experts
+        base = self.rank * self.num_local_experts
+        K = self.top_k
         pairs = []
         for src in range(self.num_procs):
+            idx = self._routing(src)
             for t in range(self.num_tokens):
                 for k in range(K):
-                    if (src * NLE + t * K + k) % E == my_expert:
+                    e = int(idx[t, k])
+                    if base <= e < base + self.num_local_experts:
                         pairs.append((src, t))
-        return pairs  # length == _expected_token_counts()[0]
+        return pairs  # length == sum(_expected_token_counts())
 
     # ── Test 1: ep_prepare token_counts numeric ───────────────────────────────
 
@@ -132,18 +141,21 @@ class TestEP(unittest.TestCase):
         topk_idx = jnp.asarray(self._routing(self.rank))
         token_counts, handle_mem = ep_prepare(topk_idx)
         token_counts.block_until_ready()
-        # token_counts are PADDED (sum equals dispatch output slot count).
-        # Verify sane bounds: ≥ unpadded routing total, ≤ recv_capacity.
-        unpadded = int(self._expected_token_counts()[0])
-        got = int(np.asarray(token_counts)[0])
-        self.assertGreaterEqual(
-            got, unpadded, f"rank {self.rank}: padded count {got} < unpadded {unpadded}"
-        )
-        self.assertLessEqual(
-            got,
-            self.recv_capacity,
-            f"rank {self.rank}: padded count {got} > recv_capacity {self.recv_capacity}",
-        )
+
+        self.assertEqual(token_counts.shape, (self.num_local_experts,))
+        self.assertEqual(token_counts.dtype, jnp.int32)
+
+        unpadded = self._expected_token_counts()
+        got = np.asarray(token_counts)
+        # Counts may be padded by NCCL EP, but each must be ≥ unpadded and the
+        # sum must fit recv_capacity.
+        for e in range(self.num_local_experts):
+            self.assertGreaterEqual(
+                int(got[e]),
+                int(unpadded[e]),
+                f"rank {self.rank} expert {e}: padded {got[e]} < unpadded {unpadded[e]}",
+            )
+        self.assertLessEqual(int(got.sum()), self.recv_capacity)
         self.assertGreater(int(handle_mem.shape[0]), 0)
         self.assertEqual(handle_mem.dtype, jnp.uint8)
 
@@ -228,7 +240,38 @@ class TestEP(unittest.TestCase):
             err_msg=f"rank {self.rank}: identity round-trip mismatch",
         )
 
-    # ── Test 5: full forward + backward ────────────────────────────────────────
+    # ── Test 5: public ep_combine masked round-trip ──────────────────────────
+
+    def test_public_combine_masked_round_trip(self):
+        """Exercises the JAX-side hadamard mask under NLE>1.
+
+        Public ep_combine multiplies expert_out by recv_topk_weights * mask
+        before scattering. With identity expert, uniform weights = 1/top_k,
+        and a correct mask zeroing the padded tail, the combined output
+        equals tokens (top_k slots × 1/top_k weight × top_k summation = 1).
+        """
+        topk_idx = jnp.asarray(self._routing(self.rank))
+        topk_weights = self._make_topk_weights()
+        tokens = self._make_tokens()
+
+        recv_t, recv_w, hm, tc = ep_dispatch(topk_idx, tokens, topk_weights, self.recv_capacity)
+        out = ep_combine(hm, tc, recv_t, recv_w, self.num_tokens)
+        out.block_until_ready()
+
+        expected = np.asarray(tokens.astype(jnp.float32))
+        np.testing.assert_allclose(
+            np.asarray(out.astype(jnp.float32)),
+            expected,
+            atol=5e-2,
+            rtol=5e-2,
+            err_msg=(
+                f"rank {self.rank}: public combine mismatch. If this fails "
+                "with garbage values in the output, the mask in "
+                "_make_valid_mask is failing to zero a padded slot."
+            ),
+        )
+
+    # ── Test 6: full forward + backward via low-level combine ─────────────────
 
     def test_full_fwd_bwd(self):
         """Unweighted-combine round-trip: res = top_k * tokens.
@@ -276,7 +319,7 @@ class TestEP(unittest.TestCase):
             err_msg=f"rank {self.rank}: full fwd+bwd grad mismatch",
         )
 
-    # ── Test 6: router gradient via public ep_combine ─────────────────────────
+    # ── Test 7: router gradient via public ep_combine ─────────────────────────
 
     def test_router_grad_through_combine(self):
         """Router-grad regression: gradient flows through `topk_weights`.
@@ -309,9 +352,6 @@ class TestEP(unittest.TestCase):
         _, grad_g = jax.value_and_grad(loss_fn)(g)
         grad_g.block_until_ready()
 
-        # Analytic reference: out[t] = g[t] * tokens[t] (after sum over top_k of
-        # the unweighted combine, with each per-slot weight = g[t] * 1/top_k and
-        # top_k slots per source token, giving net factor g[t]).
         toks_f32 = np.asarray(tokens.astype(jnp.float32))
         sq_per_token = (toks_f32 * toks_f32).sum(axis=-1)  # [T]
         expected = np.asarray(g) * sq_per_token
@@ -328,7 +368,7 @@ class TestEP(unittest.TestCase):
             ),
         )
 
-    # ── Test 7: 3D fwd/bwd preserves [B, S, H] shape end-to-end ───────────────
+    # ── Test 8: 3D fwd/bwd preserves [B, S, H] shape end-to-end ───────────────
 
     def test_full_fwd_bwd_3d(self):
         """3D variant of test_full_fwd_bwd: tokens are [B, S, H] all the way
@@ -337,8 +377,6 @@ class TestEP(unittest.TestCase):
         B, S = 2, 4  # B*S == self.num_tokens (=8)
         assert B * S == self.num_tokens
 
-        # Reshape inputs to 3D — but only at the test boundary; the primitives
-        # see them as N-D throughout.
         topk_idx_2d = jnp.asarray(self._routing(self.rank))  # [T, K]
         topk_w_2d = self._make_topk_weights()  # [T, K]
         tokens_2d = self._make_tokens()  # [T, H]
