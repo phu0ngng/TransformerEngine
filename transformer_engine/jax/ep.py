@@ -310,9 +310,9 @@ def _combine_bwd(_, res, g_result):
         .sum(axis=-1)
         .astype(recv_topk_weights.dtype)
     )  # [recv_capacity]
-    grad_handle_mem = jnp.zeros_like(handle_mem)
-    grad_token_counts = jnp.zeros_like(token_counts)
-    return (grad_handle_mem, grad_token_counts, grad_expert_out, grad_recv_topk_weights)
+    # handle_mem and token_counts are non-diff plumbing; return None so JAX
+    # skips emitting zero cotangents for them.
+    return (None, None, grad_expert_out, grad_recv_topk_weights)
 
 
 ep_combine.defvjp(_combine_fwd, _combine_bwd)

@@ -134,18 +134,15 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
   auto token_dtype = convert_ffi_datatype_to_te_dtype(tokens.element_type());
   auto tokens_ = TensorWrapper(tokens.untyped_data(), tok_shape, token_dtype);
 
-  // topk_weights may be empty (null tensor passed for dense routing)
-  void* topk_w_ptr = topk_weights.element_count() > 0 ? topk_weights.untyped_data() : nullptr;
-  std::vector<size_t> tw_shape;
-  if (topk_weights.element_count() > 0) {
-    auto tw_dims = topk_weights.dimensions();
-    NVTE_CHECK(tw_dims.size() >= 2,
-               "topk_weights must be at least 2D [..., top_k], got ndim=", tw_dims.size());
-    tw_shape = {product(tw_dims, 0, tw_dims.size() - 1), static_cast<size_t>(tw_dims.back())};
-  } else {
-    tw_shape = {0, 0};
-  }
-  auto topk_weights_ = TensorWrapper(topk_w_ptr, tw_shape, DType::kFloat32);
+  // dispatch FWD always carries per-token routing weights; null topk_weights
+  // is reserved for the BWD path (which reuses the C++ dispatch entry through
+  // a different code path).
+  auto tw_dims = topk_weights.dimensions();
+  NVTE_CHECK(tw_dims.size() >= 2,
+             "topk_weights must be at least 2D [..., top_k], got ndim=", tw_dims.size());
+  std::vector<size_t> tw_shape = {product(tw_dims, 0, tw_dims.size() - 1),
+                                  static_cast<size_t>(tw_dims.back())};
+  auto topk_weights_ = TensorWrapper(topk_weights.untyped_data(), tw_shape, DType::kFloat32);
 
   auto recv_dims = recv_tokens->dimensions();
   NVTE_CHECK(recv_dims.size() == 2,
