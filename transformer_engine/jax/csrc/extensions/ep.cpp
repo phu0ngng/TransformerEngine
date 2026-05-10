@@ -117,6 +117,8 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
   auto idx_dims = topk_idx.dimensions();
   NVTE_CHECK(idx_dims.size() >= 2,
              "topk_idx must be at least 2D [..., top_k], got ndim=", idx_dims.size());
+  NVTE_CHECK(static_cast<int64_t>(idx_dims.back()) == config.top_k, "top_k attr (", config.top_k,
+             ") must match topk_idx last dim (", idx_dims.back(), ")");
   std::vector<size_t> idx_shape = {product(idx_dims, 0, idx_dims.size() - 1),
                                    static_cast<size_t>(idx_dims.back())};
   auto topk_idx_ = TensorWrapper(topk_idx.untyped_data(), idx_shape, DType::kInt64);
