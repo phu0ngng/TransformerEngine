@@ -229,7 +229,9 @@ Error_Type EpCombineFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type
 
   auto res_dims = result->dimensions();
   NVTE_CHECK(res_dims.size() >= 2,
-             "result must be at least 2D [..., H], got ndim=", res_dims.size());
+             "result must be at least 2D [..., H] (N-D supported; leading dims flattened "
+             "internally); got ndim=",
+             res_dims.size());
   const size_t res_T_flat = product(res_dims, 0, res_dims.size() - 1);
   NVTE_CHECK(static_cast<int64_t>(res_T_flat) == config.num_local_tokens,
              "result leading-dim product (", res_T_flat, ") must equal num_local_tokens (",
