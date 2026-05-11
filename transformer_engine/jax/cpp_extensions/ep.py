@@ -309,22 +309,19 @@ register_primitive(EpDispatchPrimitive)
 
 
 # ── ep_combine ──────────────────────────────────────────────────────────────────
-# Inputs:  handle_mem [N] uint8, expert_out [recv_capacity, H]   (ALWAYS 2D)
-# Outputs: result [..., H]    (N-D; out_leading_shape passed by caller)
+# Inputs:  handle_mem [ep_size, N] uint8 (sharded on ep_resource),
+#          expert_out [ep_size, recv_capacity_per_rank, H] (sharded on ep_resource)
+# Outputs: result [..., H]    (N-D; out_leading_shape passed by caller; leading
+#                              dim sharded per out_partition_spec / MeshResource)
 #
 # NOTE: `expert_out` here is the *post-hadamard, masked* buffer, i.e. the
-# caller's `expert_out * recv_topk_weights * mask` — NOT raw FFN output.
-# The public-API `ep_combine` in transformer_engine/jax/ep.py applies the
-# hadamard before calling this primitive. NCCL EP combine itself is an
-# unweighted scatter-sum.
+# caller's `expert_out * recv_topk_weights * mask`. The public-API `ep_combine`
+# in transformer_engine/jax/ep.py applies the hadamard before calling this
+# primitive.
 #
-# Asymmetry vs ep_dispatch: dispatch accepts N-D `tokens` and flattens
-# leading dims internally; combine REQUIRES 2D `expert_out`. The recv-side
-# EM-grouped layout is intrinsically 2D and the FFN output keeps that shape.
-#
-# `recv_capacity` is implicit — read from expert_out.shape[0].
-# `out_leading_shape` is a static tuple (e.g. (T,) or (B, S)) that determines
-# the result's leading dims; the C++ FFI flattens it to a single row dim.
+# Per-shard view at the FFI: handle_mem [N], expert_out
+# [recv_capacity_per_rank, H]. `recv_capacity_per_rank` is read from
+# expert_out.shape[1].
 
 
 def _normalize_leading_shape(s):
@@ -338,26 +335,56 @@ def _prod(seq):
     return p
 
 
+def _resolve_out_partition_spec(out_partition_spec, num_leading):
+    """Resolve combine output PartitionSpec axes.
+
+    out_partition_spec: tuple of length num_leading + 1 (leading axes + hidden) or None.
+      When None, leading axis is fsdp_resource if both dp/fsdp set; else whichever
+      one is set; else raises. Trailing leading axes and hidden are replicated.
+    """
+    if out_partition_spec is not None:
+        assert len(out_partition_spec) == num_leading + 1, (
+            f"out_partition_spec length {len(out_partition_spec)} must equal num_leading"
+            f" + 1 ({num_leading + 1})"
+        )
+        return tuple(out_partition_spec)
+    gsr = global_mesh_resource()
+    if gsr.fsdp_resource is not None and gsr.dp_resource is not None:
+        leading = gsr.fsdp_resource
+    elif gsr.fsdp_resource is not None:
+        leading = gsr.fsdp_resource
+    elif gsr.dp_resource is not None:
+        leading = gsr.dp_resource
+    else:
+        raise ValueError(
+            "ep_combine: neither dp_resource nor fsdp_resource is set on the active"
+            " MeshResource; pass out_sharding=... explicitly."
+        )
+    return (leading,) + (None,) * num_leading  # leading axis + replicated rest
+
+
 class EpCombinePrimitive(BasePrimitive):
     name = "te_ep_combine_ffi"
     multiple_results = False
-    impl_static_args = (2,)  # out_leading_shape
+    impl_static_args = (2, 3)  # out_leading_shape, out_partition_spec
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(handle_mem_aval, expert_out_aval, *, out_leading_shape):
-        del handle_mem_aval
-        assert (
-            len(expert_out_aval.shape) == 2
-        ), f"expert_out must be 2D [recv_capacity, H], got shape {expert_out_aval.shape}"
+    def abstract(handle_mem_aval, expert_out_aval, *, out_leading_shape, out_partition_spec):
+        del handle_mem_aval, out_partition_spec
+        assert len(expert_out_aval.shape) == 3, (
+            "expert_out must be 3D [ep_size, recv_capacity_per_rank, H], got shape"
+            f" {expert_out_aval.shape}"
+        )
         eo_dtype = dtypes.canonicalize_dtype(expert_out_aval.dtype)
-        hidden_dim = expert_out_aval.shape[1]
+        hidden_dim = expert_out_aval.shape[2]
         out_shape = tuple(out_leading_shape) + (hidden_dim,)
         return jax.core.ShapedArray(out_shape, eo_dtype)
 
     @staticmethod
-    def lowering(ctx, handle_mem, expert_out, *, out_leading_shape):
+    def lowering(ctx, handle_mem, expert_out, *, out_leading_shape, out_partition_spec):
+        del out_partition_spec
         return ffi.ffi_lowering(EpCombinePrimitive.name)(
             ctx,
             handle_mem,
@@ -366,64 +393,81 @@ class EpCombinePrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def impl(handle_mem, expert_out, out_leading_shape):
+    def impl(handle_mem, expert_out, out_leading_shape, out_partition_spec):
         assert EpCombinePrimitive.inner_primitive is not None
         return EpCombinePrimitive.inner_primitive.bind(
             handle_mem,
             expert_out,
             out_leading_shape=out_leading_shape,
+            out_partition_spec=out_partition_spec,
         )
 
     @staticmethod
-    def batcher(batched_args, batch_dims, *, out_leading_shape):
+    def batcher(batched_args, batch_dims, *, out_leading_shape, out_partition_spec):
         raise NotImplementedError("EpCombinePrimitive does not support vmap")
 
     @staticmethod
-    def partition(out_leading_shape, mesh, arg_infos, result_infos):
+    def partition(out_leading_shape, out_partition_spec, mesh, arg_infos, result_infos):
         del result_infos
+        gsr = global_mesh_resource()
+        ep_axis = gsr.ep_resource
+        # expert_out leading dim must be ep-sharded; trailing dims replicated.
+        eo_spec = arg_infos[1].sharding.spec
+        if (len(eo_spec) > 0 and eo_spec[0] != ep_axis) or any(
+            ax is not None for ax in eo_spec[1:]
+        ):
+            raise NotImplementedError(
+                "EpCombine: expert_out must be sharded on ep_resource on the leading"
+                f" dim and replicated elsewhere; got spec={eo_spec}."
+            )
+        resolved = _resolve_out_partition_spec(out_partition_spec, len(out_leading_shape))
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        out_spec = (None,) * (len(out_leading_shape) + 1)
-        out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec))
+        out_sharding = NamedSharding(mesh, PartitionSpec(*resolved))
 
         def sharded_impl(handle_mem, expert_out):
-            return EpCombinePrimitive.impl(handle_mem, expert_out, out_leading_shape)
+            return EpCombinePrimitive.impl(
+                handle_mem, expert_out, out_leading_shape, out_partition_spec
+            )
 
         return mesh, sharded_impl, out_sharding, arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "hm, recv H -> T H"
+        return "ep hm, ep recv_pr H -> dp H"
 
 
 register_primitive(EpCombinePrimitive)
 
 
 # ── ep_dispatch_bwd ─────────────────────────────────────────────────────────────
-# Inputs:  handle_mem [N] uint8, grad [recv_capacity, H] (always 2D)
-# Outputs: grad_tokens [..., H]   (N-D; out_leading_shape passed by caller)
+# Inputs:  handle_mem [ep_size, N] uint8 (sharded on ep_resource),
+#          grad [ep_size, recv_capacity_per_rank, H] (sharded on ep_resource)
+# Outputs: grad_tokens [..., H]   (N-D; leading dim sharded per out_partition_spec)
+# Per-shard view at FFI: handle_mem [N], grad [recv_capacity_per_rank, H].
 
 
 class EpDispatchBwdPrimitive(BasePrimitive):
     name = "te_ep_dispatch_bwd_ffi"
     multiple_results = False
-    impl_static_args = (2,)  # out_leading_shape
+    impl_static_args = (2, 3)  # out_leading_shape, out_partition_spec
     inner_primitive = None
     outer_primitive = None
 
     @staticmethod
-    def abstract(handle_mem_aval, grad_aval, *, out_leading_shape):
-        del handle_mem_aval
+    def abstract(handle_mem_aval, grad_aval, *, out_leading_shape, out_partition_spec):
+        del handle_mem_aval, out_partition_spec
         assert (
-            len(grad_aval.shape) == 2
-        ), f"grad must be 2D [recv_capacity, H], got shape {grad_aval.shape}"
+            len(grad_aval.shape) == 3
+        ), f"grad must be 3D [ep_size, recv_capacity_per_rank, H], got shape {grad_aval.shape}"
         g_dtype = dtypes.canonicalize_dtype(grad_aval.dtype)
-        hidden_dim = grad_aval.shape[1]
+        hidden_dim = grad_aval.shape[2]
         out_shape = tuple(out_leading_shape) + (hidden_dim,)
         return jax.core.ShapedArray(out_shape, g_dtype)
 
     @staticmethod
-    def lowering(ctx, handle_mem, grad, *, out_leading_shape):
+    def lowering(ctx, handle_mem, grad, *, out_leading_shape, out_partition_spec):
+        del out_partition_spec
         return ffi.ffi_lowering(EpDispatchBwdPrimitive.name)(
             ctx,
             handle_mem,
@@ -432,48 +476,61 @@ class EpDispatchBwdPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def impl(handle_mem, grad, out_leading_shape):
+    def impl(handle_mem, grad, out_leading_shape, out_partition_spec):
         assert EpDispatchBwdPrimitive.inner_primitive is not None
         return EpDispatchBwdPrimitive.inner_primitive.bind(
             handle_mem,
             grad,
             out_leading_shape=out_leading_shape,
+            out_partition_spec=out_partition_spec,
         )
 
     @staticmethod
-    def batcher(batched_args, batch_dims, *, out_leading_shape):
+    def batcher(batched_args, batch_dims, *, out_leading_shape, out_partition_spec):
         raise NotImplementedError("EpDispatchBwdPrimitive does not support vmap")
 
     @staticmethod
-    def partition(out_leading_shape, mesh, arg_infos, result_infos):
+    def partition(out_leading_shape, out_partition_spec, mesh, arg_infos, result_infos):
         del result_infos
+        gsr = global_mesh_resource()
+        ep_axis = gsr.ep_resource
+        g_spec = arg_infos[1].sharding.spec
+        if (len(g_spec) > 0 and g_spec[0] != ep_axis) or any(ax is not None for ax in g_spec[1:]):
+            raise NotImplementedError(
+                "EpDispatchBwd: grad must be sharded on ep_resource on the leading dim"
+                f" and replicated elsewhere; got spec={g_spec}."
+            )
+        resolved = _resolve_out_partition_spec(out_partition_spec, len(out_leading_shape))
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        out_spec = (None,) * (len(out_leading_shape) + 1)
-        out_sharding = NamedSharding(mesh, PartitionSpec(*out_spec))
+        out_sharding = NamedSharding(mesh, PartitionSpec(*resolved))
 
         def sharded_impl(handle_mem, grad):
-            return EpDispatchBwdPrimitive.impl(handle_mem, grad, out_leading_shape)
+            return EpDispatchBwdPrimitive.impl(
+                handle_mem, grad, out_leading_shape, out_partition_spec
+            )
 
         return mesh, sharded_impl, out_sharding, arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "hm, recv H -> T H"
+        return "ep hm, ep recv_pr H -> dp H"
 
 
 register_primitive(EpDispatchBwdPrimitive)
 
 
 # ── ep_combine_bwd ──────────────────────────────────────────────────────────────
-# Inputs:  handle_mem [N] uint8, grad [..., H]   (N-D, flattened in C++)
-# Outputs: grad_expert_out [recv_capacity, H]    (always 2D)
+# Inputs:  handle_mem [ep_size, N] uint8 (sharded on ep_resource),
+#          grad [..., H]   (N-D; flattened in C++; leading dim sharded dp/fsdp)
+# Outputs: grad_expert_out [ep_size, recv_capacity_per_rank, H] (sharded on ep_resource)
+# Per-shard view at FFI: handle_mem [N], grad_expert_out [recv_capacity_per_rank, H].
 
 
 class EpCombineBwdPrimitive(BasePrimitive):
     name = "te_ep_combine_bwd_ffi"
     multiple_results = False
-    impl_static_args = (2,)  # recv_capacity
+    impl_static_args = (2,)  # recv_capacity (GLOBAL = ep_size * recv_capacity_per_rank)
     inner_primitive = None
     outer_primitive = None
 
@@ -485,7 +542,12 @@ class EpCombineBwdPrimitive(BasePrimitive):
         ), f"grad must be at least 2D [..., H], got shape {grad_aval.shape}"
         g_dtype = dtypes.canonicalize_dtype(grad_aval.dtype)
         hidden_dim = grad_aval.shape[-1]
-        return jax.core.ShapedArray((recv_capacity, hidden_dim), g_dtype)
+        ep_size = get_ep_config().ep_size
+        assert (
+            recv_capacity % ep_size == 0
+        ), f"recv_capacity ({recv_capacity}) must be divisible by ep_size ({ep_size})"
+        recv_capacity_per_rank = recv_capacity // ep_size
+        return jax.core.ShapedArray((ep_size, recv_capacity_per_rank, hidden_dim), g_dtype)
 
     @staticmethod
     def lowering(ctx, handle_mem, grad, *, recv_capacity):
@@ -512,8 +574,10 @@ class EpCombineBwdPrimitive(BasePrimitive):
     @staticmethod
     def partition(recv_capacity, mesh, arg_infos, result_infos):
         del result_infos
+        gsr = global_mesh_resource()
+        ep_axis = gsr.ep_resource
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        out_sharding = NamedSharding(mesh, PartitionSpec(None, None))
+        out_sharding = NamedSharding(mesh, PartitionSpec(ep_axis, None, None))
 
         def sharded_impl(handle_mem, grad):
             return EpCombineBwdPrimitive.impl(handle_mem, grad, recv_capacity)
@@ -523,7 +587,7 @@ class EpCombineBwdPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "hm, T H -> recv H"
+        return "ep hm, T H -> ep recv_pr H"
 
 
 register_primitive(EpCombineBwdPrimitive)
@@ -564,36 +628,37 @@ def ep_dispatch_fwd(handle_mem, topk_idx, tokens, topk_weights, recv_capacity, t
     )
 
 
-def ep_combine_fwd(handle_mem, expert_out, num_local_tokens):
+def ep_combine_fwd(handle_mem, expert_out, num_local_tokens, out_partition_spec=None):
     """Gather expert outputs back to home ranks.
 
     The hadamard product with `recv_topk_weights` happens in JAX before this
-    call (see transformer_engine.jax.ep.ep_combine). recv_capacity is implicit
-    in expert_out.shape[0].
+    call (see transformer_engine.jax.ep.ep_combine). `expert_out` is
+    [ep_size, recv_capacity_per_rank, H] (sharded on ep_resource).
 
     Args:
-      num_local_tokens: int (legacy 2D output [T, H]) OR tuple of ints (N-D
-        output [..., H]). Accepts both for backward-compat.
+      num_local_tokens: int → 2D output [T, H]. Tuple of ints → N-D output.
+      out_partition_spec: optional tuple of axis names (length = num_leading + 1)
+        used to build the output `PartitionSpec`. When None, the leading axis is
+        resolved from MeshResource (FSDP preferred if both DP and FSDP are set;
+        else whichever is set; else raises).
     """
     out_leading = _normalize_leading_shape(num_local_tokens)
     return EpCombinePrimitive.outer_primitive.bind(
         handle_mem,
         expert_out,
         out_leading_shape=out_leading,
+        out_partition_spec=out_partition_spec,
     )
 
 
-def ep_dispatch_bwd(handle_mem, grad, num_local_tokens):
-    """Backward of dispatch (combine direction).
-
-    Args:
-      num_local_tokens: int (legacy 2D output) or tuple (N-D leading dims).
-    """
+def ep_dispatch_bwd(handle_mem, grad, num_local_tokens, out_partition_spec=None):
+    """Backward of dispatch (combine direction). Same out_partition_spec semantics as ep_combine_fwd."""
     out_leading = _normalize_leading_shape(num_local_tokens)
     return EpDispatchBwdPrimitive.outer_primitive.bind(
         handle_mem,
         grad,
         out_leading_shape=out_leading,
+        out_partition_spec=out_partition_spec,
     )
 
 

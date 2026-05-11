@@ -83,7 +83,8 @@ Error_Type EpPrepareFFI(cudaStream_t stream, Buffer_Type topk_idx, Result_Type t
   // Flatten leading dims; keep last dim as top_k.
   std::vector<size_t> topk_shape = {product(topk_dims, 0, topk_dims.size() - 1),
                                     static_cast<size_t>(topk_dims.back())};
-  // Upcast int32 → int64 on-stream into a scratch buffer when needed.
+  // WAR: NCCL EP currently requires topk_idx as int64. Until it accepts int32
+  // natively, upcast int32 → int64 on-stream into a scratch buffer here.
   int64_t* topk_idx_i64_workspace = nullptr;
   void* topk_idx_data = topk_idx.untyped_data();
   if (idx_etype == ::xla::ffi::DataType::S32) {
@@ -150,7 +151,8 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
   (void)config.recv_capacity;
   std::vector<size_t> idx_shape = {product(idx_dims, 0, idx_dims.size() - 1),
                                    static_cast<size_t>(idx_dims.back())};
-  // Upcast int32 → int64 on-stream into a scratch buffer when needed.
+  // WAR: NCCL EP currently requires topk_idx as int64. Until it accepts int32
+  // natively, upcast int32 → int64 on-stream into a scratch buffer here.
   int64_t* topk_idx_i64_workspace = nullptr;
   void* topk_idx_data = topk_idx.untyped_data();
   if (idx_etype == ::xla::ffi::DataType::S32) {
@@ -179,12 +181,9 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
   auto topk_weights_ = TensorWrapper(topk_weights.untyped_data(), tw_shape, DType::kFloat32);
 
   // Per-shard view from JAX: recv_tokens is [1, recv_capacity_per_rank, H]
-  // (one EP slice). Read recv_capacity_per_rank from the buffer dims so the
-  // C++ stays oblivious to the global ep_size factor.
+  // (one EP slice). Python `abstract` enforces ndim; here we only re-check the
+  // per-shard leading-dim==1 invariant and read recv_capacity_per_rank.
   auto recv_dims = recv_tokens->dimensions();
-  NVTE_CHECK(
-      recv_dims.size() == 3,
-      "recv_tokens must be 3D [ep_slice, recv_capacity_per_rank, H], got ndim=", recv_dims.size());
   NVTE_CHECK(recv_dims[0] == 1, "recv_tokens leading dim must be 1 per shard (ep-sliced); got ",
              recv_dims[0]);
   const size_t recv_capacity_per_rank = static_cast<size_t>(recv_dims[1]);
@@ -192,9 +191,6 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
   auto recv_tokens_ = TensorWrapper(recv_tokens->untyped_data(), recv_shape, token_dtype);
 
   auto recv_w_dims = recv_topk_weights->dimensions();
-  NVTE_CHECK(recv_w_dims.size() == 2,
-             "recv_topk_weights must be 2D [ep_slice, recv_capacity_per_rank], got ndim=",
-             recv_w_dims.size());
   NVTE_CHECK(recv_w_dims[0] == 1,
              "recv_topk_weights leading dim must be 1 per shard (ep-sliced); got ", recv_w_dims[0]);
   std::vector<size_t> recv_w_shape = {recv_capacity_per_rank};
@@ -223,20 +219,24 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
                               FFI_CudaGraph_Traits);
 
 // ── ep_combine ────────────────────────────────────────────────────────────────
-// Inputs:  handle_mem [N] uint8
-//          expert_out [recv_capacity, H]   (always 2D)
+// Inputs:  handle_mem [N] uint8 (per-shard from [ep_size, N])
+//          expert_out [1, recv_capacity_per_rank, H] (per-shard from [ep_size, recv_pr, H])
 // Outputs: result     [..., H]             (N-D; leading dims flattened internally)
 
 Error_Type EpCombineFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type expert_out,
                         Result_Type result, EpCombineConfig config) {
+  // Python `abstract` enforces ndim==3; here we only check the per-shard
+  // invariant (leading dim 1) that can't be expressed at the global abstract.
   auto eo_dims = expert_out.dimensions();
-  NVTE_CHECK(eo_dims.size() == 2,
-             "expert_out must be 2D [recv_capacity, H], got ndim=", eo_dims.size());
+  NVTE_CHECK(eo_dims[0] == 1, "expert_out leading dim must be 1 per shard (ep-sliced); got ",
+             eo_dims[0]);
 
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem.element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem.untyped_data(), hm_shape, DType::kByte);
 
-  std::vector<size_t> eo_shape = {static_cast<size_t>(eo_dims[0]), static_cast<size_t>(eo_dims[1])};
+  const size_t recv_capacity_per_rank = static_cast<size_t>(eo_dims[1]);
+  const size_t H = static_cast<size_t>(eo_dims[2]);
+  std::vector<size_t> eo_shape = {recv_capacity_per_rank, H};
   auto eo_dtype = convert_ffi_datatype_to_te_dtype(expert_out.element_type());
   auto expert_out_ = TensorWrapper(expert_out.untyped_data(), eo_shape, eo_dtype);
 
@@ -249,7 +249,7 @@ Error_Type EpCombineFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type
   NVTE_CHECK(static_cast<int64_t>(res_T_flat) == config.num_local_tokens,
              "result leading-dim product (", res_T_flat, ") must equal num_local_tokens (",
              config.num_local_tokens, ")");
-  std::vector<size_t> res_shape = {res_T_flat, static_cast<size_t>(eo_dims[1])};
+  std::vector<size_t> res_shape = {res_T_flat, H};
   auto result_ = TensorWrapper(result->untyped_data(), res_shape, eo_dtype);
 
   nvte_ep_combine(handle_mem_.data(), expert_out_.data(), result_.data(), stream);
@@ -267,21 +267,24 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineHandler, EpCombineFFI,
                               FFI_CudaGraph_Traits);
 
 // ── ep_dispatch_bwd ───────────────────────────────────────────────────────────
-// Inputs:  handle_mem [N] uint8
-//          grad [recv_capacity, H]  (grad w.r.t. recv_tokens; always 2D)
+// Inputs:  handle_mem [N] uint8 (per-shard)
+//          grad [1, recv_capacity_per_rank, H] (per-shard from [ep_size, recv_pr, H])
 // Outputs: grad_tokens [..., H]     (N-D; matches original tokens shape)
 
 Error_Type EpDispatchBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type grad,
                             Result_Type grad_tokens, EpDispatchBwdConfig config) {
+  // Python `abstract` enforces ndim==3; only the per-shard leading-dim==1
+  // invariant needs to be re-checked here (can't be expressed at global abstract).
   auto grad_dims = grad.dimensions();
-  NVTE_CHECK(grad_dims.size() == 2,
-             "grad must be 2D [recv_capacity, H], got ndim=", grad_dims.size());
+  NVTE_CHECK(grad_dims[0] == 1, "grad leading dim must be 1 per shard (ep-sliced); got ",
+             grad_dims[0]);
 
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem.element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem.untyped_data(), hm_shape, DType::kByte);
 
-  std::vector<size_t> g_shape = {static_cast<size_t>(grad_dims[0]),
-                                 static_cast<size_t>(grad_dims[1])};
+  const size_t recv_capacity_per_rank = static_cast<size_t>(grad_dims[1]);
+  const size_t H = static_cast<size_t>(grad_dims[2]);
+  std::vector<size_t> g_shape = {recv_capacity_per_rank, H};
   auto g_dtype = convert_ffi_datatype_to_te_dtype(grad.element_type());
   auto grad_ = TensorWrapper(grad.untyped_data(), g_shape, g_dtype);
 
@@ -292,7 +295,7 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_
   NVTE_CHECK(static_cast<int64_t>(T_flat) == config.num_local_tokens,
              "grad_tokens leading-dim product (", T_flat, ") must equal num_local_tokens (",
              config.num_local_tokens, ")");
-  std::vector<size_t> out_shape = {T_flat, static_cast<size_t>(grad_dims[1])};
+  std::vector<size_t> out_shape = {T_flat, H};
   auto grad_tokens_ = TensorWrapper(grad_tokens->untyped_data(), out_shape, g_dtype);
 
   nvte_ep_dispatch_bwd(handle_mem_.data(), grad_.data(), grad_tokens_.data(), stream);
@@ -310,15 +313,17 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchBwdHandler, EpDispatchBwdFFI,
                               FFI_CudaGraph_Traits);
 
 // ── ep_combine_bwd ────────────────────────────────────────────────────────────
-// Inputs:  handle_mem [N] uint8
+// Inputs:  handle_mem [N] uint8 (per-shard)
 //          grad [..., H]            (N-D grad w.r.t. result; flattened internally)
-// Outputs: grad_expert_out [recv_capacity, H]   (always 2D)
+// Outputs: grad_expert_out [1, recv_capacity_per_rank, H] (per-shard from
+//                          [ep_size, recv_pr, H])
 
 Error_Type EpCombineBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type grad,
                            Result_Type grad_expert_out, EpCombineBwdConfig config) {
   auto grad_dims = grad.dimensions();
   NVTE_CHECK(grad_dims.size() >= 2,
              "grad must be at least 2D [..., H], got ndim=", grad_dims.size());
+  (void)config.recv_capacity;  // see note below; we read per-rank from output dims.
 
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem.element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem.untyped_data(), hm_shape, DType::kByte);
@@ -329,10 +334,13 @@ Error_Type EpCombineBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_T
   auto g_dtype = convert_ffi_datatype_to_te_dtype(grad.element_type());
   auto grad_ = TensorWrapper(grad.untyped_data(), g_shape, g_dtype);
 
+  // Python `abstract` enforces ndim==3; only the per-shard leading-dim==1
+  // invariant needs to be re-checked here (can't be expressed at global abstract).
   auto out_dims = grad_expert_out->dimensions();
-  NVTE_CHECK(out_dims.size() == 2,
-             "grad_expert_out must be 2D [recv_capacity, H], got ndim=", out_dims.size());
-  std::vector<size_t> out_shape = {static_cast<size_t>(config.recv_capacity), H};
+  NVTE_CHECK(out_dims[0] == 1, "grad_expert_out leading dim must be 1 per shard (ep-sliced); got ",
+             out_dims[0]);
+  const size_t recv_capacity_per_rank = static_cast<size_t>(out_dims[1]);
+  std::vector<size_t> out_shape = {recv_capacity_per_rank, H};
   auto grad_expert_out_ = TensorWrapper(grad_expert_out->untyped_data(), out_shape, g_dtype);
 
   nvte_ep_combine_bwd(handle_mem_.data(), grad_.data(), grad_expert_out_.data(), stream);
