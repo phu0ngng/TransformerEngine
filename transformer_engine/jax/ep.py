@@ -12,6 +12,7 @@ import jax.experimental.multihost_utils as jmu
 
 import transformer_engine_jax
 import transformer_engine.jax.cpp_extensions as tex
+from transformer_engine.jax.sharding import global_mesh_resource, get_mesh_axis_size
 
 __all__ = [
     "ep_bootstrap",
@@ -78,6 +79,19 @@ def ep_bootstrap(
     uid_arr = jnp.frombuffer(uid_bytes, dtype=jnp.uint8)
     uid_arr = jmu.process_allgather(uid_arr)[0]
     uid_bytes = bytes(uid_arr.tolist())
+
+    ep_resource = global_mesh_resource().ep_resource
+    if ep_resource is None:
+        raise ValueError(
+            "ep_bootstrap requires MeshResource.ep_resource to be set; enter a"
+            " global_shard_guard(MeshResource(..., ep_resource=<axis name>)) before bootstrap."
+        )
+    mesh_ep_size = get_mesh_axis_size(ep_resource)
+    if mesh_ep_size != ep_size:
+        raise ValueError(
+            f"ep_bootstrap: EpConfig.ep_size ({ep_size}) does not match mesh axis"
+            f" '{ep_resource}' size ({mesh_ep_size})."
+        )
 
     transformer_engine_jax.initialize_ep_communicator(
         uid_bytes,
