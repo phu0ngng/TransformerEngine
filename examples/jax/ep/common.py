@@ -16,6 +16,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from transformer_engine.jax.ep import ep_bootstrap
+from transformer_engine.jax.sharding import MeshResource, global_shard_guard
+
+
+# Persistent global mesh guard so eager + jit'd EP calls share the same axis.
+_ep_guard = None  # holds the context manager once entered
 
 
 def dtype_tols(dtype, rtol=None, atol=None):
@@ -88,6 +93,21 @@ def _initialize_distributed(args):
     # Worst-case recv: every source rank sends its full quota times top_k fan-out.
     recv_capacity = ep_size * args.num_tokens * args.top_k
     args.recv_capacity = recv_capacity
+
+    # SPRINT7: ep_bootstrap requires MeshResource.ep_resource and a Mesh whose
+    # ep axis has size==ep_size. Build a 1×ep_size Mesh (DP=1, EP=ep_size) and
+    # enter persistent global_shard_guard + Mesh contexts so subsequent
+    # ep_dispatch/ep_combine calls inside jit pick up the axes.
+    import numpy as _np
+    from jax.sharding import Mesh as _Mesh
+
+    global _ep_guard, _ep_mesh_cm
+    devs = _np.asarray(jax.devices()).reshape(1, ep_size)
+    args.mesh = _Mesh(devs, ("dp", "ep"))
+    _ep_mesh_cm = args.mesh
+    _ep_mesh_cm.__enter__()
+    _ep_guard = global_shard_guard(MeshResource(dp_resource="dp", ep_resource="ep"))
+    _ep_guard.__enter__()
 
     ep_bootstrap(
         world_size=args.num_processes,

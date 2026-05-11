@@ -32,21 +32,20 @@ from transformer_engine.jax.ep import ep_dispatch, ep_combine
 def _batched_expert_linear(recv_tokens, kernels, num_local_experts):
     """Per-expert linear via a single JAX batched GEMM.
 
-    HT EXPERT_MAJOR lays recv_tokens out as `num_local_experts` contiguous
-    equally-sized groups (padded). Under uniform routing the slots per group
-    are identical, so we can reshape and use a single batched einsum.
+    SPRINT7 layout: recv_tokens is 3D [ep_size, recv_capacity_per_rank, H].
+    Inside each ep-slice, num_local_experts groups are laid out contiguously.
 
-    recv_tokens: [recv_capacity, H]            with recv_capacity % E_local == 0
+    recv_tokens: [ep_size, recv_capacity_per_rank, H]  with recv_pr % E_local == 0
     kernels:     [E_local, H, H_out]
-    Returns:     [recv_capacity, H_out]
+    Returns:     [ep_size, recv_capacity_per_rank, H_out]
     """
-    recv_capacity, H = recv_tokens.shape
+    ep_size, recv_pr, H = recv_tokens.shape
     H_out = kernels.shape[-1]
-    slots_per_expert = recv_capacity // num_local_experts
-    grouped = recv_tokens.reshape(num_local_experts, slots_per_expert, H)
-    # ehi, eho -> esh
-    out = jnp.einsum("eth,eho->eto", grouped, kernels.astype(grouped.dtype))
-    return out.reshape(recv_capacity, H_out)
+    slots_per_expert = recv_pr // num_local_experts
+    grouped = recv_tokens.reshape(ep_size, num_local_experts, slots_per_expert, H)
+    # se th, e ho -> se to
+    out = jnp.einsum("setH,eHo->seto", grouped, kernels.astype(grouped.dtype))
+    return out.reshape(ep_size, recv_pr, H_out)
 
 
 class TestEPPipeline(unittest.TestCase):
