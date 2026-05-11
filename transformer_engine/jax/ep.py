@@ -276,12 +276,15 @@ def ep_combine(handle_mem, token_counts, expert_out, recv_topk_weights, num_loca
 
 
 def _make_valid_mask(token_counts, recv_capacity, dtype):
-    # NCCL EP packs tokens for all local experts contiguously (alignment=1,
-    # default when no handle config is supplied). Real tokens occupy slots
-    # 0..sum(counts)-1; the trailing tail is zero-filled padding.
-    total_valid = jnp.sum(token_counts.astype(jnp.int32))
-    arange = jnp.arange(recv_capacity, dtype=jnp.int32)
-    return (arange < total_valid).astype(dtype)[:, None]
+    # NCCL EP places each local expert at a fixed `recv_capacity / NLE` stride;
+    # valid slots are `[0, token_counts[e])` within each zone (rest is padding).
+    nle = token_counts.shape[0]
+    slots_per_e = recv_capacity // nle
+    idx = jnp.arange(recv_capacity, dtype=jnp.int32)
+    e_idx = idx // slots_per_e
+    slot_in_e = idx % slots_per_e
+    counts = token_counts.astype(jnp.int32)
+    return (slot_in_e < counts[e_idx]).astype(dtype)[:, None]
 
 
 def _combine_fwd(handle_mem, token_counts, expert_out, recv_topk_weights, num_local_tokens):
