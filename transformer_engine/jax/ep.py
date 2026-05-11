@@ -9,6 +9,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import jax.experimental.multihost_utils as jmu
+import numpy as np
 
 import transformer_engine_jax
 import transformer_engine.jax.cpp_extensions as tex
@@ -64,7 +65,14 @@ def ep_bootstrap(
     ``ep_dispatch(..., dispatch_output_per_expert_alignment=...)``.
     """
     UID_SIZE = 128
-    if rank == 0:
+    # Two EP groups colocated on one physical node must each live on their own
+    # root ncclComm_t — splitting a shared world_comm trips NCCL-EP intranode
+    # setup. Each DP color generates its own ncclUniqueId; rank 0 of each color
+    # broadcasts via process_allgather; every rank picks its color's uid.
+    dp_color = rank // ep_size
+    rank_within_group = rank % ep_size
+    is_color_root = rank_within_group == 0
+    if is_color_root:
         try:
             from nccl import get_unique_id
 
@@ -78,9 +86,12 @@ def ep_bootstrap(
     else:
         uid_bytes = bytes(UID_SIZE)
 
+    # Gather all ranks' contributions; each color-root rank carries its own uid,
+    # the others carry zeros. Reshape to [world_size, UID_SIZE] and pick the
+    # color-root slot for this color.
     uid_arr = jnp.frombuffer(uid_bytes, dtype=jnp.uint8)
-    uid_arr = jmu.process_allgather(uid_arr)[0]
-    uid_bytes = bytes(uid_arr.tolist())
+    all_uids = jmu.process_allgather(uid_arr).reshape(world_size, UID_SIZE)
+    uid_bytes = bytes(np.asarray(all_uids[dp_color * ep_size]).tolist())
 
     ep_resource = global_mesh_resource().ep_resource
     if ep_resource is None:
@@ -97,9 +108,8 @@ def ep_bootstrap(
 
     transformer_engine_jax.initialize_ep_communicator(
         uid_bytes,
-        world_size,
-        rank,
         ep_size,
+        rank_within_group,
         num_experts,
         max_tokens_per_rank,
         max_recv_tokens_per_rank,

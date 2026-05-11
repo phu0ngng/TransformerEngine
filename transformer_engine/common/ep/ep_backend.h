@@ -53,8 +53,14 @@ class EPBackend {
   /*! \brief Access the singleton. Aborts if not yet initialized. */
   static EPBackend& get();
 
-  /*! \brief JAX path: bootstrap from uid via ncclCommInitRank + ncclCommSplit. */
-  static void initialize(const ncclUniqueId& uid, int world_size, int rank,
+  /*! \brief JAX path: bootstrap a per-DP-group EP comm directly via ncclCommInitRank.
+   *
+   *  Caller (JAX bootstrap) computes a distinct ncclUniqueId per DP color and
+   *  passes the rank within the EP group (i.e. world_rank % ep_size). No
+   *  ncclCommSplit — each EP group lives on its own root comm so that two
+   *  EP groups colocated on one physical node remain fully independent.
+   */
+  static void initialize(const ncclUniqueId& uid, int ep_size, int rank_within_group,
                          NVTEEpGroupConfig config);
 
   /*! \brief PyTorch path: bootstrap from an existing EP sub-communicator.

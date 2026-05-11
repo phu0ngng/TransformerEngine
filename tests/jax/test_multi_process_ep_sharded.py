@@ -61,8 +61,10 @@ class TestEPSharded(unittest.TestCase):
         cls.dp, cls.ep = _factor_dp_ep(cls.num_procs)
         assert cls.dp * cls.ep == cls.num_procs
         cls.num_experts = NUM_LOCAL_EXPERTS * cls.ep
-        # global recv_capacity = ep_size * per-rank worst case
-        cls.recv_capacity_per_rank = TOKENS_PER_DP_SHARD * cls.dp * TOP_K
+        # recv_capacity is per-DP-group (NCCL EP comms are isolated per DP color),
+        # so it does NOT scale with dp. Per-expert capacity inside NCCL EP is
+        # max_tokens_per_rank * top_k / NLE; recv_capacity_per_rank = NLE * that.
+        cls.recv_capacity_per_rank = TOKENS_PER_DP_SHARD * TOP_K
         cls.recv_capacity = cls.ep * cls.recv_capacity_per_rank
         cls.mesh = _build_mesh(cls.dp, cls.ep)
         cls.mr = MeshResource(dp_resource="dp", ep_resource="ep")
@@ -121,7 +123,6 @@ class TestEPSharded(unittest.TestCase):
             @jax.jit
             def run(idx, toks, w):
                 recv_t, recv_w, handle, tc = ep_dispatch(idx, toks, w, self.recv_capacity)
-                # Sharding assertions on dispatch outputs (2D / 1D layouts).
                 ep_spec_2d = PartitionSpec("ep", None)
                 ep_spec_1d = PartitionSpec("ep")
                 recv_t = jax.lax.with_sharding_constraint(

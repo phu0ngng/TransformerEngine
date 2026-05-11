@@ -74,22 +74,23 @@ typedef struct {
 
 /*! \brief Bootstrap from a serialized ncclUniqueId — JAX path.
  *
- *  TE creates a world-sized NCCL comm from the uid internally:
- *    ncclCommInitRank(&world_comm, world_size, uid, rank)
- *  then splits it into the EP sub-communicator and initializes the backend.
- *  The world comm is destroyed immediately after the split.
+ *  TE creates an EP-sized NCCL comm from the uid directly:
+ *    ncclCommInitRank(&ep_comm, ep_size, uid, rank_within_group)
+ *  Caller (JAX bootstrap) MUST broadcast a distinct ncclUniqueId per DP
+ *  color so that two EP groups colocated on one physical node each live on
+ *  their own root comm (no ncclCommSplit, no shared parent world comm).
  *
  *  Use this path for JAX, which does not expose its internal ncclComm_t.
  *  For PyTorch use nvte_ep_initialize_with_comm() instead.
  *
  *  Requires SM_90+ (Hopper or later).
  *
- *  \param[in] unique_id_bytes  Pointer to 128-byte ncclUniqueId (broadcast by caller).
- *  \param[in] world_size       Total number of ranks.
- *  \param[in] rank             This process's rank.
- *  \param[in] group_config     Group-level EP configuration.
+ *  \param[in] unique_id_bytes   Pointer to 128-byte ncclUniqueId (per-DP-color broadcast).
+ *  \param[in] ep_size           Size of the EP group (= group_config.ep_size).
+ *  \param[in] rank_within_group This process's rank within the EP group ([0, ep_size)).
+ *  \param[in] group_config      Group-level EP configuration.
  */
-void nvte_ep_initialize(const uint8_t* unique_id_bytes, int world_size, int rank,
+void nvte_ep_initialize(const uint8_t* unique_id_bytes, int ep_size, int rank_within_group,
                         NVTEEpGroupConfig group_config);
 
 /*! \brief Bootstrap from an existing NCCL EP sub-communicator — PyTorch path.

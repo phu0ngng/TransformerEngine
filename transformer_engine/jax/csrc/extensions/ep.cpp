@@ -45,7 +45,7 @@ struct EpCombineBwdConfig {
 
 // ── Bootstrap helpers (called once, exposed via pybind11) ─────────────────────
 
-void EpInitialize(pybind11::bytes unique_id_bytes_obj, int world_size, int rank, int ep_size,
+void EpInitialize(pybind11::bytes unique_id_bytes_obj, int ep_size, int rank_within_group,
                   int num_experts, int max_tokens_per_rank, int max_recv_tokens_per_rank,
                   int hidden_dim) {
   std::string uid_str = unique_id_bytes_obj;
@@ -56,7 +56,8 @@ void EpInitialize(pybind11::bytes unique_id_bytes_obj, int world_size, int rank,
                         .max_tokens_per_rank = max_tokens_per_rank,
                         .max_recv_tokens_per_rank = max_recv_tokens_per_rank,
                         .hidden_dim = hidden_dim};
-  nvte_ep_initialize(reinterpret_cast<const uint8_t*>(uid_str.data()), world_size, rank, cfg);
+  nvte_ep_initialize(reinterpret_cast<const uint8_t*>(uid_str.data()), ep_size, rank_within_group,
+                     cfg);
 }
 
 size_t EpGetHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment) {

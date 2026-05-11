@@ -133,9 +133,9 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size);
 #ifdef NVTE_WITH_NCCL_EP
   m.def("initialize_ep_communicator", &EpInitialize, pybind11::arg("unique_id_bytes"),
-        pybind11::arg("world_size"), pybind11::arg("rank"), pybind11::arg("ep_size"),
-        pybind11::arg("num_experts"), pybind11::arg("max_tokens_per_rank"),
-        pybind11::arg("max_recv_tokens_per_rank"), pybind11::arg("hidden_dim"));
+        pybind11::arg("ep_size"), pybind11::arg("rank_within_group"), pybind11::arg("num_experts"),
+        pybind11::arg("max_tokens_per_rank"), pybind11::arg("max_recv_tokens_per_rank"),
+        pybind11::arg("hidden_dim"));
   m.def("get_ep_handle_mem_size", &EpGetHandleMemSize, pybind11::arg("top_k"),
         pybind11::arg("dispatch_output_per_expert_alignment") = 0);
 #endif  // NVTE_WITH_NCCL_EP

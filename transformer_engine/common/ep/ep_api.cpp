@@ -20,12 +20,12 @@
 
 using transformer_engine::ep::EPBackend;
 
-void nvte_ep_initialize(const uint8_t* unique_id_bytes, int world_size, int rank,
+void nvte_ep_initialize(const uint8_t* unique_id_bytes, int ep_size, int rank_within_group,
                         NVTEEpGroupConfig group_config) {
   NVTE_CHECK(unique_id_bytes != nullptr, "unique_id_bytes must not be null");
   ncclUniqueId uid;
   memcpy(&uid, unique_id_bytes, sizeof(uid));
-  EPBackend::initialize(uid, world_size, rank, group_config);
+  EPBackend::initialize(uid, ep_size, rank_within_group, group_config);
 }
 
 void nvte_ep_initialize_with_comm(void* ep_comm, NVTEEpGroupConfig group_config) {

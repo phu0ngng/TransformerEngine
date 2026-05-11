@@ -95,25 +95,27 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
              "NVLink mesh fabric (e.g. GH200 NVL72 / DGX H200 / DGX H100).");
 }
 
-void EPBackend::initialize(const ncclUniqueId& uid, int world_size, int rank,
+void EPBackend::initialize(const ncclUniqueId& uid, int ep_size, int rank_within_group,
                            NVTEEpGroupConfig config) {
   EPBackend& inst = instance();
   std::lock_guard<std::mutex> lock(inst.mutex_);
   NVTE_CHECK(!inst.initialized_, "EP already initialized. Call initialize only once per process.");
 
-  NVTE_CHECK(world_size > 0, "world_size must be positive, got ", world_size);
-  NVTE_CHECK(rank >= 0 && rank < world_size, "rank must be in [0, world_size), got rank=", rank,
-             " world_size=", world_size);
-  NVTE_CHECK(world_size >= config.ep_size, "world_size (", world_size, ") must be >= ep_size (",
+  NVTE_CHECK(ep_size > 0, "ep_size must be positive, got ", ep_size);
+  NVTE_CHECK(rank_within_group >= 0 && rank_within_group < ep_size,
+             "rank_within_group must be in [0, ep_size), got rank_within_group=", rank_within_group,
+             " ep_size=", ep_size);
+  NVTE_CHECK(ep_size == config.ep_size, "ep_size (", ep_size, ") must equal config.ep_size (",
              config.ep_size, ")");
   validate_config(config);
 
-  ncclComm_t world_comm;
-  NVTE_CHECK_NCCL(ncclCommInitRank(&world_comm, world_size, uid, rank));
-
+  // Build a clean EP-sized communicator directly. Caller (JAX bootstrap) arranges
+  // for a distinct ncclUniqueId per DP color so that two EP groups on the same
+  // physical node remain fully independent — no ncclCommSplit, no shared parent
+  // world comm. This avoids NCCL-EP intranode setup bugs that surface when
+  // multiple EP sub-comms colocate on one node (see SPRINT8 findings).
   ncclComm_t ep_comm;
-  NVTE_CHECK_NCCL(ncclCommSplit(world_comm, rank / config.ep_size, rank, &ep_comm, nullptr));
-  NVTE_CHECK_NCCL(ncclCommDestroy(world_comm));
+  NVTE_CHECK_NCCL(ncclCommInitRank(&ep_comm, ep_size, uid, rank_within_group));
 
   inst.init(ep_comm, config, /*owns_comm=*/true);
 }
