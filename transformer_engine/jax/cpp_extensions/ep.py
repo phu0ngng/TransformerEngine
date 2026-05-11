@@ -106,7 +106,8 @@ def get_ep_num_local_experts() -> int:
 
 
 # ── ep_prepare ──────────────────────────────────────────────────────────────────
-# Inputs:  topk_idx [..., top_k] int64  (N-D; flattened in C++)
+# Inputs:  topk_idx [..., top_k] int32 or int64 (N-D; flattened in C++; int32 is
+#          upcast to int64 on-stream by the FFI).
 # Outputs: token_counts [num_local_experts] int32
 #          handle_mem [handle_mem_size] uint8
 
@@ -175,7 +176,7 @@ register_primitive(EpPreparePrimitive)
 
 
 # ── ep_dispatch ─────────────────────────────────────────────────────────────────
-# Inputs:  handle_mem [N] uint8, topk_idx [..., top_k] int64,
+# Inputs:  handle_mem [N] uint8, topk_idx [..., top_k] int32 or int64,
 #          tokens [..., H], topk_weights [..., top_k] float32
 # Outputs: recv_tokens       [recv_capacity, H] (token dtype, always 2D)
 #          recv_topk_weights [recv_capacity] float32 (always 1D, 1 weight per slot)

@@ -116,7 +116,8 @@ def ep_prepare(topk_idx, dispatch_output_per_expert_alignment=0):
     """Routing preparation: AllGather routing map, compute per-expert token counts.
 
     Args:
-        topk_idx: [..., top_k] int64 sparse routing indices. The leading dims
+        topk_idx: [..., top_k] int32 or int64 sparse routing indices (int32 is
+            upcast to int64 on-stream by the FFI). The leading dims
             (e.g. (T,) or (B, S)) are flattened by the FFI; top_k is the last
             dim and must match what the dispatch will send.
         dispatch_output_per_expert_alignment: per-handle EM zone alignment in
@@ -147,7 +148,8 @@ def ep_dispatch(
     """Prepare routing and dispatch tokens + weights to expert ranks.
 
     Args:
-        topk_idx:      [..., top_k] int64 sparse routing indices. Leading dims
+        topk_idx:      [..., top_k] int32 or int64 sparse routing indices (int32
+                       upcast on-stream by the FFI). Leading dims
                        (e.g. (T,) or (B, S)) are flattened by the FFI.
         tokens:        [..., H] token activations. Same leading dims as topk_idx.
         topk_weights:  [..., top_k] float32 routing weights (sent alongside tokens).

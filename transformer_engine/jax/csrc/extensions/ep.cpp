@@ -12,6 +12,7 @@
 
 #include "../extensions.h"
 #include "common.h"
+#include "transformer_engine/gemm.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -65,7 +66,8 @@ size_t EpGetHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment
 }
 
 // ── ep_prepare ────────────────────────────────────────────────────────────────
-// Inputs:  topk_idx [..., top_k] int64  (N-D leading dims flattened internally)
+// Inputs:  topk_idx [..., top_k] int32 or int64 (N-D leading dims flattened internally;
+//          int32 is upcast to int64 on-stream via a scratch workspace).
 // Outputs: token_counts [num_local_experts] int32
 //          handle_mem [handle_mem_size] uint8
 
@@ -74,14 +76,24 @@ Error_Type EpPrepareFFI(cudaStream_t stream, Buffer_Type topk_idx, Result_Type t
   auto topk_dims = topk_idx.dimensions();
   NVTE_CHECK(topk_dims.size() >= 2,
              "topk_idx must be at least 2D [..., top_k], got ndim=", topk_dims.size());
-  // NCCL EP requires int64 routing indices.
-  NVTE_CHECK(topk_idx.element_type() == ::xla::ffi::DataType::S64,
-             "topk_idx must be int64; enable jax_enable_x64 or convert before calling.");
+  auto idx_etype = topk_idx.element_type();
+  NVTE_CHECK(idx_etype == ::xla::ffi::DataType::S64 || idx_etype == ::xla::ffi::DataType::S32,
+             "topk_idx must be int32 or int64; got element_type=", static_cast<int>(idx_etype));
 
   // Flatten leading dims; keep last dim as top_k.
   std::vector<size_t> topk_shape = {product(topk_dims, 0, topk_dims.size() - 1),
                                     static_cast<size_t>(topk_dims.back())};
-  auto topk_idx_ = TensorWrapper(topk_idx.untyped_data(), topk_shape, DType::kInt64);
+  // Upcast int32 → int64 on-stream into a scratch buffer when needed.
+  int64_t* topk_idx_i64_workspace = nullptr;
+  void* topk_idx_data = topk_idx.untyped_data();
+  if (idx_etype == ::xla::ffi::DataType::S32) {
+    const size_t n = topk_shape[0] * topk_shape[1];
+    NVTE_CHECK_CUDA(cudaMallocAsync(&topk_idx_i64_workspace, n * sizeof(int64_t), stream));
+    nvte_convert_int32_to_int64(reinterpret_cast<const int32_t*>(topk_idx_data),
+                                topk_idx_i64_workspace, n, stream);
+    topk_idx_data = topk_idx_i64_workspace;
+  }
+  auto topk_idx_ = TensorWrapper(topk_idx_data, topk_shape, DType::kInt64);
 
   std::vector<size_t> tc_shape = {static_cast<size_t>(token_counts->element_count())};
   auto token_counts_ = TensorWrapper(token_counts->untyped_data(), tc_shape, DType::kInt32);
@@ -92,6 +104,9 @@ Error_Type EpPrepareFFI(cudaStream_t stream, Buffer_Type topk_idx, Result_Type t
   nvte_ep_prepare(topk_idx_.data(), token_counts_.data(), handle_mem_.data(),
                   static_cast<size_t>(config.dispatch_output_per_expert_alignment), stream);
 
+  if (topk_idx_i64_workspace != nullptr) {
+    NVTE_CHECK_CUDA(cudaFreeAsync(topk_idx_i64_workspace, stream));
+  }
   return ffi_with_cuda_error_check();
 }
 
@@ -125,13 +140,24 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
   auto idx_dims = topk_idx.dimensions();
   NVTE_CHECK(idx_dims.size() >= 2,
              "topk_idx must be at least 2D [..., top_k], got ndim=", idx_dims.size());
-  NVTE_CHECK(topk_idx.element_type() == ::xla::ffi::DataType::S64,
-             "topk_idx must be int64; enable jax_enable_x64 or convert before calling.");
+  auto idx_etype = topk_idx.element_type();
+  NVTE_CHECK(idx_etype == ::xla::ffi::DataType::S64 || idx_etype == ::xla::ffi::DataType::S32,
+             "topk_idx must be int32 or int64; got element_type=", static_cast<int>(idx_etype));
   NVTE_CHECK(static_cast<int64_t>(idx_dims.back()) == config.top_k, "top_k attr (", config.top_k,
              ") must match topk_idx last dim (", idx_dims.back(), ")");
   std::vector<size_t> idx_shape = {product(idx_dims, 0, idx_dims.size() - 1),
                                    static_cast<size_t>(idx_dims.back())};
-  auto topk_idx_ = TensorWrapper(topk_idx.untyped_data(), idx_shape, DType::kInt64);
+  // Upcast int32 → int64 on-stream into a scratch buffer when needed.
+  int64_t* topk_idx_i64_workspace = nullptr;
+  void* topk_idx_data = topk_idx.untyped_data();
+  if (idx_etype == ::xla::ffi::DataType::S32) {
+    const size_t n = idx_shape[0] * idx_shape[1];
+    NVTE_CHECK_CUDA(cudaMallocAsync(&topk_idx_i64_workspace, n * sizeof(int64_t), stream));
+    nvte_convert_int32_to_int64(reinterpret_cast<const int32_t*>(topk_idx_data),
+                                topk_idx_i64_workspace, n, stream);
+    topk_idx_data = topk_idx_i64_workspace;
+  }
+  auto topk_idx_ = TensorWrapper(topk_idx_data, idx_shape, DType::kInt64);
 
   const size_t T_flat = product(token_dims, 0, token_dims.size() - 1);
   const size_t H = static_cast<size_t>(token_dims.back());
@@ -165,6 +191,9 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
   nvte_ep_dispatch(handle_mem_.data(), topk_idx_.data(), tokens_.data(), topk_weights_.data(),
                    recv_tokens_.data(), recv_topk_weights_.data(), stream);
 
+  if (topk_idx_i64_workspace != nullptr) {
+    NVTE_CHECK_CUDA(cudaFreeAsync(topk_idx_i64_workspace, stream));
+  }
   return ffi_with_cuda_error_check();
 }
 

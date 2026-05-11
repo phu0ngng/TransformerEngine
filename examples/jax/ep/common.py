@@ -106,7 +106,7 @@ def make_routing(rank, num_tokens, top_k, num_experts, num_local_experts):
 
     topk_idx[t, k] = (rank * NLE + t * K + k) % E
     """
-    topk_idx = np.empty((num_tokens, top_k), dtype=np.int64)
+    topk_idx = np.empty((num_tokens, top_k), dtype=np.int32)
     for t in range(num_tokens):
         for k in range(top_k):
             topk_idx[t, k] = (rank * num_local_experts + t * top_k + k) % num_experts

@@ -15,10 +15,6 @@ import sys
 import unittest
 
 import jax
-
-# TODO: drop this once the FFI does int32→int64 upcast on the C++ side
-# (a JAX-side cast inside sharded_impl doesn't survive x64=False canonicalization).
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import jax.experimental.multihost_utils as jmu
 import numpy as np

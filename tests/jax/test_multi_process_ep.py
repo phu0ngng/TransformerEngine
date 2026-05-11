@@ -26,10 +26,6 @@ import sys
 import unittest
 
 import jax
-
-# TODO: drop this once the FFI does int32→int64 upcast on the C++ side
-# (a JAX-side cast inside sharded_impl doesn't survive x64=False canonicalization).
-jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
@@ -91,7 +87,7 @@ class TestEP(unittest.TestCase):
     def _routing(self, src_rank):
         """Globally-known routing — matches cpp test_ep_pipeline.cu formula."""
         T, K, E, NLE = self.num_tokens, self.top_k, self.num_experts, self.num_local_experts
-        topk_idx = np.empty((T, K), dtype=np.int64)
+        topk_idx = np.empty((T, K), dtype=np.int32)
         for t in range(T):
             for k in range(K):
                 topk_idx[t, k] = (src_rank * NLE + t * K + k) % E
