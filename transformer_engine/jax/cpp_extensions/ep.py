@@ -3,15 +3,16 @@
 # See LICENSE for license information.
 """JAX/TE custom ops for Expert Parallelism (EP).
 
-Sharding note: every primitive's `partition` rule below is a placeholder.
-It echoes the input shardings unchanged and declares replicated outputs
-(`PartitionSpec(None)` / `PartitionSpec(None, None)`). The rules are
-correct for the current single-process / no-mesh launch but are NOT a
-production sharding plan. Once EpConfig-driven sharding (token_counts
-reshape→[ep_size, nle], per-axis replication of handle_mem, etc.) is
-designed, these rules need to be revisited end-to-end. Passing
-non-replicated inputs today is unsupported and may produce silently
-wrong NCCL EP routing.
+Sharding model (SPRINT7):
+  - Outputs of EpPrepare/EpDispatch carry a leading `ep_size` dim and are
+    sharded on `MeshResource.ep_resource`. Per-shard view at the FFI is the
+    inner shape — each rank owns its own slice of the routing state.
+  - EpDispatch requires `tokens` to be sharded on the leading dim by
+    `dp_resource` or `fsdp_resource` only; hidden dim is replicated.
+  - EpCombine consumes the 3D recv layout `[ep_size, recv_capacity_per_rank,
+    H]` and resolves the output sharding via the public-API
+    `out_sharding` kwarg (FSDP preferred if both DP and FSDP are set,
+    otherwise the one that is set; raises if neither).
 """
 
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
+from ..sharding import global_mesh_resource
 
 __all__ = [
     "EpConfig",
@@ -108,8 +110,9 @@ def get_ep_num_local_experts() -> int:
 # ── ep_prepare ──────────────────────────────────────────────────────────────────
 # Inputs:  topk_idx [..., top_k] int32 or int64 (N-D; flattened in C++; int32 is
 #          upcast to int64 on-stream by the FFI).
-# Outputs: token_counts [num_local_experts] int32
-#          handle_mem [handle_mem_size] uint8
+# Outputs: token_counts [ep_size, num_local_experts] int32 (leading dim sharded on ep_resource)
+#          handle_mem   [ep_size, handle_mem_size]    uint8 (leading dim sharded on ep_resource)
+# Per-shard view at the FFI: token_counts [num_local_experts], handle_mem [N].
 
 
 class EpPreparePrimitive(BasePrimitive):
@@ -121,7 +124,13 @@ class EpPreparePrimitive(BasePrimitive):
 
     @staticmethod
     def abstract(topk_idx_aval, *, dispatch_output_per_expert_alignment):
-        num_local_experts = get_ep_num_local_experts()
+        # Mesh-global view: outputs carry a leading `ep_size` dim sharded on
+        # `ep_resource`. Under jit + custom_partitioning, each device's
+        # per-shard buffer is the inner slice (leading dim 1); the FFI sees
+        # that slice and reads/writes via `element_count()` (unchanged in C++).
+        cfg = get_ep_config()
+        ep_size = cfg.ep_size
+        num_local_experts = cfg.num_local_experts
         assert (
             len(topk_idx_aval.shape) >= 2
         ), f"topk_idx must be at least 2D [..., top_k], got shape {topk_idx_aval.shape}"
@@ -130,8 +139,8 @@ class EpPreparePrimitive(BasePrimitive):
             top_k,
             dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
         )
-        token_counts_aval = jax.core.ShapedArray((num_local_experts,), jnp.int32)
-        handle_mem_aval = jax.core.ShapedArray((handle_mem_size,), jnp.uint8)
+        token_counts_aval = jax.core.ShapedArray((ep_size, num_local_experts), jnp.int32)
+        handle_mem_aval = jax.core.ShapedArray((ep_size, handle_mem_size), jnp.uint8)
         return token_counts_aval, handle_mem_aval
 
     @staticmethod
@@ -157,9 +166,10 @@ class EpPreparePrimitive(BasePrimitive):
     @staticmethod
     def partition(dispatch_output_per_expert_alignment, mesh, arg_infos, result_infos):
         del result_infos
+        ep_axis = global_mesh_resource().ep_resource
         arg_shardings = (arg_infos[0].sharding,)
-        tc_sharding = NamedSharding(mesh, PartitionSpec(None))
-        hm_sharding = NamedSharding(mesh, PartitionSpec(None))
+        tc_sharding = NamedSharding(mesh, PartitionSpec(ep_axis, None))
+        hm_sharding = NamedSharding(mesh, PartitionSpec(ep_axis, None))
 
         def sharded_impl(topk_idx):
             return EpPreparePrimitive.impl(topk_idx, dispatch_output_per_expert_alignment)
@@ -169,7 +179,7 @@ class EpPreparePrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "T topk -> nle, hm"
+        return "T topk -> ep nle, ep hm"
 
 
 register_primitive(EpPreparePrimitive)
