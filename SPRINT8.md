@@ -298,3 +298,31 @@ Note: `tests/jax/test_multi_process_ep.py` is unaffected (it has no
 DP axis and uses `ep_size = num_procs`). On 8 GPUs it trips NCCL
 EP's LSA team size cap — a separate, pre-existing limitation, out
 of scope for SPRINT8.
+
+### 1×8 probe (NOT shipped, follow-up)
+
+The same sharded test under a `(dp=1, ep=8)` mesh exercises a
+single 8-rank EP group. Two issues surface before it passes:
+
+1. **`_NCCL_EP_LSA_TEAM_SIZE_MAX` must include 8.** The
+   `HYBRIDEP_SWITCH_LSA_TEAM_SIZE` macro at
+   `hybridep_adapter.cuh:178` only emits `case 8:` when
+   `_NCCL_EP_LSA_TEAM_SIZE_MAX >= 8`. Out of the box the Makefile
+   default is 32 (covers it), but a sm_90-only TE build that
+   passes `_NCCL_EP_LSA_TEAM_SIZE_MAX=8` to NCCL EP make is OK; a
+   stricter MAX=4 trips the assertion at
+   `device/hybridep_adapter.cu:416`.
+2. **NCCL EP needs SASS for the actual GPU arch.** Rebuilding
+   NCCL EP with `NVCC_GENCODE="-gencode=arch=compute_90,code=sm_90"`
+   on a B300 box (`compute_cap=10.3`) produces a `'named symbol
+   not found'` CUDA error at `device/hybrid_ep.cuh:4382` because
+   the `scan<...>` kernel has no SASS for sm_103 and PTX from
+   compute_120 is not backward-JIT-able. Rebuilding with
+   `compute_90,sm_90 compute_100,sm_100` gets past the symbol
+   lookup but the kernel then hits `CUDA_ERROR_LAUNCH_FAILED` at
+   runtime — likely a different NCCL-EP-internal correctness
+   issue at LSA_TEAM_SIZE=8. Out of scope for this sprint; track
+   as a follow-up.
+
+For the time being, the supported mesh shape on 8 GPUs is
+`(dp=2, ep=4)`. 1×4 still passes as before.
