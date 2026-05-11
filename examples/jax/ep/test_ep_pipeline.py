@@ -101,7 +101,7 @@ class TestEPPipeline(unittest.TestCase):
     def _moe_step(self, tokens, topk_idx, topk_weights, kernels):
         """Forward MoE: dispatch -> per-expert linear -> combine."""
         T = tokens.shape[0]
-        recv_tokens, recv_topk_weights, handle_mem, token_counts = ep_dispatch(
+        recv_tokens, recv_topk_weights, handle, token_counts = ep_dispatch(
             topk_idx, tokens, topk_weights, self.recv_capacity
         )
         # Local experts only — slice the global kernel along the expert axis.
@@ -110,7 +110,7 @@ class TestEPPipeline(unittest.TestCase):
             kernels, (self.rank * E_local, 0, 0), (E_local, kernels.shape[1], kernels.shape[2])
         )
         expert_out = _batched_expert_linear(recv_tokens, local_kernels, E_local)
-        result = ep_combine(handle_mem, token_counts, expert_out, recv_topk_weights, T)
+        result = ep_combine(handle, token_counts, expert_out, recv_topk_weights, T)
         return result
 
     # ── Test 1: forward numerics ──────────────────────────────────────────────

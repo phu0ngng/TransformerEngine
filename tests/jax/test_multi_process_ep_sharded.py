@@ -24,17 +24,32 @@ from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 from transformer_engine.jax.ep import ep_bootstrap, ep_dispatch, ep_combine
 
 
-# ── Test config (4-GPU box, Mesh(dp=2, ep=2)) ────────────────────────────────
+# ── Test config ─────────────────────────────────────────────────────────────
+# Factorise N = jax.process_count() into (DP, EP) with EP a multiple of 4 —
+# NCCL EP's hybridep_adapter asserts the LSA team size is a multiple of 4
+# (device/hybridep_adapter.cu:416). 4-GPU box → (1, 4); 8-GPU box → (2, 4).
 
-DP, EP = 1, 4
-NUM_LOCAL_EXPERTS = 2  # NLE per ep rank → num_experts = NLE * EP = 4
+NUM_LOCAL_EXPERTS = 2  # NLE per ep rank → num_experts = NLE * EP
 HIDDEN_DIM = 32
 TOP_K = 2
 TOKENS_PER_DP_SHARD = 4  # per device along dp
 
 
-def _build_mesh():
-    devs = np.asarray(jax.devices()).reshape(DP, EP)
+def _factor_dp_ep(num_procs):
+    """Pick (dp, ep) with ep a multiple of 4 and dp*ep == num_procs."""
+    if num_procs % 4 != 0:
+        raise ValueError(f"num_procs ({num_procs}) must be a multiple of 4 for NCCL EP")
+    ep = 4
+    while ep * 2 <= num_procs and num_procs % (ep * 2) == 0:
+        ep *= 2
+    # Prefer larger DP when both fit; clip to ep=4 for the smallest valid mesh
+    # if num_procs == 4. For num_procs == 8, this yields (dp=2, ep=4).
+    ep = 4 if num_procs <= 4 else 4
+    return num_procs // ep, ep
+
+
+def _build_mesh(dp, ep):
+    devs = np.asarray(jax.devices()).reshape(dp, ep)
     return Mesh(devs, ("dp", "ep"))
 
 
@@ -43,24 +58,23 @@ class TestEPSharded(unittest.TestCase):
     def setUpClass(cls):
         cls.num_procs = jax.process_count()
         cls.rank = jax.process_index()
-        assert (
-            cls.num_procs == DP * EP
-        ), f"need {DP*EP} procs for ({DP},{EP}) mesh; got {cls.num_procs}"
-        cls.num_experts = NUM_LOCAL_EXPERTS * EP
+        cls.dp, cls.ep = _factor_dp_ep(cls.num_procs)
+        assert cls.dp * cls.ep == cls.num_procs
+        cls.num_experts = NUM_LOCAL_EXPERTS * cls.ep
         # global recv_capacity = ep_size * per-rank worst case
-        cls.recv_capacity_per_rank = TOKENS_PER_DP_SHARD * DP * TOP_K
-        cls.recv_capacity = EP * cls.recv_capacity_per_rank
-        cls.mesh = _build_mesh()
+        cls.recv_capacity_per_rank = TOKENS_PER_DP_SHARD * cls.dp * TOP_K
+        cls.recv_capacity = cls.ep * cls.recv_capacity_per_rank
+        cls.mesh = _build_mesh(cls.dp, cls.ep)
         cls.mr = MeshResource(dp_resource="dp", ep_resource="ep")
         # Bootstrap under the mesh guard so ep_bootstrap can validate ep_size.
         with cls.mesh, global_shard_guard(cls.mr):
             ep_bootstrap(
                 world_size=cls.num_procs,
                 rank=cls.rank,
-                ep_size=EP,
+                ep_size=cls.ep,
                 num_experts=cls.num_experts,
-                max_tokens_per_rank=TOKENS_PER_DP_SHARD * DP,
-                max_recv_tokens_per_rank=cls.recv_capacity,
+                max_tokens_per_rank=TOKENS_PER_DP_SHARD,
+                max_recv_tokens_per_rank=cls.recv_capacity_per_rank,
                 hidden_dim=HIDDEN_DIM,
             )
 
@@ -71,15 +85,15 @@ class TestEPSharded(unittest.TestCase):
                 ep_bootstrap(
                     world_size=self.num_procs,
                     rank=self.rank,
-                    ep_size=EP,
+                    ep_size=self.ep,
                     num_experts=self.num_experts,
-                    max_tokens_per_rank=TOKENS_PER_DP_SHARD * DP,
-                    max_recv_tokens_per_rank=self.recv_capacity,
+                    max_tokens_per_rank=TOKENS_PER_DP_SHARD,
+                    max_recv_tokens_per_rank=self.recv_capacity_per_rank,
                     hidden_dim=HIDDEN_DIM,
                 )
 
     def test_dispatch_combine_round_trip(self):
-        T_global = TOKENS_PER_DP_SHARD * DP
+        T_global = TOKENS_PER_DP_SHARD * self.dp
         # Deterministic routing across DP-merged tokens
         topk_idx = np.empty((T_global, TOP_K), dtype=np.int32)
         for t in range(T_global):
@@ -106,7 +120,7 @@ class TestEPSharded(unittest.TestCase):
 
             @jax.jit
             def run(idx, toks, w):
-                recv_t, recv_w, hm, tc = ep_dispatch(idx, toks, w, self.recv_capacity)
+                recv_t, recv_w, handle, tc = ep_dispatch(idx, toks, w, self.recv_capacity)
                 # Sharding assertions on dispatch outputs (2D / 1D layouts).
                 ep_spec_2d = PartitionSpec("ep", None)
                 ep_spec_1d = PartitionSpec("ep")
@@ -116,7 +130,7 @@ class TestEPSharded(unittest.TestCase):
                 recv_w = jax.lax.with_sharding_constraint(
                     recv_w, NamedSharding(self.mesh, ep_spec_1d)
                 )
-                out = ep_combine(hm, tc, recv_t, recv_w, T_global)
+                out = ep_combine(handle, tc, recv_t, recv_w, T_global)
                 return out
 
             out = run(topk_idx_s, tokens_s, topk_w_s)

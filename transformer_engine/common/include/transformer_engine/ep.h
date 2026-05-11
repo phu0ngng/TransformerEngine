@@ -134,11 +134,19 @@ size_t nvte_ep_get_handle_mem_size(NVTEEpLayerConfig layer_config);
  *  num_local_experts is NOT passed here — it is derived from the cached
  *  group config (num_experts / ep_size) at nvte_ep_initialize time.
  *
+ *  Allocates a fresh uint64_t handle_id from an internal atomic counter and
+ *  caches the opened NCCL handle under that id. The id is returned via
+ *  the host-side out parameter handle_id_out — the caller (FFI) writes it
+ *  into a device int64[1] that flows through @jax.jit to subsequent
+ *  dispatch/combine ops, decoupling the cache key from the handle_mem
+ *  device pointer (which XLA may relocate).
+ *
  *  \param[in]     topk_idx      [T, top_k] int64 sparse routing indices.
  *  \param[out]    token_counts  Per-local-expert token counts [num_local_experts] int32.
  *  \param[in,out] handle_mem    uint8 device buffer sized by nvte_ep_get_handle_mem_size().
  *                               Holds NCCL EP routing tensors only — no host-side header.
  *                               No zero-init required.
+ *  \param[out]    handle_id_out Pointer to host uint64_t; receives the new id.
  *  \param[in]     dispatch_output_per_expert_alignment
  *                               HT EXPERT_MAJOR per-expert zone alignment in tokens
  *                               (pow2; 0/1 = no padding). Must match the value passed
@@ -146,7 +154,8 @@ size_t nvte_ep_get_handle_mem_size(NVTEEpLayerConfig layer_config);
  *  \param[in]     stream        CUDA stream.
  */
 void nvte_ep_prepare(NVTETensor topk_idx, NVTETensor token_counts, NVTETensor handle_mem,
-                     size_t dispatch_output_per_expert_alignment, cudaStream_t stream);
+                     uint64_t* handle_id_out, size_t dispatch_output_per_expert_alignment,
+                     cudaStream_t stream);
 
 /*! \brief Dispatch tokens (and routing weights) to expert ranks.
  *
@@ -155,10 +164,11 @@ void nvte_ep_prepare(NVTETensor topk_idx, NVTETensor token_counts, NVTETensor ha
  *  (tokens, topk_weights, topk_idx) and writes back 2 outputs
  *  (recv_tokens, recv_topk_weights).
  *
- *  topk_idx is consumed directly here (not cached by prepare) so the backend
- *  can be stateless across per-step ops — each call rebuilds a transient
- *  ncclEpHandle as a host-side view over the device handle_mem buffer.
+ *  Looks up the cached NCCL handle by handle_id (assigned at prepare time).
+ *  handle_mem must still be passed so the backend can re-Init the handle's
+ *  host-side view if XLA relocated the underlying device buffer.
  *
+ *  \param[in]     handle_id          uint64_t id returned by nvte_ep_prepare.
  *  \param[in]     handle_mem         Handle memory from nvte_ep_prepare.
  *  \param[in]     topk_idx           [T, top_k] int64 sparse routing indices.
  *  \param[in]     tokens             Input tokens [T, hidden_dim].
@@ -173,9 +183,9 @@ void nvte_ep_prepare(NVTETensor topk_idx, NVTETensor token_counts, NVTETensor ha
  *                                    to scatter back).
  *  \param[in]     stream             CUDA stream.
  */
-void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
-                      NVTETensor topk_weights, NVTETensor recv_tokens, NVTETensor recv_topk_weights,
-                      cudaStream_t stream);
+void nvte_ep_dispatch(uint64_t handle_id, NVTETensor handle_mem, NVTETensor topk_idx,
+                      NVTETensor tokens, NVTETensor topk_weights, NVTETensor recv_tokens,
+                      NVTETensor recv_topk_weights, cudaStream_t stream);
 
 /*! \brief Combine expert outputs back to originating ranks (unweighted sum).
  *
@@ -185,6 +195,7 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
  *  before calling this if weighted reduction is desired. topk_weights are
  *  only consumed by combine in the backward path (nvte_ep_combine_bwd).
  *
+ *  \param[in]  handle_id   uint64_t id returned by nvte_ep_prepare.
  *  \param[in]  handle_mem  Handle memory from nvte_ep_prepare.
  *  \param[in]  expert_out  Post-hadamard, masked expert outputs
  *                          [recv_T, hidden_dim] — caller has already applied
@@ -194,18 +205,19 @@ void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tok
  *  \param[out] result      Combined output [T, hidden_dim].
  *  \param[in]  stream      CUDA stream.
  */
-void nvte_ep_combine(NVTETensor handle_mem, NVTETensor expert_out, NVTETensor result,
-                     cudaStream_t stream);
+void nvte_ep_combine(uint64_t handle_id, NVTETensor handle_mem, NVTETensor expert_out,
+                     NVTETensor result, cudaStream_t stream);
 
 /*! \brief Backward of dispatch (combine direction in backward pass).
  *
+ *  \param[in]  handle_id    uint64_t id returned by nvte_ep_prepare.
  *  \param[in]  handle_mem   Handle memory from nvte_ep_prepare.
  *  \param[in]  grad         Gradient w.r.t. recv_tokens [recv_capacity, hidden_dim].
  *  \param[out] grad_tokens  Gradient w.r.t. tokens [T, hidden_dim].
  *  \param[in]  stream       CUDA stream.
  */
-void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTETensor grad_tokens,
-                          cudaStream_t stream);
+void nvte_ep_dispatch_bwd(uint64_t handle_id, NVTETensor handle_mem, NVTETensor grad,
+                          NVTETensor grad_tokens, cudaStream_t stream);
 
 /*! \brief Backward of combine (dispatch direction in backward pass).
  *
@@ -213,13 +225,14 @@ void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTETensor gra
  *  output is the gradient of `expert_out` from the forward call. Padded
  *  slots in `grad_expert_out` receive zero from NCCL EP.
  *
+ *  \param[in]  handle_id        uint64_t id returned by nvte_ep_prepare.
  *  \param[in]  handle_mem       Handle memory from nvte_ep_prepare.
  *  \param[in]  grad             Gradient w.r.t. result [T, hidden_dim].
  *  \param[out] grad_expert_out  Gradient w.r.t. expert_out [recv_capacity, hidden_dim].
  *  \param[in]  stream           CUDA stream.
  */
-void nvte_ep_combine_bwd(NVTETensor handle_mem, NVTETensor grad, NVTETensor grad_expert_out,
-                         cudaStream_t stream);
+void nvte_ep_combine_bwd(uint64_t handle_id, NVTETensor handle_mem, NVTETensor grad,
+                         NVTETensor grad_expert_out, cudaStream_t stream);
 
 #ifdef __cplusplus
 }

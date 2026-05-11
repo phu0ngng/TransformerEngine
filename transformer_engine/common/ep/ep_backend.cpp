@@ -12,16 +12,18 @@
  *  Each per-step op creates ephemeral ncclNDTensor_t handles around
  *  user-provided buffers — no allocations, negligible overhead.
  *
- *  Per-handle_mem cache: prepare() opens an ncclEpHandle_t the first time it
- *  sees a new handle_mem pointer (or when (alignment, top_k) differs from the
- *  cached entry) and stores it in handles_ keyed by the handle_mem pointer.
- *  Subsequent prepare()/dispatch()/combine() calls on the same handle_mem
- *  reuse that entry — combine() reads host-side fields set by
- *  ncclEpUpdateHandle (handle->num_tokens) and would assert if rebuilt per op.
- *  Multiple in-flight layers (pipeline parallelism) each carry their own
- *  handle_mem and therefore have independent entries. Cache is bounded by
- *  NVTE_EP_HANDLE_CACHE_SIZE (LRU; default 64). ~EPBackend() closes all
- *  entries.
+ *  Per-handle_id cache: prepare() allocates a fresh uint64_t handle_id from
+ *  an atomic counter, opens an ncclEpHandle_t against the passed handle_mem,
+ *  and stores it in handles_ keyed by the new id. Subsequent
+ *  dispatch()/combine() pass the same handle_id (threaded through @jax.jit
+ *  as an int64[1] device tensor) so the cache lookup is independent of
+ *  the handle_mem device pointer (which XLA may relocate between primitive
+ *  boundaries). combine() reads host-side fields set by ncclEpUpdateHandle
+ *  (handle->num_tokens) and would assert if rebuilt per op, so the cache
+ *  must survive across the prepare → dispatch → combine cycle. Multiple
+ *  in-flight layers (pipeline parallelism) get independent ids and entries.
+ *  Cache is bounded by NVTE_EP_HANDLE_CACHE_SIZE (LRU; default 64).
+ *  ~EPBackend() closes all entries.
  *
  *  API patterns:
  *  - ncclEpInitHandle: maps routing buffers in handle_mem (no collective)
@@ -286,7 +288,7 @@ void EPBackend::evict_if_full() {
     handle_cache_cap_ = (cap_env != nullptr) ? std::max<size_t>(1, std::atoi(cap_env)) : 64;
   }
   while (handles_.size() >= handle_cache_cap_ && !lru_.empty()) {
-    void* victim = lru_.back();
+    uint64_t victim = lru_.back();
     auto it = handles_.find(victim);
     if (it != handles_.end()) {
       close_handle(it->second.first.handle);
@@ -296,47 +298,41 @@ void EPBackend::evict_if_full() {
   }
 }
 
-EPBackend::HandleEntry& EPBackend::get_or_open_entry(void* handle_mem, int top_k,
-                                                     size_t alignment) {
-  auto it = handles_.find(handle_mem);
-  if (it != handles_.end()) {
-    HandleEntry& entry = it->second.first;
-    if (entry.alignment != alignment || entry.top_k != top_k) {
-      // Config changed for this handle_mem — close + reopen.
-      close_handle(entry.handle);
-      entry.handle = open_handle(handle_mem, top_k, alignment);
-      entry.alignment = alignment;
-      entry.top_k = top_k;
-    }
-    lru_.erase(it->second.second);
-    lru_.push_front(handle_mem);
-    it->second.second = lru_.begin();
-    return entry;
-  }
+uint64_t EPBackend::insert_new_entry(void* handle_mem, int top_k, size_t alignment) {
   evict_if_full();
   ncclEpHandle_t h = open_handle(handle_mem, top_k, alignment);
-  lru_.push_front(handle_mem);
-  auto ins =
-      handles_.emplace(handle_mem, std::make_pair(HandleEntry{h, alignment, top_k}, lru_.begin()));
-  return ins.first->second.first;
+  uint64_t id = next_handle_id_.fetch_add(1, std::memory_order_relaxed);
+  lru_.push_front(id);
+  handles_.emplace(id, std::make_pair(HandleEntry{h, handle_mem, alignment, top_k}, lru_.begin()));
+  return id;
 }
 
-EPBackend::HandleEntry& EPBackend::lookup_entry(void* handle_mem) {
-  auto it = handles_.find(handle_mem);
-  NVTE_CHECK(it != handles_.end(),
-             "ep op on handle_mem with no cached handle — call ep_prepare first.");
+EPBackend::HandleEntry& EPBackend::lookup_entry(uint64_t handle_id, void* handle_mem) {
+  auto it = handles_.find(handle_id);
+  NVTE_CHECK(it != handles_.end(), "ep op on handle_id=", handle_id,
+             " with no cached handle — call ep_prepare first.");
+  HandleEntry& entry = it->second.first;
+  // XLA may relocate handle_mem between primitive boundaries; re-Init the
+  // host-side view when the device pointer changed. ncclEpInitHandle is pure
+  // host-side pointer arithmetic over the existing handle_mem block — device
+  // data populated by a prior ncclEpUpdateHandle is preserved.
+  if (entry.handle_mem != handle_mem) {
+    close_handle(entry.handle);
+    entry.handle = open_handle(handle_mem, entry.top_k, entry.alignment);
+    entry.handle_mem = handle_mem;
+  }
   lru_.erase(it->second.second);
-  lru_.push_front(handle_mem);
+  lru_.push_front(handle_id);
   it->second.second = lru_.begin();
-  return it->second.first;
+  return entry;
 }
 
 // ---------------------------------------------------------------------------
 // Per-step operations
 // ---------------------------------------------------------------------------
 
-void EPBackend::prepare(const NVTETensor topk_idx, NVTETensor token_counts, void* handle_mem,
-                        size_t dispatch_output_per_expert_alignment, cudaStream_t stream) {
+uint64_t EPBackend::prepare(const NVTETensor topk_idx, NVTETensor token_counts, void* handle_mem,
+                            size_t dispatch_output_per_expert_alignment, cudaStream_t stream) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
 
@@ -364,22 +360,25 @@ void EPBackend::prepare(const NVTETensor topk_idx, NVTETensor token_counts, void
     handle_num_local_tensors = 1;
   }
 
-  // Cache the NCCL handle per handle_mem buffer. Closes + reopens when the
-  // (alignment, top_k) for this buffer changes. Concurrent layers (PP, MoE
-  // stacks) each have their own handle_mem and therefore their own entry.
+  // Allocate a fresh handle_id and cache the opened NCCL handle under it.
+  // The id is returned to the caller (FFI), which writes it to a device
+  // int64[1] that flows through @jax.jit to subsequent dispatch/combine ops.
   std::lock_guard<std::mutex> lock(mutex_);
-  HandleEntry& entry =
-      get_or_open_entry(handle_mem, static_cast<int>(top_k), dispatch_output_per_expert_alignment);
+  uint64_t handle_id =
+      insert_new_entry(handle_mem, static_cast<int>(top_k), dispatch_output_per_expert_alignment);
+  HandleEntry& entry = handles_.find(handle_id)->second.first;
   NVTE_CHECK_NCCL(ncclEpUpdateHandle(entry.handle, nccl_topk_idx, handle_local_tensors,
                                      handle_num_local_tensors, stream));
 
   destroy_tensor(nccl_topk_idx);
   if (handle_num_local_tensors > 0) destroy_tensor(handle_local_tensors[0]);
+  return handle_id;
 }
 
-void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
-                         const NVTETensor topk_weights, NVTETensor recv_tokens,
-                         NVTETensor recv_topk_weights, cudaStream_t stream) {
+void EPBackend::dispatch(uint64_t handle_id, void* handle_mem, const NVTETensor topk_idx,
+                         const NVTETensor tokens, const NVTETensor topk_weights,
+                         NVTETensor recv_tokens, NVTETensor recv_topk_weights,
+                         cudaStream_t stream) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
 
@@ -450,11 +449,11 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
   ncclEpDispatchConfig_t dispatch_cfg;
   memset(&dispatch_cfg, 0, sizeof(dispatch_cfg));
 
-  // Look up the cached handle for this handle_mem (set by prepare()).
+  // Look up the cached handle by handle_id (set by prepare()).
   // combine_bwd reaches this path through dispatch() and must run after a
-  // prepare on the same handle_mem so the alignment matches.
+  // prepare with the same handle_id so the alignment matches.
   std::lock_guard<std::mutex> lock(mutex_);
-  HandleEntry& entry = lookup_entry(handle_mem);
+  HandleEntry& entry = lookup_entry(handle_id, handle_mem);
   NVTE_CHECK_NCCL(ncclEpDispatch(entry.handle, inputs, num_inputs, outputs, num_outputs, nullptr, 0,
                                  0, &dispatch_cfg, stream));
 
@@ -465,8 +464,8 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
   if (nccl_topk_weights_out) destroy_tensor(nccl_topk_weights_out);
 }
 
-void EPBackend::combine(void* handle_mem, const NVTETensor expert_out, NVTETensor result,
-                        cudaStream_t stream) {
+void EPBackend::combine(uint64_t handle_id, void* handle_mem, const NVTETensor expert_out,
+                        NVTETensor result, cudaStream_t stream) {
   NVTE_CHECK(initialized_, "EPBackend not initialized");
   NVTE_CHECK(handle_mem != nullptr, "handle_mem must not be null");
 
@@ -491,10 +490,10 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out, NVTETenso
   const ncclNDTensor_t inputs[] = {nccl_expert_in};
   const ncclNDTensor_t outputs[] = {nccl_result_out};
 
-  // Combine looks up the cached handle from prepare() — it reads
-  // handle->num_tokens which is only populated by ncclEpUpdateHandle.
+  // Combine looks up the cached handle by handle_id (from prepare()) — it
+  // reads handle->num_tokens which is only populated by ncclEpUpdateHandle.
   std::lock_guard<std::mutex> lock(mutex_);
-  HandleEntry& entry = lookup_entry(handle_mem);
+  HandleEntry& entry = lookup_entry(handle_id, handle_mem);
   NVTE_CHECK_NCCL(
       ncclEpCombine(entry.handle, inputs, 1, outputs, 1, nullptr, 0, 0, nullptr, stream));
 
@@ -502,17 +501,17 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out, NVTETenso
   destroy_tensor(nccl_result_out);
 }
 
-void EPBackend::dispatch_bwd(void* handle_mem, const NVTETensor grad, NVTETensor grad_tokens,
-                             cudaStream_t stream) {
+void EPBackend::dispatch_bwd(uint64_t handle_id, void* handle_mem, const NVTETensor grad,
+                             NVTETensor grad_tokens, cudaStream_t stream) {
   // Backward of dispatch is a combine in disguise.
-  combine(handle_mem, grad, grad_tokens, stream);
+  combine(handle_id, handle_mem, grad, grad_tokens, stream);
 }
 
-void EPBackend::combine_bwd(void* handle_mem, const NVTETensor grad, NVTETensor grad_expert_out,
-                            cudaStream_t stream) {
+void EPBackend::combine_bwd(uint64_t handle_id, void* handle_mem, const NVTETensor grad,
+                            NVTETensor grad_expert_out, cudaStream_t stream) {
   // Backward of combine is a dispatch in the backward direction (no weights, 1 input).
-  dispatch(handle_mem, /*topk_idx=*/nullptr, grad, /*topk_weights=*/nullptr, grad_expert_out,
-           /*recv_topk_weights=*/nullptr, stream);
+  dispatch(handle_id, handle_mem, /*topk_idx=*/nullptr, grad, /*topk_weights=*/nullptr,
+           grad_expert_out, /*recv_topk_weights=*/nullptr, stream);
 }
 
 }  // namespace ep

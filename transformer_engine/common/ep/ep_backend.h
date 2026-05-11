@@ -12,17 +12,19 @@
  *  Handle lifecycle: NCCL EP keeps device-side routing state in handle_mem
  *  (caller-owned uint8 buffer of size ncclEpHandleMemSize). The host-side
  *  ncclEpHandle_t is opened by prepare() against a specific handle_mem buffer
- *  and CACHED in `handles_` (keyed on the handle_mem device pointer) so that
- *  later dispatch()/combine()/*_bwd() calls on the same handle_mem reuse it
- *  — combine() reads host-side fields populated by ncclEpUpdateHandle
+ *  and CACHED in `handles_` keyed by a uint64_t handle_id allocated by an
+ *  internal atomic counter at prepare() time. The id flows through @jax.jit
+ *  as an int64[1] device tensor that the FFI reads on each subsequent op —
+ *  this decouples the cache key from the handle_mem device pointer, which
+ *  XLA may relocate between primitive boundaries.
+ *  combine() reads host-side fields populated by ncclEpUpdateHandle
  *  (notably handle->num_tokens). Per-layer / pipeline-parallel friendly: each
- *  layer owns its own handle_mem and therefore its own cache entry, so
- *  interleaved layer calls do not clobber each other.
- *  - prepare():     open (or reuse) cache entry + ncclEpUpdateHandle
- *                   (collective; AllGather routing → handle_mem). Close +
- *                   reopen when the entry's (alignment, top_k) differs.
- *  - dispatch():    lookup entry by handle_mem pointer + ncclEpDispatch.
- *  - combine():     lookup entry by handle_mem pointer + ncclEpCombine.
+ *  prepare gets a unique id and therefore an independent entry.
+ *  - prepare():     allocate new id, open cache entry + ncclEpUpdateHandle
+ *                   (collective; AllGather routing → handle_mem). Returns id.
+ *  - dispatch():    lookup entry by handle_id + ncclEpDispatch. Reopens the
+ *                   NCCL handle if handle_mem moved since the cached open.
+ *  - combine():     lookup entry by handle_id + ncclEpCombine.
  *  - dispatch_bwd → combine();   combine_bwd → dispatch() with no weights.
  *  Cache eviction: LRU with cap NVTE_EP_HANDLE_CACHE_SIZE (default 64).
  */
@@ -35,7 +37,9 @@
 #include <nccl_ep.h>
 #include <transformer_engine/ep.h>
 
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <list>
 #include <mutex>
 #include <unordered_map>
@@ -63,21 +67,25 @@ class EPBackend {
 
   size_t get_handle_mem_size(NVTEEpLayerConfig layer_config);
 
-  void prepare(const NVTETensor topk_idx, NVTETensor token_counts, void* handle_mem,
-               size_t dispatch_output_per_expert_alignment, cudaStream_t stream);
+  // prepare allocates a fresh uint64_t handle_id from an atomic counter, opens
+  // (or reopens) the NCCL handle against handle_mem, and caches it under that
+  // id. Returns the new id; the FFI writes it into a 1-element int64 device
+  // buffer that flows alongside handle_mem through @jax.jit to subsequent ops.
+  uint64_t prepare(const NVTETensor topk_idx, NVTETensor token_counts, void* handle_mem,
+                   size_t dispatch_output_per_expert_alignment, cudaStream_t stream);
 
-  void dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTETensor tokens,
-                const NVTETensor topk_weights, NVTETensor recv_tokens, NVTETensor recv_topk_weights,
-                cudaStream_t stream);
+  void dispatch(uint64_t handle_id, void* handle_mem, const NVTETensor topk_idx,
+                const NVTETensor tokens, const NVTETensor topk_weights, NVTETensor recv_tokens,
+                NVTETensor recv_topk_weights, cudaStream_t stream);
 
-  void combine(void* handle_mem, const NVTETensor expert_out, NVTETensor result,
+  void combine(uint64_t handle_id, void* handle_mem, const NVTETensor expert_out, NVTETensor result,
                cudaStream_t stream);
 
-  void dispatch_bwd(void* handle_mem, const NVTETensor grad, NVTETensor grad_tokens,
-                    cudaStream_t stream);
+  void dispatch_bwd(uint64_t handle_id, void* handle_mem, const NVTETensor grad,
+                    NVTETensor grad_tokens, cudaStream_t stream);
 
-  void combine_bwd(void* handle_mem, const NVTETensor grad, NVTETensor grad_expert_out,
-                   cudaStream_t stream);
+  void combine_bwd(uint64_t handle_id, void* handle_mem, const NVTETensor grad,
+                   NVTETensor grad_expert_out, cudaStream_t stream);
 
  private:
   EPBackend() = default;
@@ -122,24 +130,29 @@ class EPBackend {
   bool initialized_{false};
   size_t routing_buf_size_{0};
   std::mutex mutex_;
-  // Per-handle_mem cache (LRU). Key is the device pointer of the handle_mem
-  // buffer; entry holds the opened NCCL handle and the (alignment, top_k)
-  // config it was opened with. Multiple layers / PP stages each own their own
-  // handle_mem and therefore have independent entries.
+  // Per-handle_id cache (LRU). Key is the uint64_t id assigned at prepare time
+  // (NOT the handle_mem device pointer — under @jax.jit XLA may relocate
+  // buffers between primitive boundaries, so the device pointer is not stable).
+  // Entry holds the opened NCCL handle, the handle_mem pointer it was opened
+  // against, and the (alignment, top_k) config. Multiple layers / PP stages
+  // each get a unique id from next_handle_id_ and therefore independent entries.
   struct HandleEntry {
     ncclEpHandle_t handle;
+    void* handle_mem;
     size_t alignment;
     int top_k;
   };
-  std::list<void*> lru_;  // front = most recently used
-  std::unordered_map<void*, std::pair<HandleEntry, std::list<void*>::iterator>> handles_;
-  size_t handle_cache_cap_{0};  // set lazily from NVTE_EP_HANDLE_CACHE_SIZE
+  std::list<uint64_t> lru_;  // front = most recently used
+  std::unordered_map<uint64_t, std::pair<HandleEntry, std::list<uint64_t>::iterator>> handles_;
+  std::atomic<uint64_t> next_handle_id_{1};  // 0 reserved as "no id"
+  size_t handle_cache_cap_{0};               // set lazily from NVTE_EP_HANDLE_CACHE_SIZE
 
-  // Lookup/insert a cache entry for the given handle_mem pointer, opening or
-  // reopening the NCCL handle when needed. Caller must hold mutex_.
-  HandleEntry& get_or_open_entry(void* handle_mem, int top_k, size_t alignment);
-  // Lookup a cache entry; aborts if not present. Touches LRU. Holds mutex_.
-  HandleEntry& lookup_entry(void* handle_mem);
+  // Allocate a fresh uint64_t handle_id, open the NCCL handle against
+  // handle_mem, and insert under the new id. Caller must hold mutex_.
+  uint64_t insert_new_entry(void* handle_mem, int top_k, size_t alignment);
+  // Lookup a cache entry by handle_id; reopens the NCCL handle if handle_mem
+  // moved since the cached open. Aborts if id not present. Holds mutex_.
+  HandleEntry& lookup_entry(uint64_t handle_id, void* handle_mem);
   // Bound the cache to handle_cache_cap_ entries; closes the LRU tail.
   void evict_if_full();
 };

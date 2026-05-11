@@ -38,39 +38,41 @@ size_t nvte_ep_get_handle_mem_size(NVTEEpLayerConfig layer_config) {
 }
 
 void nvte_ep_prepare(NVTETensor topk_idx, NVTETensor token_counts, NVTETensor handle_mem,
-                     size_t dispatch_output_per_expert_alignment, cudaStream_t stream) {
-  void* mem_ptr = nvte_tensor_data(handle_mem);
-  NVTE_CHECK(mem_ptr != nullptr, "handle_mem tensor data must not be null");
-  EPBackend::get().prepare(topk_idx, token_counts, mem_ptr, dispatch_output_per_expert_alignment,
-                           stream);
-}
-
-void nvte_ep_dispatch(NVTETensor handle_mem, NVTETensor topk_idx, NVTETensor tokens,
-                      NVTETensor topk_weights, NVTETensor recv_tokens, NVTETensor recv_topk_weights,
-                      cudaStream_t stream) {
-  void* mem_ptr = nvte_tensor_data(handle_mem);
-  NVTE_CHECK(mem_ptr != nullptr, "handle_mem tensor data must not be null");
-  EPBackend::get().dispatch(mem_ptr, topk_idx, tokens, topk_weights, recv_tokens, recv_topk_weights,
-                            stream);
-}
-
-void nvte_ep_combine(NVTETensor handle_mem, NVTETensor expert_out, NVTETensor result,
+                     uint64_t* handle_id_out, size_t dispatch_output_per_expert_alignment,
                      cudaStream_t stream) {
   void* mem_ptr = nvte_tensor_data(handle_mem);
   NVTE_CHECK(mem_ptr != nullptr, "handle_mem tensor data must not be null");
-  EPBackend::get().combine(mem_ptr, expert_out, result, stream);
+  NVTE_CHECK(handle_id_out != nullptr, "handle_id_out must not be null");
+  *handle_id_out = EPBackend::get().prepare(topk_idx, token_counts, mem_ptr,
+                                            dispatch_output_per_expert_alignment, stream);
 }
 
-void nvte_ep_dispatch_bwd(NVTETensor handle_mem, NVTETensor grad, NVTETensor grad_tokens,
-                          cudaStream_t stream) {
+void nvte_ep_dispatch(uint64_t handle_id, NVTETensor handle_mem, NVTETensor topk_idx,
+                      NVTETensor tokens, NVTETensor topk_weights, NVTETensor recv_tokens,
+                      NVTETensor recv_topk_weights, cudaStream_t stream) {
   void* mem_ptr = nvte_tensor_data(handle_mem);
   NVTE_CHECK(mem_ptr != nullptr, "handle_mem tensor data must not be null");
-  EPBackend::get().dispatch_bwd(mem_ptr, grad, grad_tokens, stream);
+  EPBackend::get().dispatch(handle_id, mem_ptr, topk_idx, tokens, topk_weights, recv_tokens,
+                            recv_topk_weights, stream);
 }
 
-void nvte_ep_combine_bwd(NVTETensor handle_mem, NVTETensor grad, NVTETensor grad_expert_out,
-                         cudaStream_t stream) {
+void nvte_ep_combine(uint64_t handle_id, NVTETensor handle_mem, NVTETensor expert_out,
+                     NVTETensor result, cudaStream_t stream) {
   void* mem_ptr = nvte_tensor_data(handle_mem);
   NVTE_CHECK(mem_ptr != nullptr, "handle_mem tensor data must not be null");
-  EPBackend::get().combine_bwd(mem_ptr, grad, grad_expert_out, stream);
+  EPBackend::get().combine(handle_id, mem_ptr, expert_out, result, stream);
+}
+
+void nvte_ep_dispatch_bwd(uint64_t handle_id, NVTETensor handle_mem, NVTETensor grad,
+                          NVTETensor grad_tokens, cudaStream_t stream) {
+  void* mem_ptr = nvte_tensor_data(handle_mem);
+  NVTE_CHECK(mem_ptr != nullptr, "handle_mem tensor data must not be null");
+  EPBackend::get().dispatch_bwd(handle_id, mem_ptr, grad, grad_tokens, stream);
+}
+
+void nvte_ep_combine_bwd(uint64_t handle_id, NVTETensor handle_mem, NVTETensor grad,
+                         NVTETensor grad_expert_out, cudaStream_t stream) {
+  void* mem_ptr = nvte_tensor_data(handle_mem);
+  NVTE_CHECK(mem_ptr != nullptr, "handle_mem tensor data must not be null");
+  EPBackend::get().combine_bwd(handle_id, mem_ptr, grad, grad_expert_out, stream);
 }

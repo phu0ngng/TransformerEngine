@@ -70,9 +70,13 @@ size_t EpGetHandleMemSize(int top_k, size_t dispatch_output_per_expert_alignment
 //          int32 is upcast to int64 on-stream via a scratch workspace).
 // Outputs: token_counts [num_local_experts] int32
 //          handle_mem [handle_mem_size] uint8
+//          handle_id [1] int64 — fresh uint64_t id from EPBackend's atomic counter;
+//                   the cache key for subsequent dispatch/combine/*_bwd ops.
+//                   Flows through @jax.jit as a regular pytree leaf so XLA's
+//                   buffer relocation of handle_mem doesn't break the lookup.
 
 Error_Type EpPrepareFFI(cudaStream_t stream, Buffer_Type topk_idx, Result_Type token_counts,
-                        Result_Type handle_mem, EpPrepareConfig config) {
+                        Result_Type handle_mem, Result_Type handle_id, EpPrepareConfig config) {
   auto topk_dims = topk_idx.dimensions();
   NVTE_CHECK(topk_dims.size() >= 2,
              "topk_idx must be at least 2D [..., top_k], got ndim=", topk_dims.size());
@@ -102,8 +106,20 @@ Error_Type EpPrepareFFI(cudaStream_t stream, Buffer_Type topk_idx, Result_Type t
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem->element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem->untyped_data(), hm_shape, DType::kByte);
 
-  nvte_ep_prepare(topk_idx_.data(), token_counts_.data(), handle_mem_.data(),
+  uint64_t new_handle_id = 0;
+  nvte_ep_prepare(topk_idx_.data(), token_counts_.data(), handle_mem_.data(), &new_handle_id,
                   static_cast<size_t>(config.dispatch_output_per_expert_alignment), stream);
+
+  // Stream-async H→D copy so the id buffer is populated by the time downstream
+  // ops on the same stream read it. The id was already allocated host-side by
+  // EPBackend::prepare; the copy just publishes it to JAX's pytree leaf.
+  NVTE_CHECK(handle_id->element_count() == 1, "handle_id output must be 1 element; got ",
+             handle_id->element_count());
+  static_assert(sizeof(uint64_t) == sizeof(int64_t),
+                "handle_id uint64<->int64 reinterpret requires equal width");
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(handle_id->untyped_data(), &new_handle_id, sizeof(uint64_t),
+                                  cudaMemcpyHostToDevice, stream));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
 
   if (topk_idx_i64_workspace != nullptr) {
     NVTE_CHECK_CUDA(cudaFreeAsync(topk_idx_i64_workspace, stream));
@@ -117,20 +133,35 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
                                   .Arg<Buffer_Type>()      // topk_idx
                                   .Ret<Buffer_Type>()      // token_counts
                                   .Ret<Buffer_Type>()      // handle_mem
+                                  .Ret<Buffer_Type>()      // handle_id
                                   .Attrs<EpPrepareConfig>(),
                               FFI_CudaGraph_Traits);
 
+// Synchronously read the int64 handle_id from a 1-element device buffer.
+// Used by dispatch/combine/*_bwd FFI ops as the cache lookup key.
+static uint64_t read_handle_id_sync(Buffer_Type handle_id, cudaStream_t stream) {
+  NVTE_CHECK(handle_id.element_count() == 1, "handle_id input must be 1 element; got ",
+             handle_id.element_count());
+  uint64_t host_id = 0;
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(&host_id, handle_id.untyped_data(), sizeof(uint64_t),
+                                  cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+  return host_id;
+}
+
 // ── ep_dispatch ───────────────────────────────────────────────────────────────
 // Inputs:  handle_mem [N] uint8
+//          handle_id  [1] int64 (cache key from ep_prepare)
 //          tokens [..., H]            (N-D, flattened internally)
 //          topk_idx [..., top_k]      (N-D, flattened internally)
 //          topk_weights [..., top_k] float32 (N-D, flattened internally; required)
 // Outputs: recv_tokens [recv_capacity, H]      (always 2D)
 //          recv_topk_weights [recv_capacity] f32 (always 1D, 1 weight per slot)
 
-Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type topk_idx,
-                         Buffer_Type tokens, Buffer_Type topk_weights, Result_Type recv_tokens,
-                         Result_Type recv_topk_weights, EpDispatchConfig config) {
+Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type handle_id,
+                         Buffer_Type topk_idx, Buffer_Type tokens, Buffer_Type topk_weights,
+                         Result_Type recv_tokens, Result_Type recv_topk_weights,
+                         EpDispatchConfig config) {
   auto token_dims = tokens.dimensions();
   NVTE_CHECK(token_dims.size() >= 2,
              "tokens must be at least 2D [..., H], got ndim=", token_dims.size());
@@ -193,7 +224,8 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
   auto recv_topk_weights_ =
       TensorWrapper(recv_topk_weights->untyped_data(), recv_w_shape, DType::kFloat32);
 
-  nvte_ep_dispatch(handle_mem_.data(), topk_idx_.data(), tokens_.data(), topk_weights_.data(),
+  uint64_t hid = read_handle_id_sync(handle_id, stream);
+  nvte_ep_dispatch(hid, handle_mem_.data(), topk_idx_.data(), tokens_.data(), topk_weights_.data(),
                    recv_tokens_.data(), recv_topk_weights_.data(), stream);
 
   if (topk_idx_i64_workspace != nullptr) {
@@ -206,6 +238,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
                                   .Arg<Buffer_Type>()      // handle_mem
+                                  .Arg<Buffer_Type>()      // handle_id
                                   .Arg<Buffer_Type>()      // topk_idx
                                   .Arg<Buffer_Type>()      // tokens
                                   .Arg<Buffer_Type>()      // topk_weights
@@ -216,11 +249,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
 
 // ── ep_combine ────────────────────────────────────────────────────────────────
 // Inputs:  handle_mem [N] uint8 (per-shard from [ep_size, N])
+//          handle_id  [1] int64 (cache key from ep_prepare)
 //          expert_out [1, recv_capacity_per_rank, H] (per-shard from [ep_size, recv_pr, H])
 // Outputs: result     [..., H]             (N-D; leading dims flattened internally)
 
-Error_Type EpCombineFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type expert_out,
-                        Result_Type result, EpCombineConfig config) {
+Error_Type EpCombineFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type handle_id,
+                        Buffer_Type expert_out, Result_Type result, EpCombineConfig config) {
   // Per-shard view: expert_out is 2D [recv_capacity_per_rank, H].
   auto eo_dims = expert_out.dimensions();
 
@@ -245,7 +279,8 @@ Error_Type EpCombineFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type
   std::vector<size_t> res_shape = {res_T_flat, H};
   auto result_ = TensorWrapper(result->untyped_data(), res_shape, eo_dtype);
 
-  nvte_ep_combine(handle_mem_.data(), expert_out_.data(), result_.data(), stream);
+  uint64_t hid = read_handle_id_sync(handle_id, stream);
+  nvte_ep_combine(hid, handle_mem_.data(), expert_out_.data(), result_.data(), stream);
 
   return ffi_with_cuda_error_check();
 }
@@ -254,6 +289,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineHandler, EpCombineFFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
                                   .Arg<Buffer_Type>()      // handle_mem
+                                  .Arg<Buffer_Type>()      // handle_id
                                   .Arg<Buffer_Type>()      // expert_out
                                   .Ret<Buffer_Type>()      // result
                                   .Attrs<EpCombineConfig>(),
@@ -261,11 +297,12 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineHandler, EpCombineFFI,
 
 // ── ep_dispatch_bwd ───────────────────────────────────────────────────────────
 // Inputs:  handle_mem [N] uint8 (per-shard)
+//          handle_id  [1] int64 (cache key from ep_prepare)
 //          grad [1, recv_capacity_per_rank, H] (per-shard from [ep_size, recv_pr, H])
 // Outputs: grad_tokens [..., H]     (N-D; matches original tokens shape)
 
-Error_Type EpDispatchBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type grad,
-                            Result_Type grad_tokens, EpDispatchBwdConfig config) {
+Error_Type EpDispatchBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type handle_id,
+                            Buffer_Type grad, Result_Type grad_tokens, EpDispatchBwdConfig config) {
   // Per-shard view: grad is 2D [recv_capacity_per_rank, H].
   auto grad_dims = grad.dimensions();
 
@@ -288,7 +325,8 @@ Error_Type EpDispatchBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_
   std::vector<size_t> out_shape = {T_flat, H};
   auto grad_tokens_ = TensorWrapper(grad_tokens->untyped_data(), out_shape, g_dtype);
 
-  nvte_ep_dispatch_bwd(handle_mem_.data(), grad_.data(), grad_tokens_.data(), stream);
+  uint64_t hid = read_handle_id_sync(handle_id, stream);
+  nvte_ep_dispatch_bwd(hid, handle_mem_.data(), grad_.data(), grad_tokens_.data(), stream);
 
   return ffi_with_cuda_error_check();
 }
@@ -297,6 +335,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchBwdHandler, EpDispatchBwdFFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
                                   .Arg<Buffer_Type>()      // handle_mem
+                                  .Arg<Buffer_Type>()      // handle_id
                                   .Arg<Buffer_Type>()      // grad (w.r.t. recv_tokens)
                                   .Ret<Buffer_Type>()      // grad_tokens
                                   .Attrs<EpDispatchBwdConfig>(),
@@ -304,12 +343,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchBwdHandler, EpDispatchBwdFFI,
 
 // ── ep_combine_bwd ────────────────────────────────────────────────────────────
 // Inputs:  handle_mem [N] uint8 (per-shard)
+//          handle_id  [1] int64 (cache key from ep_prepare)
 //          grad [..., H]            (N-D grad w.r.t. result; flattened internally)
 // Outputs: grad_expert_out [1, recv_capacity_per_rank, H] (per-shard from
 //                          [ep_size, recv_pr, H])
 
-Error_Type EpCombineBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type grad,
-                           Result_Type grad_expert_out, EpCombineBwdConfig config) {
+Error_Type EpCombineBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type handle_id,
+                           Buffer_Type grad, Result_Type grad_expert_out,
+                           EpCombineBwdConfig config) {
   auto grad_dims = grad.dimensions();
   NVTE_CHECK(grad_dims.size() >= 2,
              "grad must be at least 2D [..., H], got ndim=", grad_dims.size());
@@ -333,7 +374,8 @@ Error_Type EpCombineBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_T
   std::vector<size_t> out_shape = {recv_capacity_per_rank, H};
   auto grad_expert_out_ = TensorWrapper(grad_expert_out->untyped_data(), out_shape, g_dtype);
 
-  nvte_ep_combine_bwd(handle_mem_.data(), grad_.data(), grad_expert_out_.data(), stream);
+  uint64_t hid = read_handle_id_sync(handle_id, stream);
+  nvte_ep_combine_bwd(hid, handle_mem_.data(), grad_.data(), grad_expert_out_.data(), stream);
 
   return ffi_with_cuda_error_check();
 }
@@ -342,6 +384,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineBwdHandler, EpCombineBwdFFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()  // stream
                                   .Arg<Buffer_Type>()      // handle_mem
+                                  .Arg<Buffer_Type>()      // handle_id
                                   .Arg<Buffer_Type>()      // grad (w.r.t. result)
                                   .Ret<Buffer_Type>()      // grad_expert_out
                                   .Attrs<EpCombineBwdConfig>(),

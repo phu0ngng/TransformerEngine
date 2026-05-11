@@ -29,7 +29,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from jax.sharding import Mesh
+
 from transformer_engine.jax.ep import ep_bootstrap, ep_prepare, ep_dispatch, ep_combine
+from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 import transformer_engine.jax.cpp_extensions as tex
 
 
@@ -71,6 +74,16 @@ class TestEP(unittest.TestCase):
         cls.max_tokens_per_rank = cls.num_tokens
         # Worst case: every src token's full top_k fan-out lands on this rank.
         cls.recv_capacity = cls.num_procs * cls.num_tokens * cls.top_k
+
+        # ep_bootstrap requires MeshResource.ep_resource. Build a 1×N (DP=1)
+        # Mesh and enter persistent guards so EP primitives can pick up the axes.
+        devs = np.asarray(jax.devices()).reshape(1, cls.num_procs)
+        cls.mesh = Mesh(devs, ("dp", "ep"))
+        cls.mr = MeshResource(dp_resource="dp", ep_resource="ep")
+        cls._mesh_cm = cls.mesh
+        cls._mesh_cm.__enter__()
+        cls._guard_cm = global_shard_guard(cls.mr)
+        cls._guard_cm.__enter__()
 
         ep_bootstrap(
             world_size=cls.num_procs,
@@ -136,7 +149,7 @@ class TestEP(unittest.TestCase):
 
     def test_prepare_token_counts(self):
         topk_idx = jnp.asarray(self._routing(self.rank))
-        token_counts, handle_mem = ep_prepare(topk_idx)
+        token_counts, handle = ep_prepare(topk_idx)
         token_counts.block_until_ready()
 
         self.assertEqual(token_counts.shape, (self.num_local_experts,))
@@ -153,8 +166,10 @@ class TestEP(unittest.TestCase):
                 f"rank {self.rank} expert {e}: padded {got[e]} < unpadded {unpadded[e]}",
             )
         self.assertLessEqual(int(got.sum()), self.recv_capacity)
-        self.assertGreater(int(handle_mem.shape[0]), 0)
-        self.assertEqual(handle_mem.dtype, jnp.uint8)
+        self.assertGreater(int(handle.handle_mem.shape[0]), 0)
+        self.assertEqual(handle.handle_mem.dtype, jnp.uint8)
+        self.assertEqual(handle.handle_id.shape, (1,))
+        self.assertEqual(handle.handle_id.dtype, jnp.int64)
 
     # ── Test 2: ep_dispatch recv_tokens numeric ───────────────────────────────
 
@@ -221,11 +236,11 @@ class TestEP(unittest.TestCase):
         topk_weights = self._make_topk_weights()
         tokens = self._make_tokens()
 
-        recv_tokens, _, handle_mem, _ = ep_dispatch(
-            topk_idx, tokens, topk_weights, self.recv_capacity
-        )
+        recv_tokens, _, handle, _ = ep_dispatch(topk_idx, tokens, topk_weights, self.recv_capacity)
         # Bypass JAX hadamard — cpp combine is unweighted sum.
-        result = tex.ep_combine_fwd(handle_mem, recv_tokens, self.num_tokens)
+        result = tex.ep_combine_fwd(
+            handle.handle_mem, handle.handle_id, recv_tokens, self.num_tokens
+        )
         result.block_until_ready()
 
         expected = np.asarray(tokens.astype(jnp.float32)) * float(self.top_k)
@@ -251,8 +266,8 @@ class TestEP(unittest.TestCase):
         topk_weights = self._make_topk_weights()
         tokens = self._make_tokens()
 
-        recv_t, recv_w, hm, tc = ep_dispatch(topk_idx, tokens, topk_weights, self.recv_capacity)
-        out = ep_combine(hm, tc, recv_t, recv_w, self.num_tokens)
+        recv_t, recv_w, handle, tc = ep_dispatch(topk_idx, tokens, topk_weights, self.recv_capacity)
+        out = ep_combine(handle, tc, recv_t, recv_w, self.num_tokens)
         out.block_until_ready()
 
         expected = np.asarray(tokens.astype(jnp.float32))
@@ -279,18 +294,22 @@ class TestEP(unittest.TestCase):
         """
         from functools import partial as _partial
 
-        @_partial(jax.custom_vjp, nondiff_argnums=(2,))
-        def _combine_raw(hm, expert_out, num_local_tokens):
-            return tex.ep_combine_fwd(hm, expert_out, num_local_tokens)
+        @_partial(jax.custom_vjp, nondiff_argnums=(3,))
+        def _combine_raw(hm, hid, expert_out, num_local_tokens):
+            return tex.ep_combine_fwd(hm, hid, expert_out, num_local_tokens)
 
-        def _combine_raw_fwd(hm, expert_out, num_local_tokens):
-            return tex.ep_combine_fwd(hm, expert_out, num_local_tokens), (hm, expert_out.shape[0])
+        def _combine_raw_fwd(hm, hid, expert_out, num_local_tokens):
+            return tex.ep_combine_fwd(hm, hid, expert_out, num_local_tokens), (
+                hm,
+                hid,
+                expert_out.shape[0],
+            )
 
         def _combine_raw_bwd(num_local_tokens, res, g):
             del num_local_tokens
-            hm, recv_capacity = res
-            g_eo = tex.ep_combine_bwd(hm, g, recv_capacity)
-            return (jnp.zeros_like(hm), g_eo)
+            hm, hid, recv_capacity = res
+            g_eo = tex.ep_combine_bwd(hm, hid, g, recv_capacity)
+            return (jnp.zeros_like(hm), jnp.zeros_like(hid), g_eo)
 
         _combine_raw.defvjp(_combine_raw_fwd, _combine_raw_bwd)
 
@@ -299,8 +318,8 @@ class TestEP(unittest.TestCase):
         tokens = self._make_tokens()
 
         def loss_fn(toks):
-            recv_t, _, hm, _ = ep_dispatch(topk_idx, toks, topk_weights, self.recv_capacity)
-            res = _combine_raw(hm, recv_t, self.num_tokens)
+            recv_t, _, handle, _ = ep_dispatch(topk_idx, toks, topk_weights, self.recv_capacity)
+            res = _combine_raw(handle.handle_mem, handle.handle_id, recv_t, self.num_tokens)
             return 0.5 * (res.astype(jnp.float32) ** 2).sum()
 
         _, grad_tokens = jax.value_and_grad(loss_fn)(tokens)
@@ -341,9 +360,9 @@ class TestEP(unittest.TestCase):
 
         def loss_fn(g_):
             scaled = base_weights * g_[:, None]
-            recv_t, recv_w, hm, tc = ep_dispatch(topk_idx, tokens, scaled, self.recv_capacity)
+            recv_t, recv_w, handle, tc = ep_dispatch(topk_idx, tokens, scaled, self.recv_capacity)
             # Identity expert: feed recv_tokens straight back into combine.
-            out = ep_combine(hm, tc, recv_t, recv_w, self.num_tokens)
+            out = ep_combine(handle, tc, recv_t, recv_w, self.num_tokens)
             return 0.5 * (out.astype(jnp.float32) ** 2).sum()
 
         _, grad_g = jax.value_and_grad(loss_fn)(g)
@@ -383,11 +402,11 @@ class TestEP(unittest.TestCase):
         tokens_3d = tokens_2d.reshape(B, S, self.hidden_dim)
 
         def loss_fn(toks_3d):
-            recv_t, recv_w, hm, tc = ep_dispatch(
+            recv_t, recv_w, handle, tc = ep_dispatch(
                 topk_idx_3d, toks_3d, topk_w_3d, self.recv_capacity
             )
             # Public ep_combine — pass leading dims as a tuple to get 3D output.
-            out = ep_combine(hm, tc, recv_t, recv_w, (B, S))
+            out = ep_combine(handle, tc, recv_t, recv_w, (B, S))
             self.assertEqual(out.shape, (B, S, self.hidden_dim))
             return 0.5 * (out.astype(jnp.float32) ** 2).sum()
 
