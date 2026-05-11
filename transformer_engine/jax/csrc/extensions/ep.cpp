@@ -180,19 +180,15 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
                                   static_cast<size_t>(tw_dims.back())};
   auto topk_weights_ = TensorWrapper(topk_weights.untyped_data(), tw_shape, DType::kFloat32);
 
-  // Per-shard view from JAX: recv_tokens is [1, recv_capacity_per_rank, H]
-  // (one EP slice). Python `abstract` enforces ndim; here we only re-check the
-  // per-shard leading-dim==1 invariant and read recv_capacity_per_rank.
+  // Per-shard view from JAX: recv_tokens is 2D [recv_capacity_per_rank, H]
+  // (one EP slice; global [recv_capacity, H] sharded on ep_resource).
   auto recv_dims = recv_tokens->dimensions();
-  NVTE_CHECK(recv_dims[0] == 1, "recv_tokens leading dim must be 1 per shard (ep-sliced); got ",
-             recv_dims[0]);
-  const size_t recv_capacity_per_rank = static_cast<size_t>(recv_dims[1]);
+  const size_t recv_capacity_per_rank = static_cast<size_t>(recv_dims[0]);
   std::vector<size_t> recv_shape = {recv_capacity_per_rank, H};
   auto recv_tokens_ = TensorWrapper(recv_tokens->untyped_data(), recv_shape, token_dtype);
 
   auto recv_w_dims = recv_topk_weights->dimensions();
-  NVTE_CHECK(recv_w_dims[0] == 1,
-             "recv_topk_weights leading dim must be 1 per shard (ep-sliced); got ", recv_w_dims[0]);
+  (void)recv_w_dims;
   std::vector<size_t> recv_w_shape = {recv_capacity_per_rank};
   auto recv_topk_weights_ =
       TensorWrapper(recv_topk_weights->untyped_data(), recv_w_shape, DType::kFloat32);
@@ -225,17 +221,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
 
 Error_Type EpCombineFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type expert_out,
                         Result_Type result, EpCombineConfig config) {
-  // Python `abstract` enforces ndim==3; here we only check the per-shard
-  // invariant (leading dim 1) that can't be expressed at the global abstract.
+  // Per-shard view: expert_out is 2D [recv_capacity_per_rank, H].
   auto eo_dims = expert_out.dimensions();
-  NVTE_CHECK(eo_dims[0] == 1, "expert_out leading dim must be 1 per shard (ep-sliced); got ",
-             eo_dims[0]);
 
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem.element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem.untyped_data(), hm_shape, DType::kByte);
 
-  const size_t recv_capacity_per_rank = static_cast<size_t>(eo_dims[1]);
-  const size_t H = static_cast<size_t>(eo_dims[2]);
+  const size_t recv_capacity_per_rank = static_cast<size_t>(eo_dims[0]);
+  const size_t H = static_cast<size_t>(eo_dims[1]);
   std::vector<size_t> eo_shape = {recv_capacity_per_rank, H};
   auto eo_dtype = convert_ffi_datatype_to_te_dtype(expert_out.element_type());
   auto expert_out_ = TensorWrapper(expert_out.untyped_data(), eo_shape, eo_dtype);
@@ -273,17 +266,14 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpCombineHandler, EpCombineFFI,
 
 Error_Type EpDispatchBwdFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Type grad,
                             Result_Type grad_tokens, EpDispatchBwdConfig config) {
-  // Python `abstract` enforces ndim==3; only the per-shard leading-dim==1
-  // invariant needs to be re-checked here (can't be expressed at global abstract).
+  // Per-shard view: grad is 2D [recv_capacity_per_rank, H].
   auto grad_dims = grad.dimensions();
-  NVTE_CHECK(grad_dims[0] == 1, "grad leading dim must be 1 per shard (ep-sliced); got ",
-             grad_dims[0]);
 
   std::vector<size_t> hm_shape = {static_cast<size_t>(handle_mem.element_count())};
   auto handle_mem_ = TensorWrapper(handle_mem.untyped_data(), hm_shape, DType::kByte);
 
-  const size_t recv_capacity_per_rank = static_cast<size_t>(grad_dims[1]);
-  const size_t H = static_cast<size_t>(grad_dims[2]);
+  const size_t recv_capacity_per_rank = static_cast<size_t>(grad_dims[0]);
+  const size_t H = static_cast<size_t>(grad_dims[1]);
   std::vector<size_t> g_shape = {recv_capacity_per_rank, H};
   auto g_dtype = convert_ffi_datatype_to_te_dtype(grad.element_type());
   auto grad_ = TensorWrapper(grad.untyped_data(), g_shape, g_dtype);

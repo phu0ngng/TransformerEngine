@@ -221,14 +221,14 @@ def _dispatch_bwd(recv_capacity, dispatch_output_per_expert_alignment, res, g_ou
     # implicit in g_outputs[0].shape (= ep_size * recv_capacity_per_rank).
     del recv_capacity, dispatch_output_per_expert_alignment
     handle_mem, out_leading, top_k, hidden_dim = res
-    g_recv_tokens = g_outputs[0]  # 3D [ep_size, recv_pr, H]
-    g_recv_topk_weights = g_outputs[1]  # 2D [ep_size, recv_pr] f32
+    g_recv_tokens = g_outputs[0]  # 2D [recv_capacity, H]
+    g_recv_topk_weights = g_outputs[1]  # 1D [recv_capacity] f32
 
     grad_tokens = tex.ep_dispatch_bwd(handle_mem, g_recv_tokens, out_leading)
 
     # NCCL EP combine asserts the buffer's row width matches the group's
-    # configured hidden_dim. Broadcast the f32 weight cotangent to a 3D
-    # bf16 [ep_size, recv_pr, hidden_dim] buffer (every column = the scalar),
+    # configured hidden_dim. Broadcast the f32 weight cotangent to a 2D
+    # bf16 [recv_capacity, hidden_dim] buffer (every column = the scalar),
     # combine to [T_flat, hidden_dim], take col 0. Combine sums top_k slot
     # contributions per token, so the result is top_k * grad_recv_w[slot_for_t,k].
     # Broadcast back across top_k as grad / top_k — exact magnitude for uniform
@@ -288,29 +288,27 @@ def ep_combine(handle_mem, token_counts, expert_out, recv_topk_weights, num_loca
     ]
 
 
-def _make_valid_mask(token_counts, recv_capacity_per_rank, dtype):
-    # token_counts: [ep_size, num_local_experts] int32. NCCL EP packs each local
-    # expert into a fixed `recv_capacity_per_rank / NLE` stride within each
-    # source-rank slice; valid slots are `[0, token_counts[ep, e])` per zone.
-    # Returns mask shaped [ep_size, recv_capacity_per_rank, 1] for hadamard
-    # against expert_out / grad_weighted.
-    ep_size, nle = token_counts.shape
-    slots_per_e = recv_capacity_per_rank // nle
-    idx = jnp.arange(recv_capacity_per_rank, dtype=jnp.int32)
-    e_idx = idx // slots_per_e  # [recv_capacity_per_rank]
-    slot_in_e = idx % slots_per_e  # [recv_capacity_per_rank]
-    counts = token_counts.astype(jnp.int32)  # [ep_size, nle]
-    # Gather per-zone count for each slot: counts[:, e_idx] → [ep_size, recv_pr]
-    per_slot_count = counts[:, e_idx]
-    mask = (slot_in_e[None, :] < per_slot_count).astype(dtype)
+def _make_valid_mask(token_counts, recv_capacity, dtype):
+    # token_counts: 1D [ep_size * num_local_experts] int32 (sharded on ep_resource).
+    # NCCL EP packs each local expert into a fixed `recv_capacity / (ep_size*NLE)`
+    # stride per zone; valid slots are `[0, token_counts[zone])`. Returns mask of
+    # shape [recv_capacity, 1] for hadamard against expert_out / grad_weighted.
+    total_zones = token_counts.shape[0]
+    slots_per_zone = recv_capacity // total_zones
+    idx = jnp.arange(recv_capacity, dtype=jnp.int32)
+    zone_idx = idx // slots_per_zone
+    slot_in_zone = idx % slots_per_zone
+    counts = token_counts.astype(jnp.int32)
+    per_slot_count = counts[zone_idx]
+    mask = (slot_in_zone < per_slot_count).astype(dtype)
     return mask[..., None]
 
 
 def _combine_fwd(handle_mem, token_counts, expert_out, recv_topk_weights, num_local_tokens):
-    ep_size, recv_capacity_per_rank, _ = expert_out.shape
-    recv_capacity = ep_size * recv_capacity_per_rank
-    w = recv_topk_weights.astype(expert_out.dtype)[..., None]  # [ep_size, recv_pr, 1]
-    mask = _make_valid_mask(token_counts, recv_capacity_per_rank, expert_out.dtype)
+    # expert_out: 2D [recv_capacity, H] (sharded on ep_resource).
+    recv_capacity = expert_out.shape[0]
+    w = recv_topk_weights.astype(expert_out.dtype)[..., None]  # [recv_capacity, 1]
+    mask = _make_valid_mask(token_counts, recv_capacity, expert_out.dtype)
     weighted = expert_out * w * mask
     result = tex.ep_combine_fwd(handle_mem, weighted, num_local_tokens)
     return result, (handle_mem, recv_topk_weights, expert_out, token_counts, recv_capacity)
@@ -318,11 +316,9 @@ def _combine_fwd(handle_mem, token_counts, expert_out, recv_topk_weights, num_lo
 
 def _combine_bwd(_, res, g_result):
     handle_mem, recv_topk_weights, expert_out, token_counts, recv_capacity = res
-    # g_result may be N-D [..., H]; combine_bwd returns 3D [ep_size, recv_pr, H].
     grad_weighted = tex.ep_combine_bwd(handle_mem, g_result, recv_capacity)
-    recv_capacity_per_rank = grad_weighted.shape[1]
     w = recv_topk_weights.astype(grad_weighted.dtype)[..., None]
-    mask = _make_valid_mask(token_counts, recv_capacity_per_rank, grad_weighted.dtype)
+    mask = _make_valid_mask(token_counts, recv_capacity, grad_weighted.dtype)
     # Chain rule for `weighted = expert_out * w * mask`:
     #   grad_expert_out = grad_weighted * w * mask
     #   grad_w (per-slot) = sum_H(grad_weighted * expert_out * mask)

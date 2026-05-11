@@ -85,8 +85,24 @@ def _initialize_distributed(args):
         jax.local_device_count() == 1
     ), f"EP example requires 1 GPU per process, found {jax.local_device_count()}"
 
-    # EP communicator. Uses world_size == ep_size (single EP group spans all ranks).
-    ep_size = args.num_processes
+    # Factorize num_processes into (dp_size, ep_size). Default to 2×(N/2) when
+    # num_processes is even and >= 4 (matches the SPRINT7 2×2 reference); else
+    # fall back to 1×N. Caller may override via --dp-size.
+    if args.dp_size is None:
+        if args.num_processes >= 4 and args.num_processes % 2 == 0:
+            dp_size = 2
+        else:
+            dp_size = 1
+    else:
+        dp_size = args.dp_size
+    assert (
+        args.num_processes % dp_size == 0
+    ), f"num_processes ({args.num_processes}) must be divisible by dp_size ({dp_size})"
+    ep_size = args.num_processes // dp_size
+    args.dp_size = dp_size
+    args.ep_size = ep_size
+    if args.num_experts is None:
+        args.num_experts = ep_size  # one expert per ep-rank by default
     assert (
         args.num_experts % ep_size == 0
     ), f"num_experts ({args.num_experts}) must be divisible by ep_size ({ep_size})"
@@ -95,14 +111,14 @@ def _initialize_distributed(args):
     args.recv_capacity = recv_capacity
 
     # SPRINT7: ep_bootstrap requires MeshResource.ep_resource and a Mesh whose
-    # ep axis has size==ep_size. Build a 1×ep_size Mesh (DP=1, EP=ep_size) and
-    # enter persistent global_shard_guard + Mesh contexts so subsequent
+    # ep axis has size==ep_size. Build a dp_size×ep_size Mesh and enter
+    # persistent global_shard_guard + Mesh contexts so subsequent
     # ep_dispatch/ep_combine calls inside jit pick up the axes.
     import numpy as _np
     from jax.sharding import Mesh as _Mesh
 
     global _ep_guard, _ep_mesh_cm
-    devs = _np.asarray(jax.devices()).reshape(1, ep_size)
+    devs = _np.asarray(jax.devices()).reshape(dp_size, ep_size)
     args.mesh = _Mesh(devs, ("dp", "ep"))
     _ep_mesh_cm = args.mesh
     _ep_mesh_cm.__enter__()
@@ -176,7 +192,16 @@ def ep_parser(description="EP MoE pipeline example"):
         "--num-experts",
         type=int,
         default=None,
-        help="Defaults to num_processes (one expert per rank).",
+        help="Defaults to ep_size * num_local_experts (resolved at init).",
+    )
+    p.add_argument(
+        "--dp-size",
+        type=int,
+        default=None,
+        help=(
+            "DP axis size; ep_size = num_processes // dp_size. Default picks a 2×N/2"
+            " factorization when num_processes is even and >= 4, else 1×N."
+        ),
     )
     p.add_argument("--enable-result-check", action="store_true", default=True)
     return p

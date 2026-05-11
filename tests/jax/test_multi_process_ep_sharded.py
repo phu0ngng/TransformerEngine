@@ -26,7 +26,7 @@ from transformer_engine.jax.ep import ep_bootstrap, ep_dispatch, ep_combine
 
 # ── Test config (4-GPU box, Mesh(dp=2, ep=2)) ────────────────────────────────
 
-DP, EP = 2, 2
+DP, EP = 1, 4
 NUM_LOCAL_EXPERTS = 2  # NLE per ep rank → num_experts = NLE * EP = 4
 HIDDEN_DIM = 32
 TOP_K = 2
@@ -99,9 +99,7 @@ class TestEPSharded(unittest.TestCase):
             topk_idx_s = jax.lax.with_sharding_constraint(
                 topk_idx, NamedSharding(self.mesh, dp_spec)
             )
-            tokens_s = jax.lax.with_sharding_constraint(
-                tokens, NamedSharding(self.mesh, dp_spec)
-            )
+            tokens_s = jax.lax.with_sharding_constraint(tokens, NamedSharding(self.mesh, dp_spec))
             topk_w_s = jax.lax.with_sharding_constraint(
                 topk_weights, NamedSharding(self.mesh, dp_spec)
             )
@@ -109,14 +107,14 @@ class TestEPSharded(unittest.TestCase):
             @jax.jit
             def run(idx, toks, w):
                 recv_t, recv_w, hm, tc = ep_dispatch(idx, toks, w, self.recv_capacity)
-                # Sharding assertions on dispatch outputs.
-                ep_spec_3d = PartitionSpec("ep", None, None)
+                # Sharding assertions on dispatch outputs (2D / 1D layouts).
                 ep_spec_2d = PartitionSpec("ep", None)
+                ep_spec_1d = PartitionSpec("ep")
                 recv_t = jax.lax.with_sharding_constraint(
-                    recv_t, NamedSharding(self.mesh, ep_spec_3d)
+                    recv_t, NamedSharding(self.mesh, ep_spec_2d)
                 )
                 recv_w = jax.lax.with_sharding_constraint(
-                    recv_w, NamedSharding(self.mesh, ep_spec_2d)
+                    recv_w, NamedSharding(self.mesh, ep_spec_1d)
                 )
                 out = ep_combine(hm, tc, recv_t, recv_w, T_global)
                 return out
@@ -138,9 +136,7 @@ class TestEPSharded(unittest.TestCase):
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
-        print(
-            "Usage: python test_multi_process_ep_sharded.py <coord_addr> <proc_id> <num_procs>"
-        )
+        print("Usage: python test_multi_process_ep_sharded.py <coord_addr> <proc_id> <num_procs>")
         sys.exit(1)
 
     coord_addr = sys.argv[1]

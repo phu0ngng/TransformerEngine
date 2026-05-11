@@ -124,10 +124,9 @@ class EpPreparePrimitive(BasePrimitive):
 
     @staticmethod
     def abstract(topk_idx_aval, *, dispatch_output_per_expert_alignment):
-        # Mesh-global view: outputs carry a leading `ep_size` dim sharded on
-        # `ep_resource`. Under jit + custom_partitioning, each device's
-        # per-shard buffer is the inner slice (leading dim 1); the FFI sees
-        # that slice and reads/writes via `element_count()` (unchanged in C++).
+        # Outputs are 1D global aggregates sharded along the ep axis:
+        # token_counts [ep_size * num_local_experts], handle_mem [ep_size * N].
+        # Per-shard (sharded on ep_resource) is [num_local_experts] / [N].
         cfg = get_ep_config()
         ep_size = cfg.ep_size
         num_local_experts = cfg.num_local_experts
@@ -139,8 +138,8 @@ class EpPreparePrimitive(BasePrimitive):
             top_k,
             dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
         )
-        token_counts_aval = jax.core.ShapedArray((ep_size, num_local_experts), jnp.int32)
-        handle_mem_aval = jax.core.ShapedArray((ep_size, handle_mem_size), jnp.uint8)
+        token_counts_aval = jax.core.ShapedArray((ep_size * num_local_experts,), jnp.int32)
+        handle_mem_aval = jax.core.ShapedArray((ep_size * handle_mem_size,), jnp.uint8)
         return token_counts_aval, handle_mem_aval
 
     @staticmethod
@@ -180,18 +179,18 @@ class EpPreparePrimitive(BasePrimitive):
                 f" spec={idx_spec}."
             )
         arg_shardings = (arg_infos[0].sharding,)
-        tc_sharding = NamedSharding(mesh, PartitionSpec(ep_axis, None))
-        hm_sharding = NamedSharding(mesh, PartitionSpec(ep_axis, None))
+        tc_sharding = NamedSharding(mesh, PartitionSpec(ep_axis))
+        hm_sharding = NamedSharding(mesh, PartitionSpec(ep_axis))
 
         def sharded_impl(topk_idx):
             return EpPreparePrimitive.impl(topk_idx, dispatch_output_per_expert_alignment)
 
-        return mesh, sharded_impl, (tc_sharding, hm_sharding), arg_shardings
+        return mesh, sharded_impl, [tc_sharding, hm_sharding], arg_shardings
 
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "T topk -> ep nle, ep hm"
+        return "T topk -> ep_nle, ep_hm"
 
 
 register_primitive(EpPreparePrimitive)
@@ -223,19 +222,17 @@ class EpDispatchPrimitive(BasePrimitive):
         assert (
             len(tokens_aval.shape) >= 2
         ), f"tokens must be at least 2D [..., H], got shape {tokens_aval.shape}"
+        # Outputs are 2D/1D global aggregates sharded along the leading axis on
+        # ep_resource: recv_tokens [recv_capacity, H], recv_topk_weights
+        # [recv_capacity]. Per-shard: [recv_capacity/ep_size, H] / [recv_capacity/ep_size].
         ep_size = get_ep_config().ep_size
         assert (
             recv_capacity % ep_size == 0
         ), f"recv_capacity ({recv_capacity}) must be divisible by ep_size ({ep_size})"
-        recv_capacity_per_rank = recv_capacity // ep_size
         tok_dtype = dtypes.canonicalize_dtype(tokens_aval.dtype)
         hidden_dim = tokens_aval.shape[-1]
-        recv_tokens_aval = jax.core.ShapedArray(
-            (ep_size, recv_capacity_per_rank, hidden_dim), tok_dtype
-        )
-        recv_topk_weights_aval = jax.core.ShapedArray(
-            (ep_size, recv_capacity_per_rank), jnp.float32
-        )
+        recv_tokens_aval = jax.core.ShapedArray((recv_capacity, hidden_dim), tok_dtype)
+        recv_topk_weights_aval = jax.core.ShapedArray((recv_capacity,), jnp.float32)
         return recv_tokens_aval, recv_topk_weights_aval
 
     @staticmethod
@@ -287,10 +284,10 @@ class EpDispatchPrimitive(BasePrimitive):
                     f" spec={tokens_spec}"
                 )
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        out_shardings = (
-            NamedSharding(mesh, PartitionSpec(ep_axis, None, None)),
+        out_shardings = [
             NamedSharding(mesh, PartitionSpec(ep_axis, None)),
-        )
+            NamedSharding(mesh, PartitionSpec(ep_axis)),
+        ]
 
         def sharded_impl(handle_mem, topk_idx, tokens, topk_weights):
             return EpDispatchPrimitive.impl(
@@ -302,7 +299,7 @@ class EpDispatchPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "ep hm, T topk_in, T H, T topk -> ep recv_pr H, ep recv_pr"
+        return "ep_hm, T topk_in, T H, T topk -> ep_recv_pr H, ep_recv_pr"
 
 
 register_primitive(EpDispatchPrimitive)
@@ -373,12 +370,12 @@ class EpCombinePrimitive(BasePrimitive):
     @staticmethod
     def abstract(handle_mem_aval, expert_out_aval, *, out_leading_shape, out_partition_spec):
         del handle_mem_aval, out_partition_spec
-        assert len(expert_out_aval.shape) == 3, (
-            "expert_out must be 3D [ep_size, recv_capacity_per_rank, H], got shape"
+        assert len(expert_out_aval.shape) == 2, (
+            "expert_out must be 2D [recv_capacity, H], got shape"
             f" {expert_out_aval.shape}"
         )
         eo_dtype = dtypes.canonicalize_dtype(expert_out_aval.dtype)
-        hidden_dim = expert_out_aval.shape[2]
+        hidden_dim = expert_out_aval.shape[1]
         out_shape = tuple(out_leading_shape) + (hidden_dim,)
         return jax.core.ShapedArray(out_shape, eo_dtype)
 
@@ -434,7 +431,7 @@ class EpCombinePrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "ep hm, ep recv_pr H -> dp H"
+        return "ep_hm, ep_recv_pr H -> dp H"
 
 
 register_primitive(EpCombinePrimitive)
@@ -458,10 +455,10 @@ class EpDispatchBwdPrimitive(BasePrimitive):
     def abstract(handle_mem_aval, grad_aval, *, out_leading_shape, out_partition_spec):
         del handle_mem_aval, out_partition_spec
         assert (
-            len(grad_aval.shape) == 3
-        ), f"grad must be 3D [ep_size, recv_capacity_per_rank, H], got shape {grad_aval.shape}"
+            len(grad_aval.shape) == 2
+        ), f"grad must be 2D [recv_capacity, H], got shape {grad_aval.shape}"
         g_dtype = dtypes.canonicalize_dtype(grad_aval.dtype)
-        hidden_dim = grad_aval.shape[2]
+        hidden_dim = grad_aval.shape[1]
         out_shape = tuple(out_leading_shape) + (hidden_dim,)
         return jax.core.ShapedArray(out_shape, g_dtype)
 
@@ -514,7 +511,7 @@ class EpDispatchBwdPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "ep hm, ep recv_pr H -> dp H"
+        return "ep_hm, ep_recv_pr H -> dp H"
 
 
 register_primitive(EpDispatchBwdPrimitive)
@@ -546,8 +543,7 @@ class EpCombineBwdPrimitive(BasePrimitive):
         assert (
             recv_capacity % ep_size == 0
         ), f"recv_capacity ({recv_capacity}) must be divisible by ep_size ({ep_size})"
-        recv_capacity_per_rank = recv_capacity // ep_size
-        return jax.core.ShapedArray((ep_size, recv_capacity_per_rank, hidden_dim), g_dtype)
+        return jax.core.ShapedArray((recv_capacity, hidden_dim), g_dtype)
 
     @staticmethod
     def lowering(ctx, handle_mem, grad, *, recv_capacity):
@@ -577,7 +573,7 @@ class EpCombineBwdPrimitive(BasePrimitive):
         gsr = global_mesh_resource()
         ep_axis = gsr.ep_resource
         arg_shardings = tuple(a.sharding for a in arg_infos)
-        out_sharding = NamedSharding(mesh, PartitionSpec(ep_axis, None, None))
+        out_sharding = NamedSharding(mesh, PartitionSpec(ep_axis, None))
 
         def sharded_impl(handle_mem, grad):
             return EpCombineBwdPrimitive.impl(handle_mem, grad, recv_capacity)
@@ -587,7 +583,7 @@ class EpCombineBwdPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "ep hm, T H -> ep recv_pr H"
+        return "ep_hm, T H -> ep_recv_pr H"
 
 
 register_primitive(EpCombineBwdPrimitive)
