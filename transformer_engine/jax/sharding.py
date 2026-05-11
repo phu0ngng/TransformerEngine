@@ -332,6 +332,7 @@ class MeshResource:
         fsdp_resource: Axis name for full-sharded data parallelism, default is None
         pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
         cp_resource: Axis name for context parallelism (sequence sharding), default is None
+        ep_resource: Axis name for expert parallelism (token dispatch/combine axis), default is None
     """
 
     dp_resource: str = None
@@ -340,6 +341,7 @@ class MeshResource:
     fsdp_resource: str = None
     pp_resource: str = None
     cp_resource: str = None
+    ep_resource: str = None
 
 
 _GLOBAL_MESH_RESOURCE = None
@@ -441,3 +443,8 @@ def dp_or_fsdp_axis_size():
     dp_size = get_mesh_axis_size(global_mesh_resource().dp_resource)
     fsdp_size = get_mesh_axis_size(global_mesh_resource().fsdp_resource)
     return dp_size if dp_size > 1 else fsdp_size
+
+
+def ep_axis_size():
+    """Get the size of the expert parallelism axis. Returns 1 if no EP axis is set."""
+    return get_mesh_axis_size(global_mesh_resource().ep_resource)
