@@ -11,20 +11,20 @@
  *
  *  Handle lifecycle: NCCL EP keeps device-side routing state in handle_mem
  *  (caller-owned uint8 buffer of size ncclEpHandleMemSize). The host-side
- *  ncclEpHandle_t is opened by prepare() (pure pointer arithmetic over
- *  handle_mem; no device allocation) and KEPT ALIVE in `cur_handle_` so that
- *  combine() can read host-side fields populated by ncclEpUpdateHandle
- *  (notably handle->num_tokens). The handle is closed only when prepare()
- *  observes a different handle_mem pointer, or in ~EPBackend().
- *  - prepare():     open (or reuse) cur_handle_ + ncclEpUpdateHandle
- *                   (collective; AllGather routing → handle_mem)
- *  - dispatch():    reuse cur_handle_ + ncclEpDispatch (forward path);
- *                   opens a transient handle if no prior prepare exists
- *                   (used by combine_bwd which goes through dispatch)
- *  - combine():     reuse cur_handle_ + ncclEpCombine
- *                   (asserts cur_handle_ != nullptr — combine REQUIRES a prior
- *                    prepare on the same handle_mem)
+ *  ncclEpHandle_t is opened by prepare() against a specific handle_mem buffer
+ *  and CACHED in `handles_` (keyed on the handle_mem device pointer) so that
+ *  later dispatch()/combine()/*_bwd() calls on the same handle_mem reuse it
+ *  — combine() reads host-side fields populated by ncclEpUpdateHandle
+ *  (notably handle->num_tokens). Per-layer / pipeline-parallel friendly: each
+ *  layer owns its own handle_mem and therefore its own cache entry, so
+ *  interleaved layer calls do not clobber each other.
+ *  - prepare():     open (or reuse) cache entry + ncclEpUpdateHandle
+ *                   (collective; AllGather routing → handle_mem). Close +
+ *                   reopen when the entry's (alignment, top_k) differs.
+ *  - dispatch():    lookup entry by handle_mem pointer + ncclEpDispatch.
+ *  - combine():     lookup entry by handle_mem pointer + ncclEpCombine.
  *  - dispatch_bwd → combine();   combine_bwd → dispatch() with no weights.
+ *  Cache eviction: LRU with cap NVTE_EP_HANDLE_CACHE_SIZE (default 64).
  */
 
 #ifndef TRANSFORMER_ENGINE_COMMON_EP_EP_BACKEND_H_
@@ -36,7 +36,9 @@
 #include <transformer_engine/ep.h>
 
 #include <cstddef>
+#include <list>
 #include <mutex>
+#include <unordered_map>
 
 namespace transformer_engine {
 namespace ep {
@@ -120,13 +122,26 @@ class EPBackend {
   bool initialized_{false};
   size_t routing_buf_size_{0};
   std::mutex mutex_;
-  // Persistent handle from the most recent prepare(). NCCL stores num_tokens
-  // / num_topk on the host-side handle struct (set during ncclEpUpdateHandle),
-  // and combine asserts on it — so we keep the handle alive across the
-  // prepare → dispatch → combine cycle instead of reopening per op.
-  ncclEpHandle_t cur_handle_{nullptr};
-  void* cur_handle_mem_{nullptr};
-  size_t cur_handle_alignment_{0};
+  // Per-handle_mem cache (LRU). Key is the device pointer of the handle_mem
+  // buffer; entry holds the opened NCCL handle and the (alignment, top_k)
+  // config it was opened with. Multiple layers / PP stages each own their own
+  // handle_mem and therefore have independent entries.
+  struct HandleEntry {
+    ncclEpHandle_t handle;
+    size_t alignment;
+    int top_k;
+  };
+  std::list<void*> lru_;  // front = most recently used
+  std::unordered_map<void*, std::pair<HandleEntry, std::list<void*>::iterator>> handles_;
+  size_t handle_cache_cap_{0};  // set lazily from NVTE_EP_HANDLE_CACHE_SIZE
+
+  // Lookup/insert a cache entry for the given handle_mem pointer, opening or
+  // reopening the NCCL handle when needed. Caller must hold mutex_.
+  HandleEntry& get_or_open_entry(void* handle_mem, int top_k, size_t alignment);
+  // Lookup a cache entry; aborts if not present. Touches LRU. Holds mutex_.
+  HandleEntry& lookup_entry(void* handle_mem);
+  // Bound the cache to handle_cache_cap_ entries; closes the LRU tail.
+  void evict_if_full();
 };
 
 }  // namespace ep

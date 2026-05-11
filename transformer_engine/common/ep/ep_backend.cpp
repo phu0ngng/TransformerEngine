@@ -12,12 +12,16 @@
  *  Each per-step op creates ephemeral ncclNDTensor_t handles around
  *  user-provided buffers — no allocations, negligible overhead.
  *
- *  Persistent host-side handle: prepare() opens an ncclEpHandle_t the first
- *  time it sees a new handle_mem pointer and stores it in cur_handle_.
+ *  Per-handle_mem cache: prepare() opens an ncclEpHandle_t the first time it
+ *  sees a new handle_mem pointer (or when (alignment, top_k) differs from the
+ *  cached entry) and stores it in handles_ keyed by the handle_mem pointer.
  *  Subsequent prepare()/dispatch()/combine() calls on the same handle_mem
- *  reuse it — combine() reads host-side fields set by ncclEpUpdateHandle
- *  (handle->num_tokens) and would assert if rebuilt per op. ~EPBackend()
- *  closes any live handle.
+ *  reuse that entry — combine() reads host-side fields set by
+ *  ncclEpUpdateHandle (handle->num_tokens) and would assert if rebuilt per op.
+ *  Multiple in-flight layers (pipeline parallelism) each carry their own
+ *  handle_mem and therefore have independent entries. Cache is bounded by
+ *  NVTE_EP_HANDLE_CACHE_SIZE (LRU; default 64). ~EPBackend() closes all
+ *  entries.
  *
  *  API patterns:
  *  - ncclEpInitHandle: maps routing buffers in handle_mem (no collective)
@@ -26,15 +30,16 @@
  *    2 outputs (recv_tokens, recv_topk_weights), 0 local tensors
  *  - ncclEpDispatch (backward/combine_bwd): 1 input (grad), 1 output (result),
  *    0 local tensors (no topk_weights in backward direction).
- *    combine_bwd opens a transient handle if cur_handle_ is unset, since the
- *    backward direction doesn't strictly require a prior prepare on the same
- *    buffer.
+ *    Requires a cached handle from a prior prepare on the same handle_mem.
  *  - ncclEpCombine: 1 input (expert_out), 1 output (result), 0 local tensors.
- *    Requires cur_handle_ from a prior prepare on the same handle_mem.
+ *    Requires a cached handle from a prior prepare on the same handle_mem.
  *  - All dispatch/combine outputs are 2D tensors
  */
 
 #include "ep_backend.h"
+
+#include <algorithm>
+#include <cstdlib>
 
 #include "../util/cuda_runtime.h"
 #include "../util/logging.h"
@@ -201,10 +206,13 @@ void EPBackend::close_handle(ncclEpHandle_t handle) {
 EPBackend::~EPBackend() {
   // Guard against concurrent dispatch/combine calls during teardown.
   std::lock_guard<std::mutex> lock(mutex_);
-  if (cur_handle_ != nullptr) {
-    ncclEpHandleDestroy(cur_handle_);
-    cur_handle_ = nullptr;
+  for (auto& kv : handles_) {
+    if (kv.second.first.handle != nullptr) {
+      ncclEpHandleDestroy(kv.second.first.handle);
+    }
   }
+  handles_.clear();
+  lru_.clear();
   // Order matters: ncclEpGroupDestroy reads from ep_comm_, so destroy the
   // group first, then the underlying communicator.
   if (ep_group_ != nullptr) {
@@ -269,6 +277,61 @@ size_t EPBackend::get_handle_mem_size(NVTEEpLayerConfig layer_config) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-handle_mem cache (LRU)
+// ---------------------------------------------------------------------------
+
+void EPBackend::evict_if_full() {
+  if (handle_cache_cap_ == 0) {
+    const char* cap_env = std::getenv("NVTE_EP_HANDLE_CACHE_SIZE");
+    handle_cache_cap_ = (cap_env != nullptr) ? std::max<size_t>(1, std::atoi(cap_env)) : 64;
+  }
+  while (handles_.size() >= handle_cache_cap_ && !lru_.empty()) {
+    void* victim = lru_.back();
+    auto it = handles_.find(victim);
+    if (it != handles_.end()) {
+      close_handle(it->second.first.handle);
+      handles_.erase(it);
+    }
+    lru_.pop_back();
+  }
+}
+
+EPBackend::HandleEntry& EPBackend::get_or_open_entry(void* handle_mem, int top_k,
+                                                     size_t alignment) {
+  auto it = handles_.find(handle_mem);
+  if (it != handles_.end()) {
+    HandleEntry& entry = it->second.first;
+    if (entry.alignment != alignment || entry.top_k != top_k) {
+      // Config changed for this handle_mem — close + reopen.
+      close_handle(entry.handle);
+      entry.handle = open_handle(handle_mem, top_k, alignment);
+      entry.alignment = alignment;
+      entry.top_k = top_k;
+    }
+    lru_.erase(it->second.second);
+    lru_.push_front(handle_mem);
+    it->second.second = lru_.begin();
+    return entry;
+  }
+  evict_if_full();
+  ncclEpHandle_t h = open_handle(handle_mem, top_k, alignment);
+  lru_.push_front(handle_mem);
+  auto ins =
+      handles_.emplace(handle_mem, std::make_pair(HandleEntry{h, alignment, top_k}, lru_.begin()));
+  return ins.first->second.first;
+}
+
+EPBackend::HandleEntry& EPBackend::lookup_entry(void* handle_mem) {
+  auto it = handles_.find(handle_mem);
+  NVTE_CHECK(it != handles_.end(),
+             "ep op on handle_mem with no cached handle — call ep_prepare first.");
+  lru_.erase(it->second.second);
+  lru_.push_front(handle_mem);
+  it->second.second = lru_.begin();
+  return it->second.first;
+}
+
+// ---------------------------------------------------------------------------
 // Per-step operations
 // ---------------------------------------------------------------------------
 
@@ -301,21 +364,13 @@ void EPBackend::prepare(const NVTETensor topk_idx, NVTETensor token_counts, void
     handle_num_local_tensors = 1;
   }
 
-  // Reuse the persistent handle iff it views this handle_mem AND was opened
-  // with the same alignment; otherwise close it and open afresh. The
-  // alignment is baked into ncclEpInitHandle, so changes need a re-open.
-  if (cur_handle_ != nullptr && (cur_handle_mem_ != handle_mem ||
-                                 cur_handle_alignment_ != dispatch_output_per_expert_alignment)) {
-    close_handle(cur_handle_);
-    cur_handle_ = nullptr;
-  }
-  if (cur_handle_ == nullptr) {
-    cur_handle_ =
-        open_handle(handle_mem, static_cast<int>(top_k), dispatch_output_per_expert_alignment);
-    cur_handle_mem_ = handle_mem;
-    cur_handle_alignment_ = dispatch_output_per_expert_alignment;
-  }
-  NVTE_CHECK_NCCL(ncclEpUpdateHandle(cur_handle_, nccl_topk_idx, handle_local_tensors,
+  // Cache the NCCL handle per handle_mem buffer. Closes + reopens when the
+  // (alignment, top_k) for this buffer changes. Concurrent layers (PP, MoE
+  // stacks) each have their own handle_mem and therefore their own entry.
+  std::lock_guard<std::mutex> lock(mutex_);
+  HandleEntry& entry =
+      get_or_open_entry(handle_mem, static_cast<int>(top_k), dispatch_output_per_expert_alignment);
+  NVTE_CHECK_NCCL(ncclEpUpdateHandle(entry.handle, nccl_topk_idx, handle_local_tensors,
                                      handle_num_local_tensors, stream));
 
   destroy_tensor(nccl_topk_idx);
@@ -395,12 +450,12 @@ void EPBackend::dispatch(void* handle_mem, const NVTETensor topk_idx, const NVTE
   ncclEpDispatchConfig_t dispatch_cfg;
   memset(&dispatch_cfg, 0, sizeof(dispatch_cfg));
 
-  // Persistent handle populated by prepare() is required — same contract as
-  // combine(). combine_bwd reaches this path through dispatch() and must run
-  // after a prepare on the same handle_mem so the alignment matches.
-  NVTE_CHECK(cur_handle_ != nullptr && cur_handle_mem_ == handle_mem,
-             "ep dispatch (incl. combine_bwd) requires a prior ep_prepare on the same handle_mem");
-  NVTE_CHECK_NCCL(ncclEpDispatch(cur_handle_, inputs, num_inputs, outputs, num_outputs, nullptr, 0,
+  // Look up the cached handle for this handle_mem (set by prepare()).
+  // combine_bwd reaches this path through dispatch() and must run after a
+  // prepare on the same handle_mem so the alignment matches.
+  std::lock_guard<std::mutex> lock(mutex_);
+  HandleEntry& entry = lookup_entry(handle_mem);
+  NVTE_CHECK_NCCL(ncclEpDispatch(entry.handle, inputs, num_inputs, outputs, num_outputs, nullptr, 0,
                                  0, &dispatch_cfg, stream));
 
   destroy_tensor(nccl_tokens_in);
@@ -436,12 +491,12 @@ void EPBackend::combine(void* handle_mem, const NVTETensor expert_out, NVTETenso
   const ncclNDTensor_t inputs[] = {nccl_expert_in};
   const ncclNDTensor_t outputs[] = {nccl_result_out};
 
-  // Combine requires the persistent handle from prepare() — combine reads
+  // Combine looks up the cached handle from prepare() — it reads
   // handle->num_tokens which is only populated by ncclEpUpdateHandle.
-  NVTE_CHECK(cur_handle_ != nullptr && cur_handle_mem_ == handle_mem,
-             "ep_combine requires a prior ep_prepare on the same handle_mem");
+  std::lock_guard<std::mutex> lock(mutex_);
+  HandleEntry& entry = lookup_entry(handle_mem);
   NVTE_CHECK_NCCL(
-      ncclEpCombine(cur_handle_, inputs, 1, outputs, 1, nullptr, 0, 0, nullptr, stream));
+      ncclEpCombine(entry.handle, inputs, 1, outputs, 1, nullptr, 0, 0, nullptr, stream));
 
   destroy_tensor(nccl_expert_in);
   destroy_tensor(nccl_result_out);
