@@ -163,12 +163,11 @@ class EpPreparePrimitive(BasePrimitive):
 
     @staticmethod
     def impl(topk_idx, dispatch_output_per_expert_alignment, is_outer):
-        del is_outer
         assert EpPreparePrimitive.inner_primitive is not None
         return EpPreparePrimitive.inner_primitive.bind(
             topk_idx,
             dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
-            is_outer=False,
+            is_outer=is_outer,
         )
 
     @staticmethod
@@ -198,7 +197,7 @@ class EpPreparePrimitive(BasePrimitive):
 
         def sharded_impl(topk_idx):
             return EpPreparePrimitive.impl(
-                topk_idx, dispatch_output_per_expert_alignment, True
+                topk_idx, dispatch_output_per_expert_alignment, False
             )
 
         return mesh, sharded_impl, [tc_sharding, hm_sharding], arg_shardings
@@ -282,7 +281,6 @@ class EpDispatchPrimitive(BasePrimitive):
 
     @staticmethod
     def impl(handle_mem, topk_idx, tokens, topk_weights, recv_capacity, top_k, is_outer):
-        del is_outer
         assert EpDispatchPrimitive.inner_primitive is not None
         return EpDispatchPrimitive.inner_primitive.bind(
             handle_mem,
@@ -291,7 +289,7 @@ class EpDispatchPrimitive(BasePrimitive):
             topk_weights,
             recv_capacity=recv_capacity,
             top_k=top_k,
-            is_outer=False,
+            is_outer=is_outer,
         )
 
     @staticmethod
@@ -327,7 +325,7 @@ class EpDispatchPrimitive(BasePrimitive):
 
         def sharded_impl(handle_mem, topk_idx, tokens, topk_weights):
             return EpDispatchPrimitive.impl(
-                handle_mem, topk_idx, tokens, topk_weights, recv_capacity, top_k, True
+                handle_mem, topk_idx, tokens, topk_weights, recv_capacity, top_k, False
             )
 
         return mesh, sharded_impl, out_shardings, arg_shardings
