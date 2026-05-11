@@ -166,7 +166,19 @@ class EpPreparePrimitive(BasePrimitive):
     @staticmethod
     def partition(dispatch_output_per_expert_alignment, mesh, arg_infos, result_infos):
         del result_infos
-        ep_axis = global_mesh_resource().ep_resource
+        gsr = global_mesh_resource()
+        ep_axis = gsr.ep_resource
+        # topk_idx leading dim must be dp/fsdp-sharded; trailing dims replicated.
+        idx_spec = arg_infos[0].sharding.spec
+        allowed = {gsr.dp_resource, gsr.fsdp_resource}
+        if (len(idx_spec) > 0 and idx_spec[0] not in allowed) or any(
+            ax is not None for ax in idx_spec[1:]
+        ):
+            raise NotImplementedError(
+                "EpPrepare: topk_idx leading dim must be sharded on dp_resource or"
+                f" fsdp_resource (allowed={allowed}) and trailing dims replicated; got"
+                f" spec={idx_spec}."
+            )
         arg_shardings = (arg_infos[0].sharding,)
         tc_sharding = NamedSharding(mesh, PartitionSpec(ep_axis, None))
         hm_sharding = NamedSharding(mesh, PartitionSpec(ep_axis, None))
@@ -186,10 +198,14 @@ register_primitive(EpPreparePrimitive)
 
 
 # ── ep_dispatch ─────────────────────────────────────────────────────────────────
-# Inputs:  handle_mem [N] uint8, topk_idx [..., top_k] int32 or int64,
-#          tokens [..., H], topk_weights [..., top_k] float32
-# Outputs: recv_tokens       [recv_capacity, H] (token dtype, always 2D)
-#          recv_topk_weights [recv_capacity] float32 (always 1D, 1 weight per slot)
+# Inputs:  handle_mem [ep_size, N] uint8 (sharded on ep_resource),
+#          topk_idx [..., top_k] int32 or int64 (leading dim sharded on dp/fsdp),
+#          tokens [..., H] (leading dim sharded on dp/fsdp; hidden replicated),
+#          topk_weights [..., top_k] float32 (matches topk_idx sharding)
+# Outputs: recv_tokens       [ep_size, recv_capacity_per_rank, H] (sharded on ep_resource)
+#          recv_topk_weights [ep_size, recv_capacity_per_rank]    (sharded on ep_resource)
+# Per-shard view at the FFI: recv_tokens [recv_capacity_per_rank, H],
+#                            recv_topk_weights [recv_capacity_per_rank].
 
 
 class EpDispatchPrimitive(BasePrimitive):
@@ -207,10 +223,19 @@ class EpDispatchPrimitive(BasePrimitive):
         assert (
             len(tokens_aval.shape) >= 2
         ), f"tokens must be at least 2D [..., H], got shape {tokens_aval.shape}"
+        ep_size = get_ep_config().ep_size
+        assert (
+            recv_capacity % ep_size == 0
+        ), f"recv_capacity ({recv_capacity}) must be divisible by ep_size ({ep_size})"
+        recv_capacity_per_rank = recv_capacity // ep_size
         tok_dtype = dtypes.canonicalize_dtype(tokens_aval.dtype)
         hidden_dim = tokens_aval.shape[-1]
-        recv_tokens_aval = jax.core.ShapedArray((recv_capacity, hidden_dim), tok_dtype)
-        recv_topk_weights_aval = jax.core.ShapedArray((recv_capacity,), jnp.float32)
+        recv_tokens_aval = jax.core.ShapedArray(
+            (ep_size, recv_capacity_per_rank, hidden_dim), tok_dtype
+        )
+        recv_topk_weights_aval = jax.core.ShapedArray(
+            (ep_size, recv_capacity_per_rank), jnp.float32
+        )
         return recv_tokens_aval, recv_topk_weights_aval
 
     @staticmethod
@@ -244,10 +269,27 @@ class EpDispatchPrimitive(BasePrimitive):
     @staticmethod
     def partition(recv_capacity, top_k, mesh, arg_infos, result_infos):
         del result_infos
+        gsr = global_mesh_resource()
+        ep_axis = gsr.ep_resource
+        # tokens (arg 2): leading dim must be sharded on dp/fsdp only; hidden replicated.
+        tokens_spec = arg_infos[2].sharding.spec
+        leading_axis = tokens_spec[0] if len(tokens_spec) > 0 else None
+        allowed = {gsr.dp_resource, gsr.fsdp_resource}
+        if leading_axis not in allowed:
+            raise NotImplementedError(
+                "EpDispatch: tokens leading dim must be sharded on dp_resource or"
+                f" fsdp_resource (allowed={allowed}); got '{leading_axis}'."
+            )
+        for ax in tokens_spec[1:]:
+            if ax is not None:
+                raise NotImplementedError(
+                    "EpDispatch: tokens non-leading dims must be replicated; got"
+                    f" spec={tokens_spec}"
+                )
         arg_shardings = tuple(a.sharding for a in arg_infos)
         out_shardings = (
-            NamedSharding(mesh, PartitionSpec(None, None)),
-            NamedSharding(mesh, PartitionSpec(None)),
+            NamedSharding(mesh, PartitionSpec(ep_axis, None, None)),
+            NamedSharding(mesh, PartitionSpec(ep_axis, None)),
         )
 
         def sharded_impl(handle_mem, topk_idx, tokens, topk_weights):
@@ -260,7 +302,7 @@ class EpDispatchPrimitive(BasePrimitive):
     @staticmethod
     def shardy_sharding_rule(*args):
         del args
-        return "hm, T topk_in, T H, T topk -> recv H, recv"
+        return "ep hm, T topk_in, T H, T topk -> ep recv_pr H, ep recv_pr"
 
 
 register_primitive(EpDispatchPrimitive)

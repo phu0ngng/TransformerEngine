@@ -145,6 +145,9 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
              "topk_idx must be int32 or int64; got element_type=", static_cast<int>(idx_etype));
   NVTE_CHECK(static_cast<int64_t>(idx_dims.back()) == config.top_k, "top_k attr (", config.top_k,
              ") must match topk_idx last dim (", idx_dims.back(), ")");
+  // config.recv_capacity is the GLOBAL recv_capacity (= ep_size * per-rank);
+  // FFI sees per-rank via recv_dims[1]. Kept as attr for ABI symmetry only.
+  (void)config.recv_capacity;
   std::vector<size_t> idx_shape = {product(idx_dims, 0, idx_dims.size() - 1),
                                    static_cast<size_t>(idx_dims.back())};
   // Upcast int32 → int64 on-stream into a scratch buffer when needed.
@@ -175,16 +178,26 @@ Error_Type EpDispatchFFI(cudaStream_t stream, Buffer_Type handle_mem, Buffer_Typ
                                   static_cast<size_t>(tw_dims.back())};
   auto topk_weights_ = TensorWrapper(topk_weights.untyped_data(), tw_shape, DType::kFloat32);
 
+  // Per-shard view from JAX: recv_tokens is [1, recv_capacity_per_rank, H]
+  // (one EP slice). Read recv_capacity_per_rank from the buffer dims so the
+  // C++ stays oblivious to the global ep_size factor.
   auto recv_dims = recv_tokens->dimensions();
-  NVTE_CHECK(recv_dims.size() == 2,
-             "recv_tokens must be 2D [recv_capacity, H], got ndim=", recv_dims.size());
-  std::vector<size_t> recv_shape = {static_cast<size_t>(config.recv_capacity), H};
+  NVTE_CHECK(
+      recv_dims.size() == 3,
+      "recv_tokens must be 3D [ep_slice, recv_capacity_per_rank, H], got ndim=", recv_dims.size());
+  NVTE_CHECK(recv_dims[0] == 1, "recv_tokens leading dim must be 1 per shard (ep-sliced); got ",
+             recv_dims[0]);
+  const size_t recv_capacity_per_rank = static_cast<size_t>(recv_dims[1]);
+  std::vector<size_t> recv_shape = {recv_capacity_per_rank, H};
   auto recv_tokens_ = TensorWrapper(recv_tokens->untyped_data(), recv_shape, token_dtype);
 
   auto recv_w_dims = recv_topk_weights->dimensions();
-  NVTE_CHECK(recv_w_dims.size() == 1,
-             "recv_topk_weights must be 1D [recv_capacity], got ndim=", recv_w_dims.size());
-  std::vector<size_t> recv_w_shape = {static_cast<size_t>(config.recv_capacity)};
+  NVTE_CHECK(recv_w_dims.size() == 2,
+             "recv_topk_weights must be 2D [ep_slice, recv_capacity_per_rank], got ndim=",
+             recv_w_dims.size());
+  NVTE_CHECK(recv_w_dims[0] == 1,
+             "recv_topk_weights leading dim must be 1 per shard (ep-sliced); got ", recv_w_dims[0]);
+  std::vector<size_t> recv_w_shape = {recv_capacity_per_rank};
   auto recv_topk_weights_ =
       TensorWrapper(recv_topk_weights->untyped_data(), recv_w_shape, DType::kFloat32);
 
