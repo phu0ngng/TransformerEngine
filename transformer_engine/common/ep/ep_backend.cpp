@@ -63,6 +63,9 @@ void EPBackend::validate_config(const NVTEEpGroupConfig& config) {
   NVTE_CHECK(config.max_tokens_per_rank > 0, "max_tokens_per_rank must be positive, got ",
              config.max_tokens_per_rank);
   NVTE_CHECK(config.hidden_dim > 0, "hidden_dim must be positive, got ", config.hidden_dim);
+  NVTE_CHECK(config.hidden_dim * sizeof(nv_bfloat16) >= 16,
+             "hidden_dim * 2 must be >= 16 (NCCL EP 16B row alignment); got hidden_dim=",
+             config.hidden_dim);
   NVTE_CHECK(config.num_experts % config.ep_size == 0, "num_experts (", config.num_experts,
              ") must be divisible by ep_size (", config.ep_size, ")");
 
