@@ -196,9 +196,7 @@ class EpPreparePrimitive(BasePrimitive):
         hm_sharding = NamedSharding(mesh, PartitionSpec(ep_axis))
 
         def sharded_impl(topk_idx):
-            return EpPreparePrimitive.impl(
-                topk_idx, dispatch_output_per_expert_alignment, False
-            )
+            return EpPreparePrimitive.impl(topk_idx, dispatch_output_per_expert_alignment, False)
 
         return mesh, sharded_impl, [tc_sharding, hm_sharding], arg_shardings
 
