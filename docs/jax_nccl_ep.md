@@ -5,7 +5,11 @@ and running the multi-process EP tests.
 
 ## Requirements
 
-- CUDA arch ≥ 90 (Hopper or newer; H100, H200, B200, B300, GH200).
+- Runtime device with compute capability ≥ 9.0 (Hopper or newer;
+  H100, H200, B200, B300, GH200). Enforced at runtime in
+  `EPBackend::validate_config` — NOT at build time. A wheel built
+  for many archs loads fine on pre-Hopper, only errors when EP is
+  actually invoked.
 - NCCL EP submodule under `3rdparty/nccl/contrib/nccl_ep` (already
   pinned in this repo).
 - NVLink mesh fabric (NVLS multicast). Single-rail PCIe boxes are
@@ -94,7 +98,7 @@ crashes are dumped only when rank 0 doesn't print a summary
 
 | Symptom | Likely cause |
 | --- | --- |
-| `NVTE_WITH_NCCL_EP=1 requires CUDA arch >= 90` | `NVTE_CUDA_ARCHS` lacks `90`. |
+| `NCCL EP requires SM_90+ ... compute capability X.x` | Runtime device pre-Hopper; not a build issue. |
 | `Unsupported LSA team size … in [_NCCL_EP_LSA_TEAM_SIZE_MIN, _MAX]` | `_NCCL_EP_LSA_TEAM_SIZE_MAX` < runtime team size; set via setup.py. |
 | `CUDA error 'named symbol not found'` | Build SASS doesn't cover this GPU; add the SM to `NVTE_CUDA_ARCHS`. |
 | `out = tokens / 2` on 2×4 | Pre-SPRINT8 bug — fixed; rebuild against current `main`. |

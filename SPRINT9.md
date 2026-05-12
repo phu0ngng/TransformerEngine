@@ -199,11 +199,12 @@ Citations:
 
 Sketch:
 - Flip the `getenv` default for `NVTE_WITH_NCCL_EP` from `"0"` to
-  `"1"` so a plain `pip install -e .` on Hopper+ builds NCCL EP.
-  Keep the existing arch guard (`NVTE_CUDA_ARCHS >= 90`) and gate
-  the flip on it — if the user's arch list is pre-Hopper-only,
-  silently default to OFF and warn, so we don't break pre-Hopper
-  builds.
+  `"1"` so a plain `pip install -e .` builds NCCL EP. NO
+  compile-time arch gate — `EPBackend::validate_config`
+  (`ep_backend.cpp:79-85`) already enforces `compute_cap.major >=
+  9` at runtime via `cudaDevAttrComputeCapabilityMajor`. A wheel
+  built for many archs loads fine on pre-Hopper devices and only
+  errors if the user actually calls `nvte_ep_initialize()`.
 - Flip the `getenv` default for `NVTE_BUILD_NCCL_CORE` from `"1"`
   to `"0"` so NCCL core is sourced from the system (or a
   user-supplied `NCCL_HOME` / `LD_LIBRARY_PATH`) by default.

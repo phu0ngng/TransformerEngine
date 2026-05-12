@@ -79,15 +79,9 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
 
     if bool(int(os.getenv("NVTE_WITH_NCCL_EP", "0"))):
-        # NCCL EP requires SM>=90 (Hopper+). Catch at setup time rather than
-        # bubbling up from nvcc.
-        for a in str(archs).split(";"):
-            a_num = "".join(c for c in a if c.isdigit())
-            if a_num and int(a_num) < 90:
-                raise RuntimeError(
-                    "NVTE_WITH_NCCL_EP=1 requires CUDA arch >= 90 (Hopper or newer); "
-                    f"got '{a}' in NVTE_CUDA_ARCHS. Set NVTE_CUDA_ARCHS=\"90\" or higher."
-                )
+        # SM>=90 is enforced at runtime in EPBackend::validate_config —
+        # not at build time, so a wheel built for many archs still loads
+        # on pre-Hopper devices and only errors when ep is actually used.
         nccl_ep_home = os.getenv("NCCL_EP_HOME") or os.getenv("NCCL_EP_DIR")
         if not nccl_ep_home:
             nccl_ep_home = build_nccl_ep_submodule()
