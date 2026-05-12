@@ -186,6 +186,44 @@ Sketch:
 Acceptance: with `NVTE_EP_VERBOSE=1`, a single line per rank
 captures enough state to triage future bootstrap mismatches in 30s.
 
+### 5. Flip build defaults: NCCL EP on by default, NCCL core opt-in [MUST]
+
+Citations:
+- `setup.py:81` — `NVTE_WITH_NCCL_EP` defaults to `"0"` (NCCL EP is
+  opt-in today; should be on by default).
+- `setup.py:167` — `NVTE_BUILD_NCCL_CORE` defaults to `"1"` (always
+  builds NCCL core from the submodule; should become opt-in so
+  system NCCL is the default).
+- `setup.py:148-154` — docstring that documents the current
+  defaults; must be updated in lock-step.
+
+Sketch:
+- Flip the `getenv` default for `NVTE_WITH_NCCL_EP` from `"0"` to
+  `"1"` so a plain `pip install -e .` on Hopper+ builds NCCL EP.
+  Keep the existing arch guard (`NVTE_CUDA_ARCHS >= 90`) and gate
+  the flip on it — if the user's arch list is pre-Hopper-only,
+  silently default to OFF and warn, so we don't break pre-Hopper
+  builds.
+- Flip the `getenv` default for `NVTE_BUILD_NCCL_CORE` from `"1"`
+  to `"0"` so NCCL core is sourced from the system (or a
+  user-supplied `NCCL_HOME` / `LD_LIBRARY_PATH`) by default.
+  Users who want the submodule build pass `NVTE_BUILD_NCCL_CORE=1`
+  explicitly.
+- Update the docstring at `setup.py:148-154`, the env-var lists in
+  the wider build docs (if any), and any CI invocations under
+  `.github/` or `qa/` that previously relied on the old defaults.
+- Verify both 1×4 and 2×4 still pass with the flipped defaults
+  (drop `NVTE_WITH_NCCL_EP=1` from the build command; keep
+  `NVTE_BUILD_NCCL_CORE=0` only when the submodule build is
+  undesired).
+
+Acceptance: `pip install --no-build-isolation -e .` (no NCCL-related
+env vars set) on the B300 box produces a wheel that loads NCCL EP
+and passes `tests/jax/test_multi_process_ep_sharded.py` on 2×4.
+Explicitly setting `NVTE_WITH_NCCL_EP=0` reproduces the old
+"no EP" build. `NVTE_BUILD_NCCL_CORE=1` reproduces the old
+submodule-NCCL build.
+
 ## Constraints honored
 
 - `NVTE_CUDA_ARCHS="90;100"` minimum for any rebuild (drop `;103`
