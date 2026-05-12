@@ -231,3 +231,51 @@ $ cuobjdump --dump-ptx libnccl_ep.so | grep -c "target sm_"
 
 Acceptance partially met (a, b, c documented). Next concrete probe
 is to add sm_103 to gencode and re-inspect.
+
+### Item 1/2 — sm_103 rebuild attempt via setup.py: BLOCKED
+
+Tried (commit-only sprint plan in place):
+
+```
+rm -f 3rdparty/nccl/build/lib/libnccl_ep.so
+NVTE_NCCL_EP_REBUILD=1 NVTE_WITH_NCCL_EP=1 \
+  NCCL_EP_DIR=$PWD/3rdparty/nccl/build NVTE_BUILD_NCCL_CORE=0 \
+  NVTE_CUDA_ARCHS="90;100;103" \
+  _NCCL_EP_LSA_TEAM_SIZE_MIN=4 _NCCL_EP_LSA_TEAM_SIZE_MAX=8 \
+  pip install --no-build-isolation -e .
+```
+
+Result: TE's CMake step (`build_tools/build_ext.py:97`) exited
+non-zero. The NCCL EP make step inside setup.py's
+`_build_nccl_libs` did NOT produce a new `libnccl_ep.so` either
+(file removed by the cleanup line and never regenerated). The
+log tail captured only the Python traceback; the CMake stderr
+from before that point was truncated by setuptools' output
+buffering — re-run with `pip install -v` or pipe to file for the
+full failure to be visible.
+
+Follow-up (carried into SPRINT9 item #2 execution next session):
+- Re-run with explicit log capture: `... pip install -v
+  --no-build-isolation -e . 2>&1 | tee /tmp/sprint9-build.log`
+  and grep `error:` for the first CMake failure.
+- Possible causes worth checking:
+  - sm_103 needs `compute_103,sm_103` AND the toolchain's CCCL
+    headers may require sm_100a; nvcc 13.2 lists `sm_103a` and
+    `sm_103f` as separate variants.
+  - TE's CMake might filter `NVTE_CUDA_ARCHS` separately from
+    setup.py's NCCL EP path, and the value "103" could be
+    rejected by the TE C++ build but accepted by NCCL EP's. The
+    setup.py path inspected (`setup.py:169-177`) is the NCCL EP
+    side only.
+- After fixing the build, re-run inventory:
+  `cuobjdump --dump-elf-symbols libnccl_ep.so | grep "scan.*Li1ELi8E"`
+  and `cuobjdump | grep "arch ="` should both show sm_103.
+
+State to leave to next session: the lib was deleted, build did
+NOT regenerate it. Running any EP test now will fail at link
+time. Either re-run the rebuild after diagnosing the CMake
+failure, OR `git checkout` is not applicable (build artifact is
+gitignored). The build_dir is at
+`/home/scratch.phuonguyen_sw/te/build/cmake` — its log files
+should contain the original CMake error.
+
