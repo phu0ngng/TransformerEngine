@@ -83,6 +83,17 @@ def setup_common_extension() -> CMakeExtension:
         cusolvermp_dir = os.getenv("CUSOLVERMP_HOME", "/usr")
         cmake_flags.append(f"-DCUSOLVERMP_DIR={cusolvermp_dir}")
 
+    # NCCL EP is on by default. Set NVTE_BUILD_WITH_NCCL_EP=0 to build TE
+    # without it (useful on older base images whose system NCCL is too old
+    # for the EP runtime). SM>=90 is enforced at runtime in
+    # EPBackend::validate_config, so a wheel built for many archs still loads
+    # on pre-Hopper devices and only errors when EP is actually used.
+    build_with_nccl_ep = bool(int(os.getenv("NVTE_BUILD_WITH_NCCL_EP", "1")))
+    if build_with_nccl_ep:
+        build_nccl_ep_submodule()
+    else:
+        cmake_flags.append("-DNVTE_WITH_NCCL_EP=OFF")
+
     # Add custom CMake arguments from environment variable
     nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
     if nvte_cmake_extra_args:
@@ -126,6 +137,65 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
             test_reqs.extend(test_requirements())
 
     return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
+
+
+def build_nccl_ep_submodule() -> str:
+    """Build libnccl_ep.so from the 3rdparty/nccl submodule.
+
+    NCCL EP is on by default; the system NCCL core (libnccl.so) supplies the
+    headers and runtime symbols. Returns the submodule build directory.
+    """
+    nccl_root = current_file_path / "3rdparty" / "nccl"
+    if not (nccl_root / "Makefile").exists():
+        raise RuntimeError(
+            f"NCCL submodule not found at {nccl_root}. "
+            "Run `git submodule update --init --recursive`."
+        )
+
+    build_dir = nccl_root / "build"
+    nccl_ep_lib = build_dir / "lib" / "libnccl_ep.so"
+
+    archs = cuda_archs() or "90"
+    arch_list = []
+    for a in str(archs).split(";"):
+        a = a.strip().rstrip("af")
+        if a and a.isdigit() and int(a) >= 90:
+            arch_list.append(a)
+    if not arch_list:
+        arch_list = ["90"]
+    gencode = " ".join(f"-gencode=arch=compute_{a},code=sm_{a}" for a in arch_list)
+
+    nproc = os.cpu_count() or 8
+    env = os.environ.copy()
+    env["NVCC_GENCODE"] = gencode
+
+    if not nccl_ep_lib.exists():
+        print(f"[NCCL EP] Building libnccl_ep.so (gencode='{gencode}')")
+        subprocess.check_call(
+            ["make", "-j", str(nproc), "-C", "contrib/nccl_ep", "lib"],
+            cwd=str(nccl_root),
+            env=env,
+        )
+
+    # TE's CMake expects nccl.h under 3rdparty/nccl/build/include/ for its
+    # version check. Mirror the top-level host headers from the system NCCL
+    # install — DON'T mirror nccl_device/ because the submodule ships its own
+    # newer copy at src/include/nccl_device/ with device-side templates that
+    # conflict with older system versions, and the JIT include path picks the
+    # submodule's.
+    nccl_include = build_dir / "include"
+    nccl_include.mkdir(parents=True, exist_ok=True)
+    for cand in ("/usr/include", "/opt/nvidia/nccl/include"):
+        p = Path(cand)
+        if (p / "nccl.h").exists():
+            for name in ("nccl.h", "nccl_net.h", "nccl_tuner.h"):
+                src = p / name
+                dst = nccl_include / name
+                if src.exists() and not dst.exists():
+                    dst.symlink_to(src)
+            break
+
+    return str(build_dir)
 
 
 def git_check_submodules() -> None:

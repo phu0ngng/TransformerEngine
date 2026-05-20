@@ -380,6 +380,126 @@ if (NVTE_WITH_CUSOLVERMP)
     message(STATUS "Using cuSolverMp at: ${CUSOLVERMP_DIR}")
 endif()
 
+# ── NCCL EP (on by default, HT mode only) ─────────────────────────────────
+# Set -DNVTE_WITH_NCCL_EP=OFF (or NVTE_BUILD_WITH_NCCL_EP=0 in setup.py) to
+# skip NCCL EP entirely — useful on older images whose system NCCL is below
+# the 2.30.4 EP minimum.
+option(NVTE_WITH_NCCL_EP "Build NCCL EP into libtransformer_engine.so" ON)
+if(NVTE_WITH_NCCL_EP)
+# NCCL EP requires SM>=90 (Hopper or newer). Reject earlier archs at configure
+# time rather than failing deep inside libnccl_ep's nvcc invocation.
+set(_NVTE_NCCL_EP_ALL_ARCHS ${NVTE_GENERIC_ARCHS} ${NVTE_SPECIFIC_ARCHS}
+                            ${CMAKE_CUDA_ARCHITECTURES})
+foreach(_arch IN LISTS _NVTE_NCCL_EP_ALL_ARCHS)
+  string(REGEX REPLACE "[^0-9]" "" _arch_num "${_arch}")
+  if(_arch_num AND _arch_num LESS 90)
+    message(FATAL_ERROR
+      "NCCL EP requires CUDA arch >= 90 (Hopper or newer); "
+      "got '${_arch}' in CMAKE_CUDA_ARCHITECTURES. Set NVTE_CUDA_ARCHS=\"90\" "
+      "(or higher).")
+  endif()
+endforeach()
+# ── NCCL EP headers ────────────────────────────────────────────────────────
+# Headers + libs are produced by the in-tree 3rdparty/nccl submodule build
+# (auto-built by setup.py via build_nccl_ep_submodule).
+set(NCCL_EP_SUBMODULE_ROOT
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl")
+set(NCCL_EP_INCLUDE_DIR "${NCCL_EP_SUBMODULE_ROOT}/contrib/nccl_ep/include")
+if(NOT EXISTS "${NCCL_EP_INCLUDE_DIR}/nccl_ep.h")
+  message(FATAL_ERROR
+    "NCCL EP header not found at ${NCCL_EP_INCLUDE_DIR}/nccl_ep.h. "
+    "Run `git submodule update --init --recursive` to checkout 3rdparty/nccl.")
+endif()
+message(STATUS "NCCL EP headers: ${NCCL_EP_INCLUDE_DIR}")
+
+# ── libnccl_ep.so ──────────────────────────────────────────────────────────
+set(NCCL_EP_LIB_DIR "${NCCL_EP_SUBMODULE_ROOT}/build/lib")
+find_library(NCCL_EP_LIB
+    NAMES nccl_ep libnccl_ep
+    HINTS ${NCCL_EP_LIB_DIR}
+    NO_DEFAULT_PATH
+    REQUIRED)
+
+# ── NCCL + GIN headers ─────────────────────────────────────────────────────
+# libnccl.so and all GIN headers (ncclGin.h, ncclWindow_t, ncclDevComm_t)
+# ship with the base CUDA Toolkit OR the 3rdparty/nccl submodule build
+# (preferred when present; auto-built by setup.py via build_nccl_ep_submodule).
+if(NOT NCCL_LIB)
+  find_library(NCCL_LIB
+      NAMES nccl libnccl
+      HINTS ${NCCL_EP_LIB_DIR} ${CUDAToolkit_LIBRARY_DIR}
+      PATH_SUFFIXES lib lib64
+      REQUIRED)
+endif()
+
+set(NCCL_SUBMODULE_INCLUDE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/nccl/build/include")
+if(EXISTS "${NCCL_SUBMODULE_INCLUDE}/nccl.h")
+  set(NCCL_INCLUDE_DIRS_FOR_TE ${NCCL_SUBMODULE_INCLUDE})
+else()
+  set(NCCL_INCLUDE_DIRS_FOR_TE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+endif()
+
+# ── Minimum NCCL version check ─────────────────────────────────────────────
+# NCCL EP requires NCCL >= 2.30.4 (matches the submodule pin). Parse the
+# version from the resolved nccl.h header and reject older systems with an
+# actionable rebuild hint.
+set(NVTE_MIN_NCCL_VERSION "2.30.4")
+set(NVTE_MIN_NCCL_VERSION_CODE 23004)
+find_file(_nvte_nccl_header_path nccl.h
+    PATHS ${NCCL_INCLUDE_DIRS_FOR_TE} ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+    NO_DEFAULT_PATH)
+if(NOT _nvte_nccl_header_path)
+  message(FATAL_ERROR
+    "NCCL EP requires nccl.h (>= ${NVTE_MIN_NCCL_VERSION}) but it was not found. "
+    "Rebuild TE with NVTE_BUILD_NCCL_CORE=1 to build NCCL core from the submodule.")
+endif()
+file(READ "${_nvte_nccl_header_path}" _nvte_nccl_h)
+string(REGEX MATCH "#define[ \t]+NCCL_MAJOR[ \t]+([0-9]+)" _ "${_nvte_nccl_h}")
+set(_nvte_nccl_major "${CMAKE_MATCH_1}")
+string(REGEX MATCH "#define[ \t]+NCCL_MINOR[ \t]+([0-9]+)" _ "${_nvte_nccl_h}")
+set(_nvte_nccl_minor "${CMAKE_MATCH_1}")
+string(REGEX MATCH "#define[ \t]+NCCL_PATCH[ \t]+([0-9]+)" _ "${_nvte_nccl_h}")
+set(_nvte_nccl_patch "${CMAKE_MATCH_1}")
+if(NOT _nvte_nccl_major OR NOT _nvte_nccl_minor OR NOT _nvte_nccl_patch)
+  message(FATAL_ERROR
+    "Failed to parse NCCL_MAJOR/MINOR/PATCH from ${_nvte_nccl_header_path}. "
+    "Rebuild TE with NVTE_BUILD_NCCL_CORE=1 to build NCCL core from the submodule.")
+endif()
+math(EXPR _nvte_nccl_code "${_nvte_nccl_major}*10000 + ${_nvte_nccl_minor}*100 + ${_nvte_nccl_patch}")
+message(STATUS "NCCL header: ${_nvte_nccl_header_path} (version ${_nvte_nccl_major}.${_nvte_nccl_minor}.${_nvte_nccl_patch})")
+if(_nvte_nccl_code LESS NVTE_MIN_NCCL_VERSION_CODE)
+  message(FATAL_ERROR
+    "NCCL EP requires NCCL >= ${NVTE_MIN_NCCL_VERSION}, "
+    "found ${_nvte_nccl_major}.${_nvte_nccl_minor}.${_nvte_nccl_patch} at "
+    "${_nvte_nccl_header_path}. Rebuild TE with NVTE_BUILD_NCCL_CORE=1 to "
+    "build NCCL core from the 3rdparty/nccl submodule (e.g. "
+    "NVTE_BUILD_NCCL_CORE=1 pip install --no-build-isolation -e .).")
+endif()
+
+target_include_directories(transformer_engine PRIVATE
+    ${NCCL_EP_INCLUDE_DIR}
+    ${NCCL_INCLUDE_DIRS_FOR_TE})  # covers nccl.h + nccl_device/
+
+target_link_libraries(transformer_engine PUBLIC
+    ${NCCL_EP_LIB}
+    ${NCCL_LIB})
+
+# Embed rpath so the installed wheel finds libnccl_ep.so at runtime.
+# libnccl.so is already on the system via the Toolkit — no rpath needed for it.
+set_target_properties(transformer_engine PROPERTIES
+    INSTALL_RPATH "$ORIGIN;${NCCL_EP_LIB_DIR}")
+
+target_sources(transformer_engine PRIVATE
+    ep/ep_backend.cpp
+    ep/ep_api.cpp)
+
+message(STATUS "NCCL EP enabled: ${NCCL_EP_LIB}")
+message(STATUS "NCCL EP include: ${NCCL_EP_INCLUDE_DIR}")
+else()
+  message(STATUS "NCCL EP disabled (NVTE_WITH_NCCL_EP=OFF)")
+endif()
+
 # Number of philox4x32 rounds for stochastic rounding (build-time constant).
 set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR $ENV{NVTE_BUILD_NUM_PHILOX_ROUNDS})
 if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR)
