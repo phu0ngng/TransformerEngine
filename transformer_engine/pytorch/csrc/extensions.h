@@ -7,6 +7,7 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <string>
@@ -605,6 +606,46 @@ void inplace_multi_tensor_swizzle_scales_for_gemm_unchecked(std::vector<py::obje
                                                             bool columnwise_usage);
 
 void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise);
+
+/***************************************************************************************************
+ * Expert Parallelism
+ **************************************************************************************************/
+
+// Borrows torch's NCCL host comm (``comm_ptr`` from ``ProcessGroupNCCL._comm_ptr()``)
+// so symm-mem windows are visible to NCCL EP. ``group_name`` is the PG name
+// used for per-step symm-mem tensor lookups.
+void ep_initialize(uintptr_t comm_ptr, const std::string &group_name, int64_t num_experts,
+                   int64_t max_tokens_per_rank, int64_t max_recv_tokens_per_rank,
+                   int64_t hidden_dim, int64_t max_num_sms, bool allow_handle_mem_reloc);
+
+void ep_finalize();
+
+// Toggles whether per-step ops apply the symm-mem NCCL window annotation.
+// Default true; set false to force the staged-copy path (A/B benchmarking).
+void ep_set_zero_copy(bool enabled);
+bool ep_get_zero_copy();
+
+// Returns (handle_id, handle_mem_size_bytes).
+std::tuple<int64_t, int64_t> ep_register_layer(int64_t top_k,
+                                               int64_t dispatch_output_per_expert_alignment);
+
+void ep_prepare(at::Tensor handle_mem, int64_t handle_id, at::Tensor topk_idx,
+                at::Tensor token_counts, int64_t dispatch_output_per_expert_alignment);
+
+void ep_dispatch(at::Tensor handle_mem, int64_t handle_id, at::Tensor topk_idx, at::Tensor tokens,
+                 at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights);
+
+void ep_combine(at::Tensor handle_mem, int64_t handle_id, at::Tensor expert_out, at::Tensor result);
+
+void ep_dispatch_bwd(at::Tensor handle_mem, int64_t handle_id, at::Tensor grad,
+                     at::Tensor g_recv_topk_weights, at::Tensor grad_tokens,
+                     at::Tensor grad_topk_weights);
+
+void ep_combine_bwd(at::Tensor handle_mem, int64_t handle_id, at::Tensor grad,
+                    at::Tensor grad_expert_out);
+
+// Registers the EP pybind functions on `m`. Defined under NVTE_WITH_NCCL_EP.
+void register_ep_bindings(pybind11::module_ &m);
 
 /***************************************************************************************************
  * NVSHMEM APIs
