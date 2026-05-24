@@ -407,12 +407,21 @@ def main():
                 f.write(f"{evt.key},{evt.device_time_total},{evt.cpu_time_total},{evt.count}\n")
         print(f"[ep_bench] per-kernel CSV: {kern_csv}", flush=True)
 
-    # Release NCCL EP's borrowed comm + drop symm-mem tensors *before* torch
-    # tears down the comm; otherwise their __del__ runs after destroy and the
-    # window-deregister calls fail noisily on a freed comm.
-    ep_finalize()
-    del buffer, handle, recv_tokens, recv_w, tokens, topk_w, expert_out
+    # Captured CUDA graphs (when --cuda-graph) hold references to NCCL EP
+    # handles and per-pool streams; drop them and sync before ep_finalize,
+    # otherwise the post-finalize dist.barrier can deadlock against pending
+    # graph state.
+    torch.cuda.synchronize()
+    if args.cuda_graph:
+        fwd_bwd_dispatch_fn = None
+        fwd_bwd_combine_fn = None
+        captured_runners.clear()
+        del g_disp, g_comb, disp_mod, comb_mod
+    del tokens_p, eo_p, buffer, handle, recv_tokens, recv_w, tokens, topk_w, expert_out
     gc.collect()
+    torch.cuda.synchronize()
+    # Release NCCL EP's borrowed comm before torch destroys it.
+    ep_finalize()
     dist.barrier()
     dist.destroy_process_group()
     sys.stdout.flush()

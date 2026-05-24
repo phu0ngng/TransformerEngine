@@ -323,6 +323,170 @@ class TestEP(unittest.TestCase):
         torch.cuda.synchronize()
         torch.testing.assert_close(result.float(), ref.float(), atol=0, rtol=0)
 
+    def test_cuda_graph_autograd_dispatch_fwd(self):
+        """Capture ep_dispatch (autograd fwd) including ep_prepare-inside-forward.
+
+        Bisects the ep_bench --cuda-graph hang: does capturing AllGather inside
+        the autograd forward break?
+        """
+        handle = self._make_handle()
+        buffer = self._make_ep_buffer(handle)
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+
+        # Warm up the eager path + NCCL streams before capture.
+        for _ in range(3):
+            ep_dispatch(handle, buffer, tokens_p, topk_idx, w, zero_copy=False)
+        torch.cuda.synchronize()
+        dist.barrier(device_ids=[torch.cuda.current_device()])
+
+        graph = torch.cuda.CUDAGraph()
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            with torch.cuda.graph(graph):
+                ep_dispatch(handle, buffer, tokens_p, topk_idx, w, zero_copy=False)
+        torch.cuda.current_stream().wait_stream(s)
+        torch.cuda.synchronize()
+        for _ in range(3):
+            graph.replay()
+        torch.cuda.synchronize()
+
+    def test_cuda_graph_make_graphed_dispatch_fwd_bwd(self):
+        """make_graphed_callables over a module wrapping ep_dispatch (fwd+bwd).
+
+        Bisects the ep_bench --cuda-graph hang: does make_graphed_callables
+        on the autograd path break?
+        """
+        handle = self._make_handle()
+        buffer = self._make_ep_buffer(handle)
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+
+        class _DispatchMod(torch.nn.Module):
+            def forward(self, x):
+                return ep_dispatch(handle, buffer, x, topk_idx, w, zero_copy=False)[0]
+
+        mod = _DispatchMod().cuda()
+        graphed = torch.cuda.make_graphed_callables(mod, (tokens_p,))
+        for _ in range(3):
+            tokens_p.grad = None
+            r = graphed(tokens_p)
+            (0.5 * (r * r).sum(dtype=torch.float32)).backward()
+        torch.cuda.synchronize()
+
+    def test_cuda_graph_make_graphed_dispatch_and_combine(self):
+        """make_graphed_callables on the tuple (dispatch_mod, combine_mod).
+
+        Bisects the ep_bench --cuda-graph hang: does capturing both modules
+        together (which is what the bench does) break?
+        """
+        handle = self._make_handle()
+        buffer = self._make_ep_buffer(handle)
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        rc = self.cfg.recv_capacity_per_rank
+        recv_w_persistent = torch.empty(rc, dtype=torch.float32, device=self.cfg.device)
+        eo_p = torch.empty(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        eo_p = eo_p.requires_grad_(True)
+
+        class _DispatchMod(torch.nn.Module):
+            def forward(self, x):
+                return ep_dispatch(handle, buffer, x, topk_idx, w, zero_copy=False)[0]
+
+        class _CombineMod(torch.nn.Module):
+            def forward(self, eo):
+                return ep_combine(handle, buffer, eo, recv_w_persistent, zero_copy=False)
+
+        disp_mod = _DispatchMod().cuda()
+        comb_mod = _CombineMod().cuda()
+        g_disp, g_comb = torch.cuda.make_graphed_callables(
+            (disp_mod, comb_mod), ((tokens_p,), (eo_p,))
+        )
+        for _ in range(3):
+            tokens_p.grad = None
+            r = g_disp(tokens_p)
+            (0.5 * (r * r).sum(dtype=torch.float32)).backward()
+            eo_p.grad = None
+            out = g_comb(eo_p)
+            (0.5 * (out * out).sum(dtype=torch.float32)).backward()
+        torch.cuda.synchronize()
+
+    def test_cuda_graph_bench_capture_sequence(self):
+        """Reproduce the exact ep_bench --cuda-graph capture sequence.
+
+        Bench flow: make_graphed_callables((disp, comb), ...) → then direct
+        torch.cuda.graph captures of dispatch_raw, ep_dispatch_fwd,
+        combine_raw, ep_combine_fwd on a side stream, all on the same handle.
+        Hypothesis: running multiple graph captures back-to-back without a
+        barrier between them deadlocks NCCL.
+        """
+        handle = self._make_handle()
+        buffer = self._make_ep_buffer(handle)
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        rc = self.cfg.recv_capacity_per_rank
+        recv_tokens = torch.empty(rc, HIDDEN_DIM, dtype=torch.bfloat16, device=self.cfg.device)
+        recv_w = torch.empty(rc, dtype=torch.float32, device=self.cfg.device)
+
+        # Prime: prepare once + one raw dispatch so recv_tokens has valid contents.
+        ep_prepare(handle, topk_idx)
+        _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
+        torch.cuda.synchronize()
+        expert_out = recv_tokens.clone()
+
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        eo_p = recv_tokens.detach().clone().requires_grad_(True)
+
+        class _DispatchMod(torch.nn.Module):
+            def forward(self, x):
+                return ep_dispatch(handle, buffer, x, topk_idx, w, zero_copy=False)[0]
+
+        class _CombineMod(torch.nn.Module):
+            def forward(self, eo):
+                return ep_combine(handle, buffer, eo, recv_w, zero_copy=False)
+
+        disp_mod = _DispatchMod().cuda()
+        comb_mod = _CombineMod().cuda()
+        g_disp, g_comb = torch.cuda.make_graphed_callables(
+            (disp_mod, comb_mod), ((tokens_p,), (eo_p,))
+        )
+
+        # Direct capture of raw + fwd-only stages on a side stream (bench pattern).
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        captured = {}
+        with torch.cuda.stream(side):
+            for name, fn in [
+                ("dispatch_raw", lambda: _ep_dispatch_raw(
+                    handle, topk_idx, tokens, w, recv_tokens, recv_w)),
+                ("ep_dispatch_fwd", lambda: ep_dispatch(
+                    handle, buffer, tokens.detach(), topk_idx, w, zero_copy=False)),
+                ("combine_raw", lambda: _ep_combine_raw(
+                    handle, expert_out, torch.empty_like(tokens))),
+                ("ep_combine_fwd", lambda: ep_combine(
+                    handle, buffer, recv_tokens, recv_w, zero_copy=False)),
+            ]:
+                fn()  # prime allocator
+                torch.cuda.synchronize()
+                g = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(g):
+                    fn()
+                captured[name] = g
+        torch.cuda.current_stream().wait_stream(side)
+        torch.cuda.synchronize()
+
+        # Replay every captured graph + the graphed callables a few times.
+        for _ in range(3):
+            for g in captured.values():
+                g.replay()
+            tokens_p.grad = None
+            r = g_disp(tokens_p)
+            (0.5 * (r * r).sum(dtype=torch.float32)).backward()
+            eo_p.grad = None
+            out = g_comb(eo_p)
+            (0.5 * (out * out).sum(dtype=torch.float32)).backward()
+        torch.cuda.synchronize()
+
     def test_autocast_bf16(self):
         """EP under autocast must preserve dtype and identity round-trip."""
         handle = self._make_handle()
@@ -690,6 +854,10 @@ def _init_distributed():
 if __name__ == "__main__":
     _init_distributed()
     loader = unittest.TestLoader()
+    # Optional single-test filter for bisection: NVTE_EP_TEST_FILTER=test_name.
+    name_filter = os.environ.get("NVTE_EP_TEST_FILTER")
+    if name_filter:
+        loader.testMethodPrefix = name_filter
     suite = loader.loadTestsFromTestCase(TestEP)
     runner = unittest.TextTestRunner(stream=sys.stdout, verbosity=2)
     result = runner.run(suite)
