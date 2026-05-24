@@ -366,12 +366,8 @@ def ep_prepare(handle: EpHandle, topk_idx: torch.Tensor) -> torch.Tensor:
 
     ``topk_idx`` must be int64.
     """
-    token_counts = torch.empty(
-        handle.num_local_experts, dtype=torch.int32, device=handle.device
-    )
-    tex.ep_prepare(
-        handle.handle_mem, handle.handle_id, topk_idx, token_counts, handle.alignment
-    )
+    token_counts = torch.empty(handle.num_local_experts, dtype=torch.int32, device=handle.device)
+    tex.ep_prepare(handle.handle_mem, handle.handle_id, topk_idx, token_counts, handle.alignment)
     return token_counts
 
 

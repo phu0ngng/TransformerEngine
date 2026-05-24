@@ -346,9 +346,9 @@ void register_ep_bindings(pybind11::module_& m) {
   m.def("ep_initialize", &ep_initialize,
         "Initialize the EP backend; borrows torch's NCCL comm pointed to by ``comm_ptr``.",
         py::arg("comm_ptr"), py::arg("group_name"), py::arg("num_experts"),
-        py::arg("max_tokens_per_rank"), py::arg("max_recv_tokens_per_rank"),
-        py::arg("hidden_dim"), py::arg("max_num_sms") = 0,
-        py::arg("allow_handle_mem_reloc") = false, py::call_guard<py::gil_scoped_release>());
+        py::arg("max_tokens_per_rank"), py::arg("max_recv_tokens_per_rank"), py::arg("hidden_dim"),
+        py::arg("max_num_sms") = 0, py::arg("allow_handle_mem_reloc") = false,
+        py::call_guard<py::gil_scoped_release>());
   m.def("ep_finalize", &ep_finalize, "Tear down the EP backend. Idempotent.",
         py::call_guard<py::gil_scoped_release>());
   m.def("ep_set_zero_copy", &ep_set_zero_copy, "Toggle EP zero-copy symm-mem annotation.",
