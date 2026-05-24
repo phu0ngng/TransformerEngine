@@ -457,14 +457,24 @@ class TestEP(unittest.TestCase):
         captured = {}
         with torch.cuda.stream(side):
             for name, fn in [
-                ("dispatch_raw", lambda: _ep_dispatch_raw(
-                    handle, topk_idx, tokens, w, recv_tokens, recv_w)),
-                ("ep_dispatch_fwd", lambda: ep_dispatch(
-                    handle, buffer, tokens.detach(), topk_idx, w, zero_copy=False)),
-                ("combine_raw", lambda: _ep_combine_raw(
-                    handle, expert_out, torch.empty_like(tokens))),
-                ("ep_combine_fwd", lambda: ep_combine(
-                    handle, buffer, recv_tokens, recv_w, zero_copy=False)),
+                (
+                    "dispatch_raw",
+                    lambda: _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w),
+                ),
+                (
+                    "ep_dispatch_fwd",
+                    lambda: ep_dispatch(
+                        handle, buffer, tokens.detach(), topk_idx, w, zero_copy=False
+                    ),
+                ),
+                (
+                    "combine_raw",
+                    lambda: _ep_combine_raw(handle, expert_out, torch.empty_like(tokens)),
+                ),
+                (
+                    "ep_combine_fwd",
+                    lambda: ep_combine(handle, buffer, recv_tokens, recv_w, zero_copy=False),
+                ),
             ]:
                 fn()  # prime allocator
                 torch.cuda.synchronize()
