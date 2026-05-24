@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import atexit
-import contextlib
 from typing import Optional
 
 import torch
@@ -85,11 +84,13 @@ def ep_bootstrap(
     hidden_dim: int,
     max_num_sms: int = 0,
     allow_handle_mem_reloc: bool = False,
+    zero_copy: bool = True,
 ) -> None:
     """Initialize EP by borrowing ``ep_group``'s NCCL comm. Call once per process.
 
-    Set ``allow_handle_mem_reloc=True`` only if ``handle.handle_mem`` may move
-    between fwd and bwd of the same layer (off by default).
+    ``zero_copy`` is a one-shot setting; use ``EpBuffer(use_symm_mem=False)``
+    to opt out per-layer. Set ``allow_handle_mem_reloc=True`` only if
+    ``handle.handle_mem`` may move between fwd and bwd of the same layer.
     """
     global _BOOTSTRAPPED, _ATEXIT_REGISTERED
     if _BOOTSTRAPPED:
@@ -111,6 +112,7 @@ def ep_bootstrap(
         int(max_num_sms),
         bool(allow_handle_mem_reloc),
     )
+    tex.ep_set_zero_copy(bool(zero_copy))
     _BOOTSTRAPPED = True
     if not _ATEXIT_REGISTERED:
         atexit.register(_atexit_finalize)
@@ -126,10 +128,10 @@ def ep_finalize() -> None:
 
 
 class EpHandle:
-    """Routing context for one EP layer. Construct once at module init; reuse per step.
-
-    Single-use per step: do not share across concurrently in-flight
-    ``ep_dispatch`` / ``ep_combine`` calls (e.g. PP-1F1B microbatches).
+    """Routing context for one EP layer. Construct once per concurrently-live
+    microbatch (e.g. one per in-flight PP-1F1B step): a second forward on the
+    same handle before the first's backward overwrites ``handle_mem`` and
+    corrupts the earlier backward.
     """
 
     __slots__ = (
@@ -175,17 +177,25 @@ class EpHandle:
 
 
 class EpBuffer:
-    """Symm-mem-backed payload buffers (``recv_tokens``, ``combine_in``) for one EP layer.
+    """Persistent payload + scratch buffers for one EP layer.
 
-    Construct once at layer init (collective rendezvous on ``ep_group``).
-    ``use_symm_mem=False`` falls back to plain HBM for debug runs.
+    Cross-rank slots are symm-mem-backed (collective rendezvous at init);
+    per-rank scratch is HBM. ``use_symm_mem=False`` is the HBM-only debug mode.
 
-    Multi-stream usage: call :meth:`record_stream` from every stream that
-    touches the buffer outside its allocation stream, otherwise the caching
-    allocator can reclaim memory that peers' symm-mem windows still point at.
+    Use one ``EpBuffer`` per concurrently-in-flight call on the layer (one
+    per PP-1F1B microbatch); sharing between an outstanding fwd and a later
+    call overwrites tensors the earlier bwd still reads. Call
+    :meth:`record_stream` from streams other than the allocation stream.
     """
 
-    __slots__ = ("recv_tokens", "combine_in")
+    __slots__ = (
+        "recv_tokens",
+        "combine_in",
+        "recv_topk_weights",
+        "token_counts",
+        "grad_tokens",
+        "grad_topk_weights",
+    )
 
     def __init__(
         self,
@@ -197,15 +207,35 @@ class EpBuffer:
     ) -> None:
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
-        shape = (handle.recv_capacity_per_rank, handle.hidden_dim)
+        recv_shape = (handle.recv_capacity_per_rank, handle.hidden_dim)
+        send_shape = (handle.max_tokens_per_rank, handle.hidden_dim)
         if use_symm_mem:
             if ep_group is None:
                 raise ValueError("EpBuffer(use_symm_mem=True) requires ep_group.")
-            self.recv_tokens = symm_mem_alloc(shape, handle.payload_dtype, ep_group, device=device)
-            self.combine_in = symm_mem_alloc(shape, handle.payload_dtype, ep_group, device=device)
+            self.recv_tokens = symm_mem_alloc(
+                recv_shape, handle.payload_dtype, ep_group, device=device
+            )
+            self.combine_in = symm_mem_alloc(
+                recv_shape, handle.payload_dtype, ep_group, device=device
+            )
+            self.recv_topk_weights = symm_mem_alloc(
+                (handle.recv_capacity_per_rank,), torch.float32, ep_group, device=device
+            )
+            self.grad_tokens = symm_mem_alloc(
+                send_shape, handle.payload_dtype, ep_group, device=device
+            )
         else:
-            self.recv_tokens = torch.empty(shape, dtype=handle.payload_dtype, device=device)
-            self.combine_in = torch.empty(shape, dtype=handle.payload_dtype, device=device)
+            self.recv_tokens = torch.empty(recv_shape, dtype=handle.payload_dtype, device=device)
+            self.combine_in = torch.empty(recv_shape, dtype=handle.payload_dtype, device=device)
+            self.recv_topk_weights = torch.empty(
+                handle.recv_capacity_per_rank, dtype=torch.float32, device=device
+            )
+            self.grad_tokens = torch.empty(send_shape, dtype=handle.payload_dtype, device=device)
+        # Per-rank scratch — never cross-rank, plain HBM regardless of mode.
+        self.token_counts = torch.empty(handle.num_local_experts, dtype=torch.int32, device=device)
+        self.grad_topk_weights = torch.empty(
+            (handle.max_tokens_per_rank, handle.top_k), dtype=torch.float32, device=device
+        )
 
     @classmethod
     def from_external(
@@ -214,17 +244,29 @@ class EpBuffer:
         *,
         recv_tokens: torch.Tensor,
         combine_in: torch.Tensor,
+        recv_topk_weights: Optional[torch.Tensor] = None,
+        grad_tokens: Optional[torch.Tensor] = None,
+        token_counts: Optional[torch.Tensor] = None,
+        grad_topk_weights: Optional[torch.Tensor] = None,
+        device: Optional[torch.device] = None,
     ) -> "EpBuffer":
         """Construct from caller-allocated buffers (e.g. slices of a shared symm-mem pool).
 
-        Both tensors must have shape ``(handle.recv_capacity_per_rank, handle.hidden_dim)``
-        and dtype ``handle.payload_dtype``.
+        ``recv_tokens`` and ``combine_in`` must have shape
+        ``(handle.recv_capacity_per_rank, handle.hidden_dim)`` with
+        ``handle.payload_dtype``. Other slots default to fresh HBM allocations
+        when ``None``.
         """
-        expected = (handle.recv_capacity_per_rank, handle.hidden_dim)
-        if tuple(recv_tokens.shape) != expected:
-            raise ValueError(f"recv_tokens shape {tuple(recv_tokens.shape)} != expected {expected}")
-        if tuple(combine_in.shape) != expected:
-            raise ValueError(f"combine_in shape {tuple(combine_in.shape)} != expected {expected}")
+        if device is None:
+            device = torch.device("cuda", torch.cuda.current_device())
+        recv_shape = (handle.recv_capacity_per_rank, handle.hidden_dim)
+        send_shape = (handle.max_tokens_per_rank, handle.hidden_dim)
+        if tuple(recv_tokens.shape) != recv_shape:
+            raise ValueError(
+                f"recv_tokens shape {tuple(recv_tokens.shape)} != expected {recv_shape}"
+            )
+        if tuple(combine_in.shape) != recv_shape:
+            raise ValueError(f"combine_in shape {tuple(combine_in.shape)} != expected {recv_shape}")
         if recv_tokens.dtype != handle.payload_dtype or combine_in.dtype != handle.payload_dtype:
             raise ValueError(
                 f"buffer dtype must match handle.payload_dtype ({handle.payload_dtype})"
@@ -232,13 +274,42 @@ class EpBuffer:
         inst = cls.__new__(cls)
         inst.recv_tokens = recv_tokens
         inst.combine_in = combine_in
+        inst.recv_topk_weights = (
+            recv_topk_weights
+            if recv_topk_weights is not None
+            else torch.empty(handle.recv_capacity_per_rank, dtype=torch.float32, device=device)
+        )
+        inst.grad_tokens = (
+            grad_tokens
+            if grad_tokens is not None
+            else torch.empty(send_shape, dtype=handle.payload_dtype, device=device)
+        )
+        inst.token_counts = (
+            token_counts
+            if token_counts is not None
+            else torch.empty(handle.num_local_experts, dtype=torch.int32, device=device)
+        )
+        inst.grad_topk_weights = (
+            grad_topk_weights
+            if grad_topk_weights is not None
+            else torch.empty(
+                (handle.max_tokens_per_rank, handle.top_k), dtype=torch.float32, device=device
+            )
+        )
         return inst
 
     def record_stream(self, stream: torch.cuda.Stream) -> None:
-        """Record ``stream`` as a user of both owned tensors so the caching allocator
+        """Record ``stream`` as a user of all owned tensors so the caching allocator
         defers reclaim until ``stream`` has caught up."""
-        self.recv_tokens.record_stream(stream)
-        self.combine_in.record_stream(stream)
+        for t in (
+            self.recv_tokens,
+            self.combine_in,
+            self.recv_topk_weights,
+            self.grad_tokens,
+            self.token_counts,
+            self.grad_topk_weights,
+        ):
+            t.record_stream(stream)
 
 
 # ── torch.library custom ops (so they don't graph-break under torch.compile) ─
@@ -400,8 +471,10 @@ def _ep_combine_raw(handle: EpHandle, expert_out: torch.Tensor, result: torch.Te
 
 
 class _EpDispatch(torch.autograd.Function):
-    """Autograd-aware prepare + dispatch. Fwd and bwd share ``handle_mem``;
-    do not re-run ``ep_prepare`` on this handle between them."""
+    """Autograd-aware prepare + dispatch. Fwd/bwd share ``handle_mem`` and
+    the ``EpBuffer`` slots; do not re-run ``ep_prepare`` between them and do
+    not share ``EpBuffer`` with another in-flight call (see :class:`EpBuffer`).
+    """
 
     @staticmethod
     def forward(  # type: ignore[override]
@@ -410,41 +483,42 @@ class _EpDispatch(torch.autograd.Function):
         handle_id: int,
         alignment: int,
         recv_tokens: torch.Tensor,
-        num_local_experts: int,
-        zero_copy: bool,
+        recv_topk_weights: torch.Tensor,
+        token_counts: torch.Tensor,
+        grad_tokens_buf: torch.Tensor,
+        grad_topk_weights_buf: torch.Tensor,
         topk_idx: torch.Tensor,
         tokens: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-        device = tokens.device
-        recv_capacity = recv_tokens.shape[0]
-        token_counts = torch.empty(num_local_experts, dtype=torch.int32, device=device)
-        recv_topk_weights = torch.empty(recv_capacity, dtype=torch.float32, device=device)
-        with _zero_copy_scope(zero_copy):
-            torch.ops.transformer_engine_ep.prepare(
-                handle_mem, handle_id, topk_idx, token_counts, alignment
-            )
-            torch.ops.transformer_engine_ep.dispatch(
-                handle_mem,
-                handle_id,
-                topk_idx,
-                tokens,
-                topk_weights,
-                recv_tokens,
-                recv_topk_weights,
-            )
+        torch.ops.transformer_engine_ep.prepare(
+            handle_mem, handle_id, topk_idx, token_counts, alignment
+        )
+        torch.ops.transformer_engine_ep.dispatch(
+            handle_mem,
+            handle_id,
+            topk_idx,
+            tokens,
+            topk_weights,
+            recv_tokens,
+            recv_topk_weights,
+        )
         ctx.handle_mem = handle_mem
         ctx.handle_id = handle_id
-        ctx.zero_copy = zero_copy
+        ctx.grad_tokens_buf = grad_tokens_buf
+        ctx.grad_topk_weights_buf = grad_topk_weights_buf
         ctx.tokens_shape = tokens.shape
         ctx.tokens_dtype = tokens.dtype
         ctx.topk_weights_shape = topk_weights.shape
         ctx.topk_weights_dtype = topk_weights.dtype
-        ctx.recv_capacity = recv_capacity
+        ctx.tokens_T_flat = tokens.numel() // tokens.shape[-1]
+        ctx.topk_T_flat = topk_weights.numel() // topk_weights.shape[-1]
+        ctx.recv_capacity = recv_tokens.shape[0]
         ctx.hidden_dim = tokens.shape[-1]
         ctx.mark_non_differentiable(token_counts)
-        # Detach so the long-lived buffer isn't tracked as a differentiable output.
-        return recv_tokens.detach(), recv_topk_weights, token_counts
+        # Detach so the long-lived buffers aren't tracked as differentiable outputs;
+        # autograd re-attaches grad_fn pointing back at this Function.
+        return recv_tokens.detach(), recv_topk_weights.detach(), token_counts
 
     @staticmethod
     def backward(ctx, g_recv_tokens, g_recv_topk_weights, _g_token_counts):  # type: ignore[override]
@@ -455,39 +529,43 @@ class _EpDispatch(torch.autograd.Function):
             )
         if g_recv_topk_weights is None:
             g_recv_topk_weights = torch.zeros(ctx.recv_capacity, dtype=torch.float32, device=device)
-        grad_tokens = torch.empty(ctx.tokens_shape, dtype=ctx.tokens_dtype, device=device)
-        grad_topk_weights = torch.empty(
-            ctx.topk_weights_shape, dtype=ctx.topk_weights_dtype, device=device
-        )
         if not g_recv_tokens.is_contiguous():
             g_recv_tokens = g_recv_tokens.contiguous()
         if not g_recv_topk_weights.is_contiguous():
             g_recv_topk_weights = g_recv_topk_weights.contiguous()
-        with _zero_copy_scope(ctx.zero_copy):
-            torch.ops.transformer_engine_ep.dispatch_bwd(
-                ctx.handle_mem,
-                ctx.handle_id,
-                g_recv_tokens,
-                g_recv_topk_weights,
-                grad_tokens,
-                grad_topk_weights,
-            )
+        # Narrow the persistent slots to this call's flattened leading dim.
+        grad_tokens = ctx.grad_tokens_buf.narrow(0, 0, ctx.tokens_T_flat)
+        grad_topk_weights = ctx.grad_topk_weights_buf.narrow(0, 0, ctx.topk_T_flat)
+        torch.ops.transformer_engine_ep.dispatch_bwd(
+            ctx.handle_mem,
+            ctx.handle_id,
+            g_recv_tokens,
+            g_recv_topk_weights,
+            grad_tokens,
+            grad_topk_weights,
+        )
+        # Reshape back to the original input shape so autograd's grad slot matches.
+        grad_tokens_out = grad_tokens.view(ctx.tokens_shape)
+        grad_topk_weights_out = grad_topk_weights.view(ctx.topk_weights_shape)
         return (
             None,  # handle_mem
             None,  # handle_id
             None,  # alignment
             None,  # recv_tokens
-            None,  # num_local_experts
-            None,  # zero_copy
+            None,  # recv_topk_weights
+            None,  # token_counts
+            None,  # grad_tokens_buf
+            None,  # grad_topk_weights_buf
             None,  # topk_idx
-            grad_tokens,
-            grad_topk_weights,
+            grad_tokens_out,
+            grad_topk_weights_out,
         )
 
 
-@torch.compile(dynamic=False, fullgraph=True)
+@torch.compile(dynamic=True, fullgraph=True)
 def _combine_bwd_post(grad_combine_in, expert_out, recv_topk_weights):
-    """Fused post-NCCL-combine_bwd: shares grad_combine_in reads across the two muls."""
+    """Fused post-NCCL-combine_bwd; ``dynamic=True`` so multiple MoE layers
+    don't each pay a per-shape inductor compile."""
     w = recv_topk_weights.unsqueeze(-1).to(expert_out.dtype)
     grad_expert_out = grad_combine_in * w
     grad_recv_topk_weights = (
@@ -497,8 +575,11 @@ def _combine_bwd_post(grad_combine_in, expert_out, recv_topk_weights):
 
 
 class _EpCombine(torch.autograd.Function):
-    """Autograd-aware weight + combine. Fwd and bwd share ``handle_mem``;
-    do not re-run ``ep_prepare`` on this handle between them."""
+    """Autograd-aware weight + combine. ``combine_in`` is reused as the
+    ``grad_combine_in`` scratch in bwd; fwd/bwd share ``handle_mem`` so don't
+    re-run ``ep_prepare`` between them. Sharing ``EpBuffer`` across an
+    outstanding bwd raises via version-check rather than silently corrupting.
+    """
 
     @staticmethod
     def forward(  # type: ignore[override]
@@ -508,7 +589,6 @@ class _EpCombine(torch.autograd.Function):
         combine_in: torch.Tensor,
         num_local_tokens: int,
         hidden_dim: int,
-        zero_copy: bool,
         expert_out: torch.Tensor,
         recv_topk_weights: torch.Tensor,
     ):
@@ -517,24 +597,24 @@ class _EpCombine(torch.autograd.Function):
         w = recv_topk_weights.unsqueeze(-1).to(expert_out.dtype)
         torch.mul(expert_out, w, out=combine_in)
         result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
-        with _zero_copy_scope(zero_copy):
-            torch.ops.transformer_engine_ep.combine(handle_mem, handle_id, combine_in, result)
+        torch.ops.transformer_engine_ep.combine(handle_mem, handle_id, combine_in, result)
         ctx.save_for_backward(expert_out, recv_topk_weights)
         ctx.handle_mem = handle_mem
         ctx.handle_id = handle_id
-        ctx.zero_copy = zero_copy
+        ctx.combine_in = combine_in  # reused as grad_combine_in in bwd
         return result
 
     @staticmethod
     def backward(ctx, g_result):  # type: ignore[override]
         expert_out, recv_topk_weights = ctx.saved_tensors
-        grad_combine_in = torch.empty_like(expert_out)
+        # Reuse combine_in's storage as the grad_combine_in scratch — same
+        # shape, fwd content no longer needed.
+        grad_combine_in = ctx.combine_in
         if not g_result.is_contiguous():
             g_result = g_result.contiguous()
-        with _zero_copy_scope(ctx.zero_copy):
-            torch.ops.transformer_engine_ep.combine_bwd(
-                ctx.handle_mem, ctx.handle_id, g_result, grad_combine_in
-            )
+        torch.ops.transformer_engine_ep.combine_bwd(
+            ctx.handle_mem, ctx.handle_id, g_result, grad_combine_in
+        )
         grad_expert_out, grad_recv_topk_weights = _combine_bwd_post(
             grad_combine_in, expert_out, recv_topk_weights
         )
@@ -544,7 +624,6 @@ class _EpCombine(torch.autograd.Function):
             None,  # combine_in
             None,  # num_local_tokens
             None,  # hidden_dim
-            None,  # zero_copy
             grad_expert_out,
             grad_recv_topk_weights,
         )
@@ -555,34 +634,6 @@ class _EpCombine(torch.autograd.Function):
 
 # FP8 dispatch is not yet supported by the common backend.
 _FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e5m2)
-
-
-# Python-side mirror of the C++ g_zero_copy_enabled atomic. Lets _zero_copy_scope
-# skip a pybind getter on every per-step op (the common case is enabled==prev).
-_ZC_ENABLED = [True]
-
-
-@contextlib.contextmanager
-def _zero_copy_scope(enabled: bool):
-    """Set the symm-mem zero-copy toggle for the scope, saving + restoring the prior value.
-
-    No-op under ``torch.compile`` (pybind getter/setter aren't dynamo-traceable);
-    callers must pre-set the global toggle before entering the compiled region.
-    """
-    if torch.compiler.is_compiling():
-        yield
-        return
-    prev = _ZC_ENABLED[0]
-    if prev == enabled:
-        yield
-        return
-    tex.ep_set_zero_copy(enabled)
-    _ZC_ENABLED[0] = enabled
-    try:
-        yield
-    finally:
-        tex.ep_set_zero_copy(prev)
-        _ZC_ENABLED[0] = prev
 
 
 def _reject_fp8(*tensors: torch.Tensor) -> None:
@@ -602,13 +653,13 @@ def ep_dispatch(
     tokens: torch.Tensor,
     topk_idx: torch.Tensor,
     topk_weights: torch.Tensor,
-    *,
-    zero_copy: bool = True,
 ):
     """Run prepare + dispatch with autograd. ``topk_idx`` must be int64.
 
-    Returns ``(recv_tokens, recv_topk_weights, token_counts)``;
-    ``token_counts`` is non-differentiable.
+    Returns ``(recv_tokens, recv_topk_weights, token_counts)`` — views into
+    ``buffer``'s persistent slots; consume them before the next ``ep_dispatch``
+    on the same buffer or they get overwritten. ``token_counts`` is
+    non-differentiable.
     """
     _reject_fp8(tokens, buffer.recv_tokens)
     return _EpDispatch.apply(
@@ -616,8 +667,10 @@ def ep_dispatch(
         handle.handle_id,
         handle.alignment,
         buffer.recv_tokens,
-        handle.num_local_experts,
-        zero_copy,
+        buffer.recv_topk_weights,
+        buffer.token_counts,
+        buffer.grad_tokens,
+        buffer.grad_topk_weights,
         topk_idx,
         tokens,
         topk_weights,
@@ -631,7 +684,6 @@ def ep_combine(
     recv_topk_weights: torch.Tensor,
     *,
     num_local_tokens: Optional[int] = None,
-    zero_copy: bool = True,
 ):
     """Apply per-slot weighting then combine, with autograd.
 
@@ -647,7 +699,6 @@ def ep_combine(
         buffer.combine_in,
         num_local_tokens,
         handle.hidden_dim,
-        zero_copy,
         expert_out,
         recv_topk_weights,
     )

@@ -22,7 +22,6 @@ from transformer_engine.pytorch.ep import (
     symm_mem_alloc,
     _ep_combine_raw,
     _ep_dispatch_raw,
-    _zero_copy_scope,
 )
 
 # Must come after the transformer_engine import so libtransformer_engine.so is loaded.
@@ -336,7 +335,7 @@ class TestEP(unittest.TestCase):
 
         # Warm up the eager path + NCCL streams before capture.
         for _ in range(3):
-            ep_dispatch(handle, buffer, tokens_p, topk_idx, w, zero_copy=False)
+            ep_dispatch(handle, buffer, tokens_p, topk_idx, w)
         torch.cuda.synchronize()
         dist.barrier(device_ids=[torch.cuda.current_device()])
 
@@ -345,7 +344,7 @@ class TestEP(unittest.TestCase):
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
             with torch.cuda.graph(graph):
-                ep_dispatch(handle, buffer, tokens_p, topk_idx, w, zero_copy=False)
+                ep_dispatch(handle, buffer, tokens_p, topk_idx, w)
         torch.cuda.current_stream().wait_stream(s)
         torch.cuda.synchronize()
         for _ in range(3):
@@ -365,7 +364,7 @@ class TestEP(unittest.TestCase):
 
         class _DispatchMod(torch.nn.Module):
             def forward(self, x):
-                return ep_dispatch(handle, buffer, x, topk_idx, w, zero_copy=False)[0]
+                return ep_dispatch(handle, buffer, x, topk_idx, w)[0]
 
         mod = _DispatchMod().cuda()
         graphed = torch.cuda.make_graphed_callables(mod, (tokens_p,))
@@ -392,11 +391,11 @@ class TestEP(unittest.TestCase):
 
         class _DispatchMod(torch.nn.Module):
             def forward(self, x):
-                return ep_dispatch(handle, buffer, x, topk_idx, w, zero_copy=False)[0]
+                return ep_dispatch(handle, buffer, x, topk_idx, w)[0]
 
         class _CombineMod(torch.nn.Module):
             def forward(self, eo):
-                return ep_combine(handle, buffer, eo, recv_w_persistent, zero_copy=False)
+                return ep_combine(handle, buffer, eo, recv_w_persistent)
 
         disp_mod = _DispatchMod().cuda()
         comb_mod = _CombineMod().cuda()
@@ -439,11 +438,11 @@ class TestEP(unittest.TestCase):
 
         class _DispatchMod(torch.nn.Module):
             def forward(self, x):
-                return ep_dispatch(handle, buffer, x, topk_idx, w, zero_copy=False)[0]
+                return ep_dispatch(handle, buffer, x, topk_idx, w)[0]
 
         class _CombineMod(torch.nn.Module):
             def forward(self, eo):
-                return ep_combine(handle, buffer, eo, recv_w, zero_copy=False)
+                return ep_combine(handle, buffer, eo, recv_w)
 
         disp_mod = _DispatchMod().cuda()
         comb_mod = _CombineMod().cuda()
@@ -463,18 +462,13 @@ class TestEP(unittest.TestCase):
                 ),
                 (
                     "ep_dispatch_fwd",
-                    lambda: ep_dispatch(
-                        handle, buffer, tokens.detach(), topk_idx, w, zero_copy=False
-                    ),
+                    lambda: ep_dispatch(handle, buffer, tokens.detach(), topk_idx, w),
                 ),
                 (
                     "combine_raw",
                     lambda: _ep_combine_raw(handle, expert_out, torch.empty_like(tokens)),
                 ),
-                (
-                    "ep_combine_fwd",
-                    lambda: ep_combine(handle, buffer, recv_tokens, recv_w, zero_copy=False),
-                ),
+                ("ep_combine_fwd", lambda: ep_combine(handle, buffer, recv_tokens, recv_w)),
             ]:
                 fn()  # prime allocator
                 torch.cuda.synchronize()
@@ -711,22 +705,6 @@ class TestEP(unittest.TestCase):
 
     # ── Snapshot / scope / multi-iter ────────────────────────────────────
 
-    def test_zero_copy_scope_nested(self):
-        """Nested _zero_copy_scope must save/restore the host-side toggle."""
-        initial = tex.ep_get_zero_copy()
-        try:
-            with _zero_copy_scope(True):
-                self.assertTrue(tex.ep_get_zero_copy())
-                with _zero_copy_scope(False):
-                    self.assertFalse(tex.ep_get_zero_copy())
-                    with _zero_copy_scope(True):
-                        self.assertTrue(tex.ep_get_zero_copy())
-                    self.assertFalse(tex.ep_get_zero_copy())
-                self.assertTrue(tex.ep_get_zero_copy())
-            self.assertEqual(tex.ep_get_zero_copy(), initial)
-        finally:
-            tex.ep_set_zero_copy(initial)
-
     def test_topk_int32_raises_clear_error(self):
         """int32 topk_idx must error with a message pointing to .long()."""
         handle = self._make_handle()
@@ -784,39 +762,48 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(out.float(), ref.float(), atol=5e-2, rtol=5e-2)
 
     def test_pp_1f1b_two_handles(self):
-        """fwd₀ → fwd₁ → bwd₀ → bwd₁ with different routings; one EpHandle per in-flight microbatch."""
-        handle0 = self._make_handle()
-        handle1 = self._make_handle()
-        buffer0 = self._make_ep_buffer(handle0)
-        buffer1 = self._make_ep_buffer(handle1)
+        """PP-1F1B interleave (F0 F1 B0 F2 B1 B2) over 3 per-microbatch handles
+        + buffers; each bwd must hit grad ≈ TOP_K * tokens for its own scale."""
         T, H = TOKENS_PER_RANK, HIDDEN_DIM
-        # Routing 0 → experts 0, 1; routing 1 → experts 2, 3.
-        idx0 = torch.zeros(T, TOP_K, dtype=torch.int64, device=self.cfg.device)
-        idx0[:, 1] = 1
-        idx1 = torch.full((T, TOP_K), 2, dtype=torch.int64, device=self.cfg.device)
-        idx1[:, 1] = 3
-        w = torch.full((T, TOP_K), 1.0 / TOP_K, dtype=torch.float32, device=self.cfg.device)
-        tokens0 = torch.full(
-            (T, H), 0.1 + self.cfg.rank * 0.01, dtype=torch.bfloat16, device=self.cfg.device
-        )
-        tokens1 = torch.full(
-            (T, H), 0.5 + self.cfg.rank * 0.01, dtype=torch.bfloat16, device=self.cfg.device
-        )
-        t0 = tokens0.detach().clone().requires_grad_(True)
-        t1 = tokens1.detach().clone().requires_grad_(True)
-        r0, _, _ = ep_dispatch(handle0, buffer0, t0, idx0, w)
-        r1, _, _ = ep_dispatch(handle1, buffer1, t1, idx1, w)
-        loss0 = 0.5 * (r0.float() ** 2).sum()
-        loss1 = 0.5 * (r1.float() ** 2).sum()
-        loss0.backward()
-        loss1.backward()
+        idx, _toks, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        # Distinct token magnitudes per microbatch so grad reuse would be visible.
+        scales = (0.13, 0.41, 0.77)
+        handles, buffers, tokens, tokens_p = [], [], [], []
+        for s in scales:
+            h = self._make_handle()
+            handles.append(h)
+            buffers.append(self._make_ep_buffer(h))
+            t = torch.full(
+                (T, H), s + self.cfg.rank * 0.01, dtype=torch.bfloat16, device=self.cfg.device
+            )
+            tokens.append(t)
+            tokens_p.append(t.detach().clone().requires_grad_(True))
+
+        recv = [None, None, None]
+
+        def fwd(k):
+            recv[k], _, _ = ep_dispatch(handles[k], buffers[k], tokens_p[k], idx, w)
+
+        def bwd(k):
+            (0.5 * (recv[k].float() ** 2).sum()).backward()
+            recv[k] = None  # release so the next iteration's buffer can be reused safely
+
+        # 1F1B schedule: F0 F1 B0 F2 B1 B2.
+        fwd(0)
+        fwd(1)
+        bwd(0)
+        fwd(2)
+        bwd(1)
+        bwd(2)
         torch.cuda.synchronize()
-        torch.testing.assert_close(
-            t0.grad.float(), tokens0.float() * float(TOP_K), atol=5e-2, rtol=5e-2
-        )
-        torch.testing.assert_close(
-            t1.grad.float(), tokens1.float() * float(TOP_K), atol=5e-2, rtol=5e-2
-        )
+        for k in range(3):
+            torch.testing.assert_close(
+                tokens_p[k].grad.float(),
+                tokens[k].float() * float(TOP_K),
+                atol=5e-2,
+                rtol=5e-2,
+                msg=f"microbatch {k} gradient mismatch — handle isolation broken?",
+            )
 
     def test_record_stream(self):
         """EpBuffer.record_stream(s) records on both owned tensors."""

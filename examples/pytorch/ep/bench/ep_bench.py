@@ -234,20 +234,25 @@ def main():
     push, pop = _nvtx_funcs()
 
     # ── Stage closures ────────────────────────────────────────────────────
-    #
-    # Persistent inputs for the fwd+bwd stages so the same memory is reused
-    # across iters (required by make_graphed_callables and matches the eager
-    # path).
-    tokens_p = tokens.detach().clone().requires_grad_(True)
-    eo_p = recv_tokens.detach().clone().requires_grad_(True)
+    # Persistent fwd+bwd inputs (make_graphed_callables needs stable storage).
+    # In zero-copy mode they must be symm-mem-backed — HBM clones would force a
+    # staging copy on every dispatch/combine call.
+    if args.zero_copy:
+        tokens_p = symm_mem_alloc((T, H), torch.bfloat16, ep_group, device=device)
+        tokens_p.copy_(tokens.detach())
+        tokens_p.requires_grad_(True)
+        eo_p = symm_mem_alloc((recv_pr, H), torch.bfloat16, ep_group, device=device)
+        eo_p.copy_(recv_tokens.detach())
+        eo_p.requires_grad_(True)
+    else:
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        eo_p = recv_tokens.detach().clone().requires_grad_(True)
 
     # Stand-in callables; the cuda-graph branch below swaps in graphed versions.
-    fwd_bwd_dispatch_fn = lambda x: ep_dispatch(  # noqa: E731
-        handle, buffer, x, topk_idx, topk_w, zero_copy=args.zero_copy
-    )[0]
-    fwd_bwd_combine_fn = lambda eo: ep_combine(  # noqa: E731
-        handle, buffer, eo, recv_w, zero_copy=args.zero_copy
-    )
+    fwd_bwd_dispatch_fn = lambda x: ep_dispatch(handle, buffer, x, topk_idx, topk_w)[  # noqa: E731
+        0
+    ]
+    fwd_bwd_combine_fn = lambda eo: ep_combine(handle, buffer, eo, recv_w)  # noqa: E731
 
     def _dispatch_raw():
         _ep_dispatch_raw(handle, topk_idx, tokens, topk_w, recv_tokens, recv_w)
@@ -257,7 +262,7 @@ def main():
         _ep_combine_raw(handle, expert_out, out_buf)
 
     def _ep_dispatch_fwd():
-        ep_dispatch(handle, buffer, tokens.detach(), topk_idx, topk_w, zero_copy=args.zero_copy)
+        ep_dispatch(handle, buffer, tokens.detach(), topk_idx, topk_w)
 
     def _ep_dispatch_fwd_bwd():
         tokens_p.grad = None
@@ -265,7 +270,7 @@ def main():
         (0.5 * (r * r).sum(dtype=torch.float32)).backward()
 
     def _ep_combine_fwd():
-        ep_combine(handle, buffer, recv_tokens, recv_w, zero_copy=args.zero_copy)
+        ep_combine(handle, buffer, recv_tokens, recv_w)
 
     def _ep_combine_fwd_bwd():
         eo_p.grad = None
@@ -299,11 +304,11 @@ def main():
         # Graph fwd+bwd of the autograd-wrapped ops via make_graphed_callables.
         class _DispatchMod(torch.nn.Module):
             def forward(self, x):
-                return ep_dispatch(handle, buffer, x, topk_idx, topk_w, zero_copy=args.zero_copy)[0]
+                return ep_dispatch(handle, buffer, x, topk_idx, topk_w)[0]
 
         class _CombineMod(torch.nn.Module):
             def forward(self, eo):
-                return ep_combine(handle, buffer, eo, recv_w, zero_copy=args.zero_copy)
+                return ep_combine(handle, buffer, eo, recv_w)
 
         disp_mod = _DispatchMod().cuda()
         comb_mod = _CombineMod().cuda()
