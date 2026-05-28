@@ -241,6 +241,39 @@ class TestEP(unittest.TestCase):
         self.assertGreater(arr.max(), 0.0)
         np.testing.assert_allclose(arr.max(), eo_const / float(TOP_K), atol=5e-2, rtol=5e-2)
 
+    def test_combine_no_weight_matches_pre_multiplied(self):
+        """recv_topk_weights=None ⇒ caller folds weight into expert_out; result
+        and grad must match the in-kernel weighted path. Runs the two paths
+        serially fwd+bwd to avoid two live fwds on the same handle."""
+        handle = self._make_handle()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        eo_init = torch.full(
+            (self.cfg.recv_capacity_per_rank, HIDDEN_DIM),
+            0.5,
+            dtype=torch.bfloat16,
+            device=self.cfg.device,
+        )
+
+        buf_ref = self._make_ep_buffer(handle)
+        _, recv_w_ref, _ = ep_dispatch(handle, buf_ref, tokens, topk_idx, w)
+        eo_ref = eo_init.clone().requires_grad_(True)
+        out_ref = ep_combine(handle, buf_ref, eo_ref, recv_w_ref)
+        (0.5 * (out_ref.float() ** 2).sum()).backward()
+        torch.cuda.synchronize()
+        out_ref_v = out_ref.detach().clone()
+        grad_ref = eo_ref.grad.detach().clone()
+
+        buf_none = self._make_ep_buffer(handle)
+        _, recv_w_none, _ = ep_dispatch(handle, buf_none, tokens, topk_idx, w)
+        eo_none = eo_init.clone().requires_grad_(True)
+        eo_weighted = eo_none * recv_w_none.detach().unsqueeze(-1).to(eo_none.dtype)
+        out_none = ep_combine(handle, buf_none, eo_weighted, None)
+        (0.5 * (out_none.float() ** 2).sum()).backward()
+        torch.cuda.synchronize()
+
+        torch.testing.assert_close(out_none.float(), out_ref_v.float(), atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(eo_none.grad.float(), grad_ref.float(), atol=5e-2, rtol=5e-2)
+
     # ── coverage: top_k=1 + alignment ────────────────────────────────────
 
     def test_dispatch_combine_top_k_1_all_to_expert_0(self):

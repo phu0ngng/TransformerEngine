@@ -252,7 +252,7 @@ def main():
     fwd_bwd_dispatch_fn = lambda x: ep_dispatch(handle, buffer, x, topk_idx, topk_w)[  # noqa: E731
         0
     ]
-    fwd_bwd_combine_fn = lambda eo: ep_combine(handle, buffer, eo, recv_w)  # noqa: E731
+    fwd_bwd_combine_fn = lambda eo: ep_combine(handle, buffer, eo, None)  # noqa: E731
 
     def _dispatch_raw():
         _ep_dispatch_raw(handle, topk_idx, tokens, topk_w, recv_tokens, recv_w)
@@ -270,7 +270,7 @@ def main():
         (0.5 * (r * r).sum(dtype=torch.float32)).backward()
 
     def _ep_combine_fwd():
-        ep_combine(handle, buffer, recv_tokens, recv_w)
+        ep_combine(handle, buffer, recv_tokens, None)
 
     def _ep_combine_fwd_bwd():
         eo_p.grad = None
@@ -308,7 +308,7 @@ def main():
 
         class _CombineMod(torch.nn.Module):
             def forward(self, eo):
-                return ep_combine(handle, buffer, eo, recv_w)
+                return ep_combine(handle, buffer, eo, None)
 
         disp_mod = _DispatchMod().cuda()
         comb_mod = _CombineMod().cuda()

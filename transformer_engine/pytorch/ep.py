@@ -590,15 +590,23 @@ class _EpCombine(torch.autograd.Function):
         num_local_tokens: int,
         hidden_dim: int,
         expert_out: torch.Tensor,
-        recv_topk_weights: torch.Tensor,
+        recv_topk_weights: Optional[torch.Tensor],
     ):
         device = expert_out.device
-        # Weight in payload dtype: single fused broadcast multiply into combine_in.
-        w = recv_topk_weights.unsqueeze(-1).to(expert_out.dtype)
-        torch.mul(expert_out, w, out=combine_in)
+        if recv_topk_weights is None:
+            # Caller applies the topk weighting outside; just stage expert_out.
+            combine_in.copy_(expert_out)
+        else:
+            # Weight in payload dtype: single fused broadcast multiply into combine_in.
+            w = recv_topk_weights.unsqueeze(-1).to(expert_out.dtype)
+            torch.mul(expert_out, w, out=combine_in)
         result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
         torch.ops.transformer_engine_ep.combine(handle_mem, handle_id, combine_in, result)
-        ctx.save_for_backward(expert_out, recv_topk_weights)
+        if recv_topk_weights is None:
+            ctx.save_for_backward()
+        else:
+            ctx.save_for_backward(expert_out, recv_topk_weights)
+        ctx.has_weights = recv_topk_weights is not None
         ctx.handle_mem = handle_mem
         ctx.handle_id = handle_id
         ctx.combine_in = combine_in  # reused as grad_combine_in in bwd
@@ -606,7 +614,7 @@ class _EpCombine(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, g_result):  # type: ignore[override]
-        expert_out, recv_topk_weights = ctx.saved_tensors
+        saved = ctx.saved_tensors
         # Reuse combine_in's storage as the grad_combine_in scratch — same
         # shape, fwd content no longer needed.
         grad_combine_in = ctx.combine_in
@@ -615,9 +623,14 @@ class _EpCombine(torch.autograd.Function):
         torch.ops.transformer_engine_ep.combine_bwd(
             ctx.handle_mem, ctx.handle_id, g_result, grad_combine_in
         )
-        grad_expert_out, grad_recv_topk_weights = _combine_bwd_post(
-            grad_combine_in, expert_out, recv_topk_weights
-        )
+        if ctx.has_weights:
+            expert_out, recv_topk_weights = saved
+            grad_expert_out, grad_recv_topk_weights = _combine_bwd_post(
+                grad_combine_in, expert_out, recv_topk_weights
+            )
+        else:
+            grad_expert_out = grad_combine_in
+            grad_recv_topk_weights = None
         return (
             None,  # handle_mem
             None,  # handle_id
@@ -681,11 +694,13 @@ def ep_combine(
     handle: EpHandle,
     buffer: EpBuffer,
     expert_out: torch.Tensor,
-    recv_topk_weights: torch.Tensor,
+    recv_topk_weights: Optional[torch.Tensor] = None,
     *,
     num_local_tokens: Optional[int] = None,
 ):
-    """Apply per-slot weighting then combine, with autograd.
+    """Apply per-slot weighting then combine, with autograd. Pass
+    ``recv_topk_weights=None`` if the weighting has already been folded into
+    ``expert_out`` upstream — the combine then skips the multiply.
 
     Result shape is ``(num_local_tokens, handle.hidden_dim)``; defaults to
     ``handle.max_tokens_per_rank`` rows.
