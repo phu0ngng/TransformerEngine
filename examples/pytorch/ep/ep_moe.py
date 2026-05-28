@@ -232,7 +232,17 @@ def main():
             np.testing.assert_allclose(all_grad, ref_grad, rtol=5e-2, atol=5e-2)
             print(f"[ep_moe] --check PASSED (ref_out.sum()={float(ref_out.sum()):.4f})")
 
-    # Release NCCL EP's borrowed comm before torch destroys it.
+    # Drop refs to symm-mem-backed tensors before the process group is
+    # destroyed, otherwise their windows outlive the NCCL comm and
+    # ncclCommWindowDeregister fails at interpreter shutdown. recv_t/
+    # recv_w_out alias buffer.recv_tokens/recv_topk_weights; tokens.grad
+    # aliases buffer.grad_tokens.
+    tokens.grad = None
+    recv_t = recv_w_out = expert_out = out = loss = None
+    buffer = handle = None
+    import gc
+
+    gc.collect()
     ep_finalize()
     dist.destroy_process_group()
 
