@@ -1,17 +1,17 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""PyTorch EP perf bench — raw + autograd dispatch / combine on a single EP group.
+"""PyTorch EP perf bench - raw + autograd dispatch / combine on a single EP group.
 
 One process per GPU; launched via run_ep_bench.sh (torchrun).
 
 Stages (each timed in its own loop):
-  * dispatch_raw       — ``_ep_dispatch_raw`` (no autograd, no prepare)
-  * ep_dispatch_fwd    — ``ep_dispatch`` (autograd wrapper, forward only)
-  * ep_dispatch_fwd_bwd — ``ep_dispatch`` + ``.backward()`` on ``0.5*||recv||²``
-  * combine_raw        — ``_ep_combine_raw`` (no autograd, no weighting)
-  * ep_combine_fwd     — ``ep_combine`` (autograd wrapper, forward only)
-  * ep_combine_fwd_bwd — ``ep_combine`` + ``.backward()``
+  * dispatch_raw       - ``_ep_dispatch_raw`` (no autograd, no prepare)
+  * ep_dispatch_fwd    - ``ep_dispatch`` (autograd wrapper, forward only)
+  * ep_dispatch_fwd_bwd - ``ep_dispatch`` + ``.backward()`` on ``0.5*||recv||^2``
+  * combine_raw        - ``_ep_combine_raw`` (no autograd, no weighting)
+  * ep_combine_fwd     - ``ep_combine`` (autograd wrapper, forward only)
+  * ep_combine_fwd_bwd - ``ep_combine`` + ``.backward()``
 
 ``ep_prepare`` runs once outside the timed loops. Wall-clock per iter measured
 with ``perf_counter_ns`` and NVTX ranges (if available) frame each stage so
@@ -118,7 +118,7 @@ def _make_inputs(rank, world_size, T, H, K, E, device):
 
 
 def _time_stage_us(name, fn, iters, nvtx_suffix, push, pop):
-    """Time ``fn`` for ``iters`` iterations after one untimed warmup; returns mean µs."""
+    """Time ``fn`` for ``iters`` iterations after one untimed warmup; returns mean us."""
     # Run iters+1 times; drop the first (autotune outlier) and frame NVTX from iter 1.
     total_ns = 0
     counted = 0
@@ -215,7 +215,7 @@ def main():
         recv_tokens = torch.empty(recv_pr, H, dtype=torch.bfloat16, device=device)
         recv_w = torch.empty(recv_pr, dtype=torch.float32, device=device)
 
-    # ── Prepare once outside the timed loops ──────────────────────────────
+    # -- Prepare once outside the timed loops ------------------------------
     ep_prepare(handle, topk_idx)
     torch.cuda.synchronize()
 
@@ -233,9 +233,9 @@ def main():
     nvtx_suffix = f"[{args.mode_label}]" if args.mode_label else ""
     push, pop = _nvtx_funcs()
 
-    # ── Stage closures ────────────────────────────────────────────────────
+    # -- Stage closures ----------------------------------------------------
     # Persistent fwd+bwd inputs (make_graphed_callables needs stable storage).
-    # In zero-copy mode they must be symm-mem-backed — HBM clones would force a
+    # In zero-copy mode they must be symm-mem-backed - HBM clones would force a
     # staging copy on every dispatch/combine call.
     if args.zero_copy:
         tokens_p = symm_mem_alloc((T, H), torch.bfloat16, ep_group, device=device)
@@ -252,7 +252,7 @@ def main():
     fwd_bwd_dispatch_fn = lambda x: ep_dispatch(handle, buffer, x, topk_idx, topk_w)[  # noqa: E731
         0
     ]
-    fwd_bwd_combine_fn = lambda eo: ep_combine(handle, buffer, eo, None)  # noqa: E731
+    fwd_bwd_combine_fn = lambda eo: ep_combine(handle, buffer, eo)  # noqa: E731
 
     def _dispatch_raw():
         _ep_dispatch_raw(handle, topk_idx, tokens, topk_w, recv_tokens, recv_w)
@@ -270,7 +270,7 @@ def main():
         (0.5 * (r * r).sum(dtype=torch.float32)).backward()
 
     def _ep_combine_fwd():
-        ep_combine(handle, buffer, recv_tokens, None)
+        ep_combine(handle, buffer, recv_tokens)
 
     def _ep_combine_fwd_bwd():
         eo_p.grad = None
@@ -288,13 +288,13 @@ def main():
     # Third tuple element: True = direct torch.cuda.graph capture; False = use
     # make_graphed_callables (autograd-aware) instead.
 
-    # ── Warmup ───────────────────────────────────────────────────────────
+    # -- Warmup -----------------------------------------------------------
     for _ in range(args.warmup):
         for _name, fn, _capt in stages:
             fn()
     torch.cuda.synchronize()
 
-    # ── Optional CUDA-graph capture ──────────────────────────────────────
+    # -- Optional CUDA-graph capture --------------------------------------
     # Capture each capturable stage on a side stream and time .replay()
     # instead of the eager call. Outputs allocated inside the
     # autograd.Function's forward go through the per-capture private pool
@@ -308,7 +308,7 @@ def main():
 
         class _CombineMod(torch.nn.Module):
             def forward(self, eo):
-                return ep_combine(handle, buffer, eo, None)
+                return ep_combine(handle, buffer, eo)
 
         disp_mod = _DispatchMod().cuda()
         comb_mod = _CombineMod().cuda()
@@ -335,7 +335,7 @@ def main():
         torch.cuda.current_stream().wait_stream(side)
         torch.cuda.synchronize()
 
-    # ── Optional Kineto profiling ────────────────────────────────────────
+    # -- Optional Kineto profiling ----------------------------------------
     kineto_ctx = nullcontext()
     if args.kineto and rank == 0:
         os.makedirs(args.kineto, exist_ok=True)
@@ -348,7 +348,7 @@ def main():
             with_stack=False,
         )
 
-    # ── Timed loops ──────────────────────────────────────────────────────
+    # -- Timed loops ------------------------------------------------------
     results = {}
     with kineto_ctx as prof:
         for name, fn, _ in stages:

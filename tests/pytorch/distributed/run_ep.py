@@ -47,7 +47,7 @@ def _build_ep_group():
 
 
 def _make_identity_inputs(rank, ep_size, nonuniform=False, device="cuda"):
-    """Per-rank identity routing + uniform weights so combine ≈ tokens."""
+    """Per-rank identity routing + uniform weights so combine ~= tokens."""
     T = TOKENS_PER_RANK
     E = ep_size * NUM_LOCAL_EXPERTS
     topk_idx = np.empty((T, TOP_K), dtype=np.int64)
@@ -95,7 +95,7 @@ def _make_cfg() -> _Cfg:
     return cfg
 
 
-# ── Test class ───────────────────────────────────────────────────────────────
+# -- Test class ---------------------------------------------------------------
 
 
 class TestEP(unittest.TestCase):
@@ -149,7 +149,7 @@ class TestEP(unittest.TestCase):
         mask = (recv_w != 0).to(torch.float32).unsqueeze(-1)
         return (recv_tokens.float() * recv_w.unsqueeze(-1).float() * mask).to(recv_tokens.dtype)
 
-    # ── prepare ──────────────────────────────────────────────────────────
+    # -- prepare ----------------------------------------------------------
 
     def test_primitive_prepare(self):
         handle = self._make_handle()
@@ -163,7 +163,7 @@ class TestEP(unittest.TestCase):
         dist.all_reduce(total, op=dist.ReduceOp.SUM, group=self.ep_group)
         self.assertEqual(int(total.item()), self.cfg.world_size * TOKENS_PER_RANK * TOP_K)
 
-    # ── identity round-trip via primitives ───────────────────────────────
+    # -- identity round-trip via primitives -------------------------------
 
     def _run_identity_round_trip(self, nonuniform):
         handle = self._make_handle()
@@ -185,7 +185,7 @@ class TestEP(unittest.TestCase):
         self._run_identity_round_trip(nonuniform=True)
 
     def test_3d_input_round_trip(self):
-        """3D (B, S, H) inputs round-trip identically to 2D — leading dims are flattened to T."""
+        """3D (B, S, H) inputs round-trip identically to 2D - leading dims are flattened to T."""
         handle = self._make_handle()
         topk_idx, tokens_2d, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         B, S = 2, TOKENS_PER_RANK // 2
@@ -202,10 +202,10 @@ class TestEP(unittest.TestCase):
         self.assertEqual(result.shape, (B, S, HIDDEN_DIM))
         torch.testing.assert_close(result.float(), tokens_3d.float(), atol=5e-2, rtol=5e-2)
 
-    # ── autograd ─────────────────────────────────────────────────────────
+    # -- autograd ---------------------------------------------------------
 
     def test_dispatch_fwd_bwd(self):
-        """0.5*||recv_tokens||² ⇒ grad_tokens ≈ TOP_K * tokens."""
+        """0.5*||recv_tokens||^2 => grad_tokens ~= TOP_K * tokens."""
         handle = self._make_handle()
         buffer = self._make_ep_buffer(handle)
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
@@ -219,7 +219,7 @@ class TestEP(unittest.TestCase):
         )
 
     def test_combine_fwd_bwd(self):
-        """const eo=c, uniform w ⇒ max|grad_eo| ≈ c / TOP_K."""
+        """const eo=c, uniform w => max|grad_eo| ~= c / TOP_K."""
         handle = self._make_handle()
         buffer = self._make_ep_buffer(handle)
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
@@ -232,7 +232,7 @@ class TestEP(unittest.TestCase):
             device=self.cfg.device,
             requires_grad=True,
         )
-        out = ep_combine(handle, buffer, eo, recv_w_out)
+        out = ep_combine(handle, buffer, self._weighted(eo, recv_w_out))
         loss = 0.5 * (out.float() ** 2).sum()
         loss.backward()
         torch.cuda.synchronize()
@@ -241,40 +241,7 @@ class TestEP(unittest.TestCase):
         self.assertGreater(arr.max(), 0.0)
         np.testing.assert_allclose(arr.max(), eo_const / float(TOP_K), atol=5e-2, rtol=5e-2)
 
-    def test_combine_no_weight_matches_pre_multiplied(self):
-        """recv_topk_weights=None ⇒ caller folds weight into expert_out; result
-        and grad must match the in-kernel weighted path. Runs the two paths
-        serially fwd+bwd to avoid two live fwds on the same handle."""
-        handle = self._make_handle()
-        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        eo_init = torch.full(
-            (self.cfg.recv_capacity_per_rank, HIDDEN_DIM),
-            0.5,
-            dtype=torch.bfloat16,
-            device=self.cfg.device,
-        )
-
-        buf_ref = self._make_ep_buffer(handle)
-        _, recv_w_ref, _ = ep_dispatch(handle, buf_ref, tokens, topk_idx, w)
-        eo_ref = eo_init.clone().requires_grad_(True)
-        out_ref = ep_combine(handle, buf_ref, eo_ref, recv_w_ref)
-        (0.5 * (out_ref.float() ** 2).sum()).backward()
-        torch.cuda.synchronize()
-        out_ref_v = out_ref.detach().clone()
-        grad_ref = eo_ref.grad.detach().clone()
-
-        buf_none = self._make_ep_buffer(handle)
-        _, recv_w_none, _ = ep_dispatch(handle, buf_none, tokens, topk_idx, w)
-        eo_none = eo_init.clone().requires_grad_(True)
-        eo_weighted = eo_none * recv_w_none.detach().unsqueeze(-1).to(eo_none.dtype)
-        out_none = ep_combine(handle, buf_none, eo_weighted, None)
-        (0.5 * (out_none.float() ** 2).sum()).backward()
-        torch.cuda.synchronize()
-
-        torch.testing.assert_close(out_none.float(), out_ref_v.float(), atol=5e-2, rtol=5e-2)
-        torch.testing.assert_close(eo_none.grad.float(), grad_ref.float(), atol=5e-2, rtol=5e-2)
-
-    # ── coverage: top_k=1 + alignment ────────────────────────────────────
+    # -- coverage: top_k=1 + alignment ------------------------------------
 
     def test_dispatch_combine_top_k_1_all_to_expert_0(self):
         handle = self._make_handle(top_k=1)
@@ -312,11 +279,11 @@ class TestEP(unittest.TestCase):
         torch.cuda.synchronize()
         torch.testing.assert_close(result.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
-    # ── Integration: CUDA graph, autocast, torch.compile ─────────────────
+    # -- Integration: CUDA graph, autocast, torch.compile -----------------
 
     def _moe_step(self, handle, buffer, topk_idx, tokens, w):
         recv_t, recv_w_out, _tc = ep_dispatch(handle, buffer, tokens, topk_idx, w)
-        return ep_combine(handle, buffer, recv_t, recv_w_out)
+        return ep_combine(handle, buffer, self._weighted(recv_t, recv_w_out))
 
     def test_cuda_graph_capture(self):
         """Capture dispatch+combine via the raw ops; replay must be bit-stable."""
@@ -428,7 +395,7 @@ class TestEP(unittest.TestCase):
 
         class _CombineMod(torch.nn.Module):
             def forward(self, eo):
-                return ep_combine(handle, buffer, eo, recv_w_persistent)
+                return ep_combine(handle, buffer, TestEP._weighted(eo, recv_w_persistent))
 
         disp_mod = _DispatchMod().cuda()
         comb_mod = _CombineMod().cuda()
@@ -447,7 +414,7 @@ class TestEP(unittest.TestCase):
     def test_cuda_graph_bench_capture_sequence(self):
         """Reproduce the exact ep_bench --cuda-graph capture sequence.
 
-        Bench flow: make_graphed_callables((disp, comb), ...) → then direct
+        Bench flow: make_graphed_callables((disp, comb), ...) -> then direct
         torch.cuda.graph captures of dispatch_raw, ep_dispatch_fwd,
         combine_raw, ep_combine_fwd on a side stream, all on the same handle.
         Hypothesis: running multiple graph captures back-to-back without a
@@ -475,7 +442,7 @@ class TestEP(unittest.TestCase):
 
         class _CombineMod(torch.nn.Module):
             def forward(self, eo):
-                return ep_combine(handle, buffer, eo, recv_w)
+                return ep_combine(handle, buffer, TestEP._weighted(eo, recv_w))
 
         disp_mod = _DispatchMod().cuda()
         comb_mod = _CombineMod().cuda()
@@ -501,7 +468,7 @@ class TestEP(unittest.TestCase):
                     "combine_raw",
                     lambda: _ep_combine_raw(handle, expert_out, torch.empty_like(tokens)),
                 ),
-                ("ep_combine_fwd", lambda: ep_combine(handle, buffer, recv_tokens, recv_w)),
+                ("ep_combine_fwd", lambda: ep_combine(handle, buffer, self._weighted(recv_tokens, recv_w))),
             ]:
                 fn()  # prime allocator
                 torch.cuda.synchronize()
@@ -577,7 +544,7 @@ class TestEP(unittest.TestCase):
         torch.cuda.synchronize()
         torch.testing.assert_close(out.float(), ref_clone.float(), atol=5e-2, rtol=5e-2)
 
-    # ── Zero-copy via NCCL symmetric memory ──────────────────────────────
+    # -- Zero-copy via NCCL symmetric memory ------------------------------
 
     def _try_symm_alloc(self, shape, dtype):
         """Allocate a symm-mem tensor or skip if the backend is unavailable."""
@@ -736,7 +703,7 @@ class TestEP(unittest.TestCase):
         self.assertEqual(tokens_p.grad.dtype, torch.bfloat16)
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
-    # ── Snapshot / scope / multi-iter ────────────────────────────────────
+    # -- Snapshot / scope / multi-iter ------------------------------------
 
     def test_topk_int32_raises_clear_error(self):
         """int32 topk_idx must error with a message pointing to .long()."""
@@ -782,7 +749,7 @@ class TestEP(unittest.TestCase):
 
         def step(tokens, topk_idx, w):
             recv_t, recv_w_out, _ = ep_dispatch(handle, buffer, tokens, topk_idx, w)
-            return ep_combine(handle, buffer, recv_t, recv_w_out)
+            return ep_combine(handle, buffer, self._weighted(recv_t, recv_w_out))
 
         with torch.no_grad():
             ref = step(tokens, topk_idx, w).detach().clone()
@@ -796,7 +763,7 @@ class TestEP(unittest.TestCase):
 
     def test_pp_1f1b_two_handles(self):
         """PP-1F1B interleave (F0 F1 B0 F2 B1 B2) over 3 per-microbatch handles
-        + buffers; each bwd must hit grad ≈ TOP_K * tokens for its own scale."""
+        + buffers; each bwd must hit grad ~= TOP_K * tokens for its own scale."""
         T, H = TOKENS_PER_RANK, HIDDEN_DIM
         idx, _toks, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         # Distinct token magnitudes per microbatch so grad reuse would be visible.
@@ -835,7 +802,7 @@ class TestEP(unittest.TestCase):
                 tokens[k].float() * float(TOP_K),
                 atol=5e-2,
                 rtol=5e-2,
-                msg=f"microbatch {k} gradient mismatch — handle isolation broken?",
+                msg=f"microbatch {k} gradient mismatch - handle isolation broken?",
             )
 
     def test_record_stream(self):
@@ -866,7 +833,7 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
 
-# ── Entry point ──────────────────────────────────────────────────────────────
+# -- Entry point --------------------------------------------------------------
 
 
 def _init_distributed():

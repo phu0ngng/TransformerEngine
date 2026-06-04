@@ -1,7 +1,7 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
-"""End-to-end MoE example: dispatch → batched expert linear → combine, fwd + bwd.
+"""End-to-end MoE example: dispatch -> batched expert linear -> combine, fwd + bwd.
 
 One process per GPU; launched via run_test_ep.sh (torchrun).
 """
@@ -129,7 +129,7 @@ def main():
     tokens_np = (rng.standard_normal((T, args.hidden), dtype=np.float32) * 0.5).astype(np.float32)
     topk_idx_np = _make_routing(rank, T, args.top_k, num_experts, num_local_experts)
     w_np = np.full((T, args.top_k), 1.0 / args.top_k, dtype=np.float32)
-    # Same seed across ranks → identical kernel array everywhere.
+    # Same seed across ranks -> identical kernel array everywhere.
     kr = np.random.default_rng(seed=42)
     kernels_np = (
         kr.standard_normal((num_experts, args.hidden, args.hidden_out), dtype=np.float32)
@@ -156,7 +156,9 @@ def main():
 
     recv_t, recv_w_out, _tc = ep_dispatch(handle, buffer, tokens, topk_idx, topk_w)
     expert_out = _batched_expert_linear(recv_t, kernels_local, num_local_experts)
-    out = ep_combine(handle, buffer, expert_out, recv_w_out)
+    # Fold topk weights into expert_out before combine (ep_combine no longer weights).
+    expert_out = expert_out * recv_w_out.unsqueeze(-1).to(expert_out.dtype)
+    out = ep_combine(handle, buffer, expert_out)
 
     loss = 0.5 * (out.float() ** 2).sum()
     loss.backward()
@@ -178,14 +180,16 @@ def main():
             for _ in range(args.benchmark_warmup):
                 rt, rw, _tc = ep_dispatch(handle, buffer_obj, tokens_buf, topk_idx, topk_w)
                 eo = _batched_expert_linear(rt, kernels_local, num_local_experts)
-                ep_combine(handle, buffer_obj, eo, rw)
+                eo = eo * rw.unsqueeze(-1).to(eo.dtype)
+                ep_combine(handle, buffer_obj, eo)
             torch.cuda.synchronize()
             dist.barrier()
             t0 = time.perf_counter()
             for _ in range(args.benchmark_iters):
                 rt, rw, _tc = ep_dispatch(handle, buffer_obj, tokens_buf, topk_idx, topk_w)
                 eo = _batched_expert_linear(rt, kernels_local, num_local_experts)
-                ep_combine(handle, buffer_obj, eo, rw)
+                eo = eo * rw.unsqueeze(-1).to(eo.dtype)
+                ep_combine(handle, buffer_obj, eo)
             torch.cuda.synchronize()
             dt_ms = (time.perf_counter() - t0) * 1000.0 / args.benchmark_iters
             if rank == 0:

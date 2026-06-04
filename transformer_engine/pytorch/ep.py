@@ -26,7 +26,7 @@ __all__ = [
 ]
 
 
-# ── Symmetric-memory buffer allocator ────────────────────────────────────────
+# -- Symmetric-memory buffer allocator ----------------------------------------
 
 
 def symm_mem_alloc(
@@ -55,7 +55,7 @@ def symm_mem_alloc(
     return t
 
 
-# ── Bootstrap ────────────────────────────────────────────────────────────────
+# -- Bootstrap ----------------------------------------------------------------
 
 
 _BOOTSTRAPPED = False
@@ -124,7 +124,7 @@ def ep_finalize() -> None:
     _atexit_finalize()
 
 
-# ── Handle ───────────────────────────────────────────────────────────────────
+# -- Handle -------------------------------------------------------------------
 
 
 class EpHandle:
@@ -173,7 +173,7 @@ class EpHandle:
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
 
 
-# ── Buffer ───────────────────────────────────────────────────────────────────
+# -- Buffer -------------------------------------------------------------------
 
 
 class EpBuffer:
@@ -231,7 +231,7 @@ class EpBuffer:
                 handle.recv_capacity_per_rank, dtype=torch.float32, device=device
             )
             self.grad_tokens = torch.empty(send_shape, dtype=handle.payload_dtype, device=device)
-        # Per-rank scratch — never cross-rank, plain HBM regardless of mode.
+        # Per-rank scratch - never cross-rank, plain HBM regardless of mode.
         self.token_counts = torch.empty(handle.num_local_experts, dtype=torch.int32, device=device)
         self.grad_topk_weights = torch.empty(
             (handle.max_tokens_per_rank, handle.top_k), dtype=torch.float32, device=device
@@ -312,7 +312,7 @@ class EpBuffer:
             t.record_stream(stream)
 
 
-# ── torch.library custom ops (so they don't graph-break under torch.compile) ─
+# -- torch.library custom ops (so they don't graph-break under torch.compile) -
 
 _LIB = "transformer_engine_ep"
 
@@ -428,7 +428,7 @@ def _(*args, **kw):
     return None
 
 
-# ── Non-autograd primitives ──────────────────────────────────────────────────
+# -- Non-autograd primitives --------------------------------------------------
 
 
 def ep_prepare(handle: EpHandle, topk_idx: torch.Tensor) -> torch.Tensor:
@@ -450,7 +450,7 @@ def _ep_dispatch_raw(
     recv_tokens: torch.Tensor,
     recv_topk_weights: torch.Tensor,
 ) -> None:
-    """Raw dispatch — no autograd, no prepare. Caller must run ``ep_prepare`` first."""
+    """Raw dispatch - no autograd, no prepare. Caller must run ``ep_prepare`` first."""
     tex.ep_dispatch(
         handle.handle_mem,
         handle.handle_id,
@@ -463,11 +463,11 @@ def _ep_dispatch_raw(
 
 
 def _ep_combine_raw(handle: EpHandle, expert_out: torch.Tensor, result: torch.Tensor) -> None:
-    """Raw combine — no autograd, no weighting. Caller pre-weights ``expert_out``."""
+    """Raw combine - no autograd, no weighting. Caller pre-weights ``expert_out``."""
     tex.ep_combine(handle.handle_mem, handle.handle_id, expert_out, result)
 
 
-# ── autograd.Function wrappers ───────────────────────────────────────────────
+# -- autograd.Function wrappers -----------------------------------------------
 
 
 class _EpDispatch(torch.autograd.Function):
@@ -562,23 +562,12 @@ class _EpDispatch(torch.autograd.Function):
         )
 
 
-@torch.compile(dynamic=True, fullgraph=True)
-def _combine_bwd_post(grad_combine_in, expert_out, recv_topk_weights):
-    """Fused post-NCCL-combine_bwd; ``dynamic=True`` so multiple MoE layers
-    don't each pay a per-shape inductor compile."""
-    w = recv_topk_weights.unsqueeze(-1).to(expert_out.dtype)
-    grad_expert_out = grad_combine_in * w
-    grad_recv_topk_weights = (
-        (grad_combine_in * expert_out).sum(-1, dtype=torch.float32).to(recv_topk_weights.dtype)
-    )
-    return grad_expert_out, grad_recv_topk_weights
-
-
 class _EpCombine(torch.autograd.Function):
-    """Autograd-aware weight + combine. ``combine_in`` is reused as the
+    """Autograd-aware combine. ``combine_in`` is reused as the
     ``grad_combine_in`` scratch in bwd; fwd/bwd share ``handle_mem`` so don't
     re-run ``ep_prepare`` between them. Sharing ``EpBuffer`` across an
     outstanding bwd raises via version-check rather than silently corrupting.
+    Callers pre-multiply the topk weights into ``expert_out`` (see ep_combine).
     """
 
     @staticmethod
@@ -590,32 +579,20 @@ class _EpCombine(torch.autograd.Function):
         num_local_tokens: int,
         hidden_dim: int,
         expert_out: torch.Tensor,
-        recv_topk_weights: Optional[torch.Tensor],
     ):
         device = expert_out.device
-        if recv_topk_weights is None:
-            # Caller applies the topk weighting outside; just stage expert_out.
-            combine_in.copy_(expert_out)
-        else:
-            # Weight in payload dtype: single fused broadcast multiply into combine_in.
-            w = recv_topk_weights.unsqueeze(-1).to(expert_out.dtype)
-            torch.mul(expert_out, w, out=combine_in)
         result = torch.empty(num_local_tokens, hidden_dim, dtype=expert_out.dtype, device=device)
-        torch.ops.transformer_engine_ep.combine(handle_mem, handle_id, combine_in, result)
-        if recv_topk_weights is None:
-            ctx.save_for_backward()
-        else:
-            ctx.save_for_backward(expert_out, recv_topk_weights)
-        ctx.has_weights = recv_topk_weights is not None
+        # No staging copy: the combine collective reads expert_out directly.
+        # Callers fold the topk weights into expert_out beforehand.
+        torch.ops.transformer_engine_ep.combine(handle_mem, handle_id, expert_out, result)
         ctx.handle_mem = handle_mem
         ctx.handle_id = handle_id
-        ctx.combine_in = combine_in  # reused as grad_combine_in in bwd
+        ctx.combine_in = combine_in  # grad_combine_in scratch in bwd
         return result
 
     @staticmethod
     def backward(ctx, g_result):  # type: ignore[override]
-        saved = ctx.saved_tensors
-        # Reuse combine_in's storage as the grad_combine_in scratch — same
+        # Reuse combine_in's storage as the grad_combine_in scratch - same
         # shape, fwd content no longer needed.
         grad_combine_in = ctx.combine_in
         if not g_result.is_contiguous():
@@ -623,26 +600,17 @@ class _EpCombine(torch.autograd.Function):
         torch.ops.transformer_engine_ep.combine_bwd(
             ctx.handle_mem, ctx.handle_id, g_result, grad_combine_in
         )
-        if ctx.has_weights:
-            expert_out, recv_topk_weights = saved
-            grad_expert_out, grad_recv_topk_weights = _combine_bwd_post(
-                grad_combine_in, expert_out, recv_topk_weights
-            )
-        else:
-            grad_expert_out = grad_combine_in
-            grad_recv_topk_weights = None
         return (
             None,  # handle_mem
             None,  # handle_id
             None,  # combine_in
             None,  # num_local_tokens
             None,  # hidden_dim
-            grad_expert_out,
-            grad_recv_topk_weights,
+            grad_combine_in,  # grad wrt expert_out
         )
 
 
-# ── Public high-level wrappers ───────────────────────────────────────────────
+# -- Public high-level wrappers -----------------------------------------------
 
 
 # FP8 dispatch is not yet supported by the common backend.
@@ -669,7 +637,7 @@ def ep_dispatch(
 ):
     """Run prepare + dispatch with autograd. ``topk_idx`` must be int64.
 
-    Returns ``(recv_tokens, recv_topk_weights, token_counts)`` — views into
+    Returns ``(recv_tokens, recv_topk_weights, token_counts)`` - views into
     ``buffer``'s persistent slots; consume them before the next ``ep_dispatch``
     on the same buffer or they get overwritten. ``token_counts`` is
     non-differentiable.
@@ -694,15 +662,15 @@ def ep_combine(
     handle: EpHandle,
     buffer: EpBuffer,
     expert_out: torch.Tensor,
-    recv_topk_weights: Optional[torch.Tensor] = None,
     *,
     num_local_tokens: Optional[int] = None,
 ):
-    """Apply per-slot weighting then combine, with autograd. Pass
-    ``recv_topk_weights=None`` if the weighting has already been folded into
-    ``expert_out`` upstream — the combine then skips the multiply.
+    """Run combine with autograd. Callers must fold the topk weights into
+    ``expert_out`` first (``expert_out = expert_out * topk_weight``); combine
+    applies no weighting and stages no copy, passing ``expert_out`` straight to
+    the collective.
 
-    Result shape is ``(num_local_tokens, handle.hidden_dim)``; defaults to
+    Result shape is ``(num_local_tokens, handle.hidden_dim)``, defaulting to
     ``handle.max_tokens_per_rank`` rows.
     """
     _reject_fp8(expert_out, buffer.combine_in)
@@ -715,5 +683,4 @@ def ep_combine(
         num_local_tokens,
         handle.hidden_dim,
         expert_out,
-        recv_topk_weights,
     )
