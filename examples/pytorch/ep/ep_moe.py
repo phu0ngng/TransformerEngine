@@ -152,7 +152,7 @@ def main():
         hidden_dim=args.hidden,
         num_local_experts=num_local_experts,
     )
-    buffer = EpBuffer(handle, ep_group)
+    buffer = EpBuffer(handle)
 
     recv_t, recv_w_out, _tc = ep_dispatch(handle, buffer, tokens, topk_idx, topk_w)
     expert_out = _batched_expert_linear(recv_t, kernels_local, num_local_experts)
@@ -199,7 +199,11 @@ def main():
                 )
             return dt_ms
 
-        buffer_hbm = EpBuffer(handle, ep_group=None, use_symm_mem=False)
+        # HBM variant: pass plain tensors so EpBuffer skips the symm-mem auto-alloc.
+        # cpp takes the staged fallback (set NVTE_EP_SILENCE_NONSYMM_WARN=1 to mute warn).
+        recv_hbm = torch.empty((recv_pr, args.hidden), dtype=torch.bfloat16, device=device)
+        recv_grad_hbm = torch.empty((recv_pr, args.hidden), dtype=torch.bfloat16, device=device)
+        buffer_hbm = EpBuffer(handle, recv_tokens=recv_hbm, recv_tokens_grad=recv_grad_hbm)
         hbm_ms = _time("regular HBM", tokens.detach(), buffer_hbm)
 
         # Place the dispatch input in symm-mem too for the fast-path comparison.
@@ -239,8 +243,7 @@ def main():
     # Drop refs to symm-mem-backed tensors before the process group is
     # destroyed, otherwise their windows outlive the NCCL comm and
     # ncclCommWindowDeregister fails at interpreter shutdown. recv_t/
-    # recv_w_out alias buffer.recv_tokens/recv_topk_weights; tokens.grad
-    # aliases buffer.grad_tokens.
+    # recv_w_out alias buffer.recv_tokens / buffer.recv_topk_weights.
     tokens.grad = None
     recv_t = recv_w_out = expert_out = out = loss = None
     buffer = handle = None

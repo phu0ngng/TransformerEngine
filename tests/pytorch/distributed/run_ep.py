@@ -136,12 +136,9 @@ class TestEP(unittest.TestCase):
             torch.empty(NUM_LOCAL_EXPERTS, dtype=torch.int32, device=self.cfg.device),
         )
 
-    def _make_ep_buffer(self, handle, use_symm_mem=False):
-        return EpBuffer(
-            handle,
-            ep_group=self.ep_group if use_symm_mem else None,
-            use_symm_mem=use_symm_mem,
-        )
+    def _make_ep_buffer(self, handle):
+        """Default auto-alloc EpBuffer; symm-mem/HBM follows bootstrap zero_copy."""
+        return EpBuffer(handle)
 
     @staticmethod
     def _weighted(recv_tokens, recv_w):
@@ -634,13 +631,13 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(result.float(), ref.float(), atol=0, rtol=0)
 
     def test_zero_copy_autograd_combine(self):
-        """ep_combine autograd path must keep EpBuffer's symm-mem annotation on combine_in."""
+        """EpBuffer auto-allocs recv_tokens / recv_tokens_grad as symm-mem under zero_copy."""
         handle = self._make_handle()
-        buffer = self._make_ep_buffer(handle, use_symm_mem=True)
+        buffer = self._make_ep_buffer(handle)
         from torch.distributed._symmetric_memory import is_symm_mem_tensor
 
-        self.assertTrue(is_symm_mem_tensor(buffer.combine_in))
         self.assertTrue(is_symm_mem_tensor(buffer.recv_tokens))
+        self.assertTrue(is_symm_mem_tensor(buffer.recv_tokens_grad))
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
         out = self._moe_step(handle, buffer, topk_idx, tokens_p, w)
@@ -806,23 +803,62 @@ class TestEP(unittest.TestCase):
             )
 
     def test_record_stream(self):
-        """EpBuffer.record_stream(s) records on both owned tensors."""
+        """EpBuffer.record_stream(s) records on all owned tensors."""
         handle = self._make_handle()
-        buffer = self._make_ep_buffer(handle, use_symm_mem=True)
+        buffer = self._make_ep_buffer(handle)
         s = torch.cuda.Stream()
         buffer.record_stream(s)
         with torch.cuda.stream(s):
             buffer.recv_tokens.add_(0)
-            buffer.combine_in.add_(0)
+            buffer.recv_tokens_grad.add_(0)
         torch.cuda.synchronize()
 
-    def test_from_external_round_trip(self):
-        """EpBuffer.from_external with caller-allocated symm-mem tensors must round-trip."""
+    def test_external_recv_tokens_round_trip(self):
+        """Caller-allocated recv_tokens / recv_tokens_grad round-trip identically."""
         handle = self._make_handle()
         rc = self.cfg.recv_capacity_per_rank
         recv_tokens = self._try_symm_alloc((rc, HIDDEN_DIM), torch.bfloat16)
-        combine_in = self._try_symm_alloc((rc, HIDDEN_DIM), torch.bfloat16)
-        buffer = EpBuffer.from_external(handle, recv_tokens=recv_tokens, combine_in=combine_in)
+        recv_tokens_grad = self._try_symm_alloc((rc, HIDDEN_DIM), torch.bfloat16)
+        buffer = EpBuffer(
+            handle, recv_tokens=recv_tokens, recv_tokens_grad=recv_tokens_grad
+        )
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        out = self._moe_step(handle, buffer, topk_idx, tokens_p, w)
+        loss = 0.5 * (out.float() ** 2).sum()
+        loss.backward()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+        torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+
+    def test_external_recv_tokens_validation(self):
+        """Caller-provided tensors must match handle shape/dtype/device — else ValueError."""
+        handle = self._make_handle()
+        rc = self.cfg.recv_capacity_per_rank
+        good_shape = (rc, HIDDEN_DIM)
+        bad_shape = torch.empty(
+            (rc + 1, HIDDEN_DIM), dtype=torch.bfloat16, device=self.cfg.device
+        )
+        with self.assertRaisesRegex(ValueError, "recv_tokens shape"):
+            EpBuffer(handle, recv_tokens=bad_shape)
+        bad_dtype = torch.empty(good_shape, dtype=torch.float32, device=self.cfg.device)
+        with self.assertRaisesRegex(ValueError, "recv_tokens dtype"):
+            EpBuffer(handle, recv_tokens=bad_dtype)
+        bad_device = torch.empty(good_shape, dtype=torch.bfloat16, device="cpu")
+        with self.assertRaisesRegex(ValueError, "recv_tokens device"):
+            EpBuffer(handle, recv_tokens=bad_device)
+        # Same validation applies to recv_tokens_grad.
+        with self.assertRaisesRegex(ValueError, "recv_tokens_grad shape"):
+            EpBuffer(handle, recv_tokens_grad=bad_shape)
+
+    def test_aliased_recv_tokens_grad_round_trip(self):
+        """Aliasing recv_tokens and recv_tokens_grad to the same tensor round-trips
+        (fwd-output and bwd-output lifecycles don't overlap)."""
+        handle = self._make_handle()
+        rc = self.cfg.recv_capacity_per_rank
+        shared = self._try_symm_alloc((rc, HIDDEN_DIM), torch.bfloat16)
+        buffer = EpBuffer(handle, recv_tokens=shared, recv_tokens_grad=shared)
+        self.assertIs(buffer.recv_tokens, buffer.recv_tokens_grad)
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         tokens_p = tokens.detach().clone().requires_grad_(True)
         out = self._moe_step(handle, buffer, topk_idx, tokens_p, w)

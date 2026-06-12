@@ -50,11 +50,13 @@ bool g_ep_initialized = false;
 // toggle is safe against concurrent ep_dispatch/combine (which release the GIL).
 std::atomic<bool> g_zero_copy_enabled{true};
 
-// Warn-once per role when an EP payload tensor isn't symm-mem-backed (the
-// staged-copy fallback is correct but slower). Set NVTE_EP_SILENCE_NONSYMM_WARN=1
-// to silence (CI or known-non-symm paths).
+// Warn-once per role when a token-payload tensor isn't symm-mem-backed under
+// zero-copy (staged-copy fallback is correct but slower). Token tensors only —
+// weight/count tensors intentionally skip the check. Set
+// NVTE_EP_SILENCE_NONSYMM_WARN=1 to silence.
 void warn_if_not_symm(const at::Tensor& t, const char* role) {
 #ifdef NCCL_HAS_SYMMEM_SUPPORT
+  if (!g_zero_copy_enabled.load(std::memory_order_relaxed)) return;
   if (g_ep_group_name.empty()) return;
   if (c10d::symmetric_memory::is_symm_mem_tensor(t)) return;
   static const bool silenced = []() {

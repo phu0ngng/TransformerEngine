@@ -182,6 +182,7 @@ def main():
         recv_capacity_per_rank=recv_pr,
         hidden_dim=H,
         max_num_sms=args.max_num_sms,
+        zero_copy=args.zero_copy,
     )
 
     topk_idx, tokens_hbm, topk_w_hbm = _make_inputs(rank, world_size, T, H, K, E, device)
@@ -193,11 +194,8 @@ def main():
         hidden_dim=H,
         num_local_experts=num_local_experts,
     )
-    buffer = EpBuffer(
-        handle,
-        ep_group=ep_group if args.zero_copy else None,
-        use_symm_mem=args.zero_copy,
-    )
+    # Symm-mem vs HBM auto-alloc follows the bootstrap zero_copy flag.
+    buffer = EpBuffer(handle)
 
     # Zero-copy requires symm-mem-backed inputs to skip the cross-rank staging
     # memcpy NCCL EP would otherwise insert. Allocate via symm_mem_alloc and
