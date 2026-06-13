@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 """Multi-process PyTorch EP tests, launched via torchrun (one process per GPU)."""
 
+import contextlib
 import os
 import sys
 import unittest
@@ -108,6 +109,10 @@ class TestEP(unittest.TestCase):
             raise unittest.SkipTest(f"NCCL EP requires SM>=90 (got SM{_device_sm()})")
         cls.cfg = _make_cfg()
         cls.ep_group = _build_ep_group()
+        # Bootstrap with zero_copy=False so generic-torch autograd tests can run:
+        # under strict zero_copy=True, autograd-allocated grads are plain HBM and
+        # the cpp require_symm_when_zero_copy check would reject them. Tests that
+        # exercise the strict path explicitly flip the cpp flag via _zero_copy_scope.
         ep_bootstrap(
             cls.ep_group,
             num_experts=cls.cfg.num_experts,
@@ -115,6 +120,7 @@ class TestEP(unittest.TestCase):
             recv_capacity_per_rank=cls.cfg.recv_capacity_per_rank,
             hidden_dim=HIDDEN_DIM,
             allow_handle_mem_reloc=False,
+            zero_copy=False,
         )
 
     def _make_handle(self, alignment=0, top_k=TOP_K):
@@ -128,10 +134,11 @@ class TestEP(unittest.TestCase):
         )
 
     def _make_buffers(self, dtype=torch.bfloat16):
-        """Allocate raw recv buffers + token_counts for the primitive (non-autograd) tests."""
+        """Raw-path buffers: recv_tokens is symm-mem (zero_copy strict mode);
+        recv_w / token_counts are HBM."""
         rc = self.cfg.recv_capacity_per_rank
         return (
-            torch.empty(rc, HIDDEN_DIM, dtype=dtype, device=self.cfg.device),
+            symm_mem_alloc((rc, HIDDEN_DIM), dtype, self.ep_group, device=self.cfg.device),
             torch.empty(rc, dtype=torch.float32, device=self.cfg.device),
             torch.empty(NUM_LOCAL_EXPERTS, dtype=torch.int32, device=self.cfg.device),
         )
@@ -145,6 +152,18 @@ class TestEP(unittest.TestCase):
         """fp32 per-slot weighting + cast back, matching the combine forward path."""
         mask = (recv_w != 0).to(torch.float32).unsqueeze(-1)
         return (recv_tokens.float() * recv_w.unsqueeze(-1).float() * mask).to(recv_tokens.dtype)
+
+    def _weighted_symm(self, recv_tokens, recv_w):
+        """_weighted into a freshly-rendezvoused symm-mem buffer, required as
+        ep_combine input under zero_copy strict mode."""
+        buf = symm_mem_alloc(
+            tuple(recv_tokens.shape),
+            recv_tokens.dtype,
+            self.ep_group,
+            device=self.cfg.device,
+        )
+        buf.copy_(self._weighted(recv_tokens, recv_w))
+        return buf
 
     # -- prepare ----------------------------------------------------------
 
@@ -171,7 +190,7 @@ class TestEP(unittest.TestCase):
         ep_prepare(handle, topk_idx)
         _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
         result = torch.empty_like(tokens)
-        _ep_combine_raw(handle, self._weighted(recv_tokens, recv_w), result)
+        _ep_combine_raw(handle, self._weighted_symm(recv_tokens, recv_w), result)
         torch.cuda.synchronize()
         torch.testing.assert_close(result.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
@@ -194,7 +213,7 @@ class TestEP(unittest.TestCase):
         ep_prepare(handle, topk_idx_3d)
         _ep_dispatch_raw(handle, topk_idx_3d, tokens_3d, w_3d, recv_tokens, recv_w)
         result = torch.empty_like(tokens_3d)
-        _ep_combine_raw(handle, self._weighted(recv_tokens, recv_w), result)
+        _ep_combine_raw(handle, self._weighted_symm(recv_tokens, recv_w), result)
         torch.cuda.synchronize()
         self.assertEqual(result.shape, (B, S, HIDDEN_DIM))
         torch.testing.assert_close(result.float(), tokens_3d.float(), atol=5e-2, rtol=5e-2)
@@ -229,7 +248,7 @@ class TestEP(unittest.TestCase):
             device=self.cfg.device,
             requires_grad=True,
         )
-        out = ep_combine(handle, buffer, self._weighted(eo, recv_w_out))
+        out = ep_combine(handle, buffer, self._weighted_symm(eo, recv_w_out))
         loss = 0.5 * (out.float() ** 2).sum()
         loss.backward()
         torch.cuda.synchronize()
@@ -252,7 +271,7 @@ class TestEP(unittest.TestCase):
         token_counts = ep_prepare(handle, topk_idx)
         _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
         result = torch.empty_like(tokens)
-        _ep_combine_raw(handle, self._weighted(recv_tokens, recv_w), result)
+        _ep_combine_raw(handle, self._weighted_symm(recv_tokens, recv_w), result)
         torch.cuda.synchronize()
         torch.testing.assert_close(result.float(), tokens.float(), atol=5e-2, rtol=5e-2)
         # Rank 0 owns expert 0 and receives world*T tokens; other ranks see 0.
@@ -272,7 +291,7 @@ class TestEP(unittest.TestCase):
         ep_prepare(handle, topk_idx)
         _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
         result = torch.empty_like(tokens)
-        _ep_combine_raw(handle, self._weighted(recv_tokens, recv_w), result)
+        _ep_combine_raw(handle, self._weighted_symm(recv_tokens, recv_w), result)
         torch.cuda.synchronize()
         torch.testing.assert_close(result.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
@@ -280,7 +299,7 @@ class TestEP(unittest.TestCase):
 
     def _moe_step(self, handle, buffer, topk_idx, tokens, w):
         recv_t, recv_w_out, _tc = ep_dispatch(handle, buffer, tokens, topk_idx, w)
-        return ep_combine(handle, buffer, self._weighted(recv_t, recv_w_out))
+        return ep_combine(handle, buffer, self._weighted_symm(recv_t, recv_w_out))
 
     def test_cuda_graph_capture(self):
         """Capture dispatch+combine via the raw ops; replay must be bit-stable."""
@@ -292,7 +311,7 @@ class TestEP(unittest.TestCase):
         def step():
             ep_prepare(handle, topk_idx)
             _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
-            _ep_combine_raw(handle, self._weighted(recv_tokens, recv_w), result)
+            _ep_combine_raw(handle, self._weighted_symm(recv_tokens, recv_w), result)
 
         for _ in range(3):
             step()
@@ -309,7 +328,7 @@ class TestEP(unittest.TestCase):
         with torch.cuda.stream(s):
             with torch.cuda.graph(graph):
                 _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
-                _ep_combine_raw(handle, self._weighted(recv_tokens, recv_w), result)
+                _ep_combine_raw(handle, self._weighted_symm(recv_tokens, recv_w), result)
         torch.cuda.current_stream().wait_stream(s)
         torch.cuda.synchronize()
 
@@ -465,7 +484,7 @@ class TestEP(unittest.TestCase):
                     "combine_raw",
                     lambda: _ep_combine_raw(handle, expert_out, torch.empty_like(tokens)),
                 ),
-                ("ep_combine_fwd", lambda: ep_combine(handle, buffer, self._weighted(recv_tokens, recv_w))),
+                ("ep_combine_fwd", lambda: ep_combine(handle, buffer, self._weighted_symm(recv_tokens, recv_w))),
             ]:
                 fn()  # prime allocator
                 torch.cuda.synchronize()
@@ -497,7 +516,7 @@ class TestEP(unittest.TestCase):
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             ep_prepare(handle, topk_idx)
             _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
-            _ep_combine_raw(handle, self._weighted(recv_tokens, recv_w), result)
+            _ep_combine_raw(handle, self._weighted_symm(recv_tokens, recv_w), result)
         torch.cuda.synchronize()
         self.assertEqual(recv_tokens.dtype, torch.bfloat16)
         self.assertEqual(result.dtype, torch.bfloat16)
@@ -509,11 +528,19 @@ class TestEP(unittest.TestCase):
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         recv_tokens, recv_w, token_counts = self._make_buffers()
         result = torch.empty_like(tokens)
+        # Symm-mem dest for the pre-multiplied combine input (required under zero_copy).
+        weighted_buf = symm_mem_alloc(
+            (self.cfg.recv_capacity_per_rank, HIDDEN_DIM),
+            torch.bfloat16,
+            self.ep_group,
+            device=self.cfg.device,
+        )
         alignment = handle.alignment
         handle_id = handle.handle_id
         handle_mem = handle.handle_mem
 
-        def step(handle_mem, topk_idx, tokens, w, recv_tokens, recv_w, token_counts, result):
+        def step(handle_mem, topk_idx, tokens, w, recv_tokens, recv_w, token_counts,
+                 weighted_buf, result):
             torch.ops.transformer_engine_ep.prepare(
                 handle_mem, handle_id, topk_idx, token_counts, alignment
             )
@@ -524,11 +551,15 @@ class TestEP(unittest.TestCase):
             weighted = (recv_tokens.float() * recv_w.unsqueeze(-1).float() * mask).to(
                 recv_tokens.dtype
             )
-            torch.ops.transformer_engine_ep.combine(handle_mem, handle_id, weighted, result)
+            weighted_buf.copy_(weighted)
+            torch.ops.transformer_engine_ep.combine(
+                handle_mem, handle_id, weighted_buf, result
+            )
             return result
 
         ref = torch.empty_like(tokens)
-        step(handle_mem, topk_idx, tokens, w, recv_tokens, recv_w, token_counts, ref)
+        step(handle_mem, topk_idx, tokens, w, recv_tokens, recv_w, token_counts,
+             weighted_buf, ref)
         torch.cuda.synchronize()
         ref_clone = ref.clone()
 
@@ -537,7 +568,8 @@ class TestEP(unittest.TestCase):
         token_counts.zero_()
         result.zero_()
         compiled = torch.compile(step, fullgraph=True, dynamic=False)
-        out = compiled(handle_mem, topk_idx, tokens, w, recv_tokens, recv_w, token_counts, result)
+        out = compiled(handle_mem, topk_idx, tokens, w, recv_tokens, recv_w, token_counts,
+                       weighted_buf, result)
         torch.cuda.synchronize()
         torch.testing.assert_close(out.float(), ref_clone.float(), atol=5e-2, rtol=5e-2)
 
@@ -550,8 +582,24 @@ class TestEP(unittest.TestCase):
         except Exception as e:
             self.skipTest(f"NCCL symmetric memory unavailable: {e}")
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _zero_copy_scope(enabled: bool):
+        """Temporarily flip the cpp zero_copy flag so strict-mode require checks fire.
+
+        The Python _ZERO_COPY global (EpBuffer auto-alloc) is captured at
+        bootstrap and not affected; callers in this scope must allocate
+        symm-mem-backed buffers explicitly.
+        """
+        prev = tex.ep_get_zero_copy()
+        tex.ep_set_zero_copy(enabled)
+        try:
+            yield
+        finally:
+            tex.ep_set_zero_copy(prev)
+
     def test_zero_copy_dispatch_combine_identity(self):
-        """Symm-mem payload buffers must match the HBM path bit-for-bit."""
+        """Symm-mem payload buffers under strict zero_copy must round-trip identically."""
         handle = self._make_handle()
         topk_idx, tokens_hbm, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
         rc = self.cfg.recv_capacity_per_rank
@@ -568,25 +616,15 @@ class TestEP(unittest.TestCase):
         tokens_sm.copy_(tokens_hbm)
         recv_w = torch.empty(rc, dtype=torch.float32, device=self.cfg.device)
 
-        # Symm-mem path.
-        ep_prepare(handle, topk_idx)
-        _ep_dispatch_raw(handle, topk_idx, tokens_sm, w, recv_tokens_sm, recv_w)
-        expert_out_sm.copy_(self._weighted(recv_tokens_sm, recv_w))
-        result_sm = torch.empty_like(tokens_hbm)
-        _ep_combine_raw(handle, expert_out_sm, result_sm)
-        torch.cuda.synchronize()
-
-        # HBM reference.
-        handle_ref = self._make_handle()
-        recv_tokens_hbm, recv_w_hbm, _ = self._make_buffers()
-        result_hbm = torch.empty_like(tokens_hbm)
-        ep_prepare(handle_ref, topk_idx)
-        _ep_dispatch_raw(handle_ref, topk_idx, tokens_hbm, w, recv_tokens_hbm, recv_w_hbm)
-        _ep_combine_raw(handle_ref, self._weighted(recv_tokens_hbm, recv_w_hbm), result_hbm)
+        with self._zero_copy_scope(True):
+            ep_prepare(handle, topk_idx)
+            _ep_dispatch_raw(handle, topk_idx, tokens_sm, w, recv_tokens_sm, recv_w)
+            expert_out_sm.copy_(self._weighted(recv_tokens_sm, recv_w))
+            result_sm = torch.empty_like(tokens_hbm)
+            _ep_combine_raw(handle, expert_out_sm, result_sm)
         torch.cuda.synchronize()
 
         torch.testing.assert_close(result_sm.float(), tokens_hbm.float(), atol=5e-2, rtol=5e-2)
-        torch.testing.assert_close(result_sm, result_hbm, atol=0, rtol=0)
 
     def test_zero_copy_cuda_graph_capture(self):
         """Capture dispatch+combine over symm-mem payload buffers; replay must be bit-stable."""
@@ -606,66 +644,88 @@ class TestEP(unittest.TestCase):
             expert_out.copy_(self._weighted(recv_tokens, recv_w))
             _ep_combine_raw(handle, expert_out, result)
 
-        for _ in range(3):
-            step()
-        torch.cuda.synchronize()
+        with self._zero_copy_scope(True):
+            for _ in range(3):
+                step()
+            torch.cuda.synchronize()
 
-        ep_prepare(handle, topk_idx)
-        torch.cuda.synchronize()
+            ep_prepare(handle, topk_idx)
+            torch.cuda.synchronize()
 
-        graph = torch.cuda.CUDAGraph()
-        s = torch.cuda.Stream()
-        s.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(s):
-            with torch.cuda.graph(graph):
-                _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
-                expert_out.copy_(self._weighted(recv_tokens, recv_w))
-                _ep_combine_raw(handle, expert_out, result)
-        torch.cuda.current_stream().wait_stream(s)
-        torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                with torch.cuda.graph(graph):
+                    _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
+                    expert_out.copy_(self._weighted(recv_tokens, recv_w))
+                    _ep_combine_raw(handle, expert_out, result)
+            torch.cuda.current_stream().wait_stream(s)
+            torch.cuda.synchronize()
 
-        ref = result.clone()
-        for _ in range(5):
-            graph.replay()
-        torch.cuda.synchronize()
+            ref = result.clone()
+            for _ in range(5):
+                graph.replay()
+            torch.cuda.synchronize()
         torch.testing.assert_close(result.float(), ref.float(), atol=0, rtol=0)
 
-    def test_zero_copy_autograd_combine(self):
-        """EpBuffer auto-allocs recv_tokens / recv_tokens_grad as symm-mem under zero_copy."""
-        handle = self._make_handle()
-        buffer = self._make_ep_buffer(handle)
+    def test_zero_copy_fwd_round_trip_with_explicit_symm_buffers(self):
+        """Under strict zero_copy, an EpBuffer constructed from caller-allocated
+        symm-mem slots round-trips the fwd dispatch+combine identity. Backward
+        through generic torch ops is intentionally not covered: autograd allocates
+        plain-HBM grads and the cpp would reject them; production callers wrap
+        their upstream (e.g. GroupedGEMM) so its bwd output is symm-mem."""
         from torch.distributed._symmetric_memory import is_symm_mem_tensor
 
+        handle = self._make_handle()
+        rc = self.cfg.recv_capacity_per_rank
+        recv_tokens = self._try_symm_alloc((rc, HIDDEN_DIM), torch.bfloat16)
+        recv_tokens_grad = self._try_symm_alloc((rc, HIDDEN_DIM), torch.bfloat16)
+        buffer = EpBuffer(handle, recv_tokens=recv_tokens, recv_tokens_grad=recv_tokens_grad)
         self.assertTrue(is_symm_mem_tensor(buffer.recv_tokens))
         self.assertTrue(is_symm_mem_tensor(buffer.recv_tokens_grad))
+
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        tokens_p = tokens.detach().clone().requires_grad_(True)
-        out = self._moe_step(handle, buffer, topk_idx, tokens_p, w)
-        loss = 0.5 * (out.float() ** 2).sum()
-        loss.backward()
+        with self._zero_copy_scope(True), torch.no_grad():
+            out = self._moe_step(handle, buffer, topk_idx, tokens, w)
         torch.cuda.synchronize()
         torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
-        torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
-    def test_zero_copy_falls_back_when_not_registered(self):
-        """Plain torch.empty tensors take the staged-copy fallback correctly."""
-        try:
-            from torch.distributed._symmetric_memory import is_symm_mem_tensor
-        except ImportError:
-            is_symm_mem_tensor = None
-
+    def test_zero_copy_rejects_non_symm_recv_tensors(self):
+        """Under zero_copy=True, the cpp hard-rejects plain-HBM tensors at the
+        four recv-side require sites: dispatch recv_tokens, combine expert_out,
+        dispatch_bwd grad, combine_bwd grad_expert_out."""
         handle = self._make_handle()
         topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
-        recv_tokens, recv_w, _ = self._make_buffers()
-        if is_symm_mem_tensor is not None:
-            self.assertFalse(is_symm_mem_tensor(tokens))
-            self.assertFalse(is_symm_mem_tensor(recv_tokens))
-        result = torch.empty_like(tokens)
-        ep_prepare(handle, topk_idx)
-        _ep_dispatch_raw(handle, topk_idx, tokens, w, recv_tokens, recv_w)
-        _ep_combine_raw(handle, self._weighted(recv_tokens, recv_w), result)
-        torch.cuda.synchronize()
-        torch.testing.assert_close(result.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+        rc = self.cfg.recv_capacity_per_rank
+        # Plain-HBM tensors of the right shape for each role.
+        hbm_recv = torch.empty((rc, HIDDEN_DIM), dtype=torch.bfloat16, device=self.cfg.device)
+        hbm_recv_w = torch.empty(rc, dtype=torch.float32, device=self.cfg.device)
+        hbm_result = torch.empty_like(tokens)
+        hbm_grad_tokens = torch.empty_like(tokens)
+        hbm_g_recv_w = torch.empty(rc, dtype=torch.float32, device=self.cfg.device)
+        hbm_g_topk_w = torch.empty_like(w)
+        with self._zero_copy_scope(True):
+            ep_prepare(handle, topk_idx)
+            # 1) dispatch fwd: recv_tokens must be symm-mem.
+            with self.assertRaisesRegex(RuntimeError, "recv_tokens"):
+                _ep_dispatch_raw(handle, topk_idx, tokens, w, hbm_recv, hbm_recv_w)
+            # 2) combine fwd: expert_out must be symm-mem.
+            with self.assertRaisesRegex(RuntimeError, "expert_out"):
+                _ep_combine_raw(handle, hbm_recv, hbm_result)
+            # 3) dispatch_bwd: grad (= g_recv_tokens) must be symm-mem.
+            with self.assertRaisesRegex(RuntimeError, "dispatch_bwd"):
+                tex.ep_dispatch_bwd(
+                    handle.handle_mem,
+                    handle.handle_id,
+                    hbm_recv,
+                    hbm_g_recv_w,
+                    hbm_grad_tokens,
+                    hbm_g_topk_w,
+                )
+            # 4) combine_bwd: grad_expert_out (output dest) must be symm-mem.
+            with self.assertRaisesRegex(RuntimeError, "grad_expert_out"):
+                tex.ep_combine_bwd(handle.handle_mem, handle.handle_id, hbm_result, hbm_recv)
 
     def test_gradient_checkpointing(self):
         from torch.utils.checkpoint import checkpoint
@@ -746,7 +806,7 @@ class TestEP(unittest.TestCase):
 
         def step(tokens, topk_idx, w):
             recv_t, recv_w_out, _ = ep_dispatch(handle, buffer, tokens, topk_idx, w)
-            return ep_combine(handle, buffer, self._weighted(recv_t, recv_w_out))
+            return ep_combine(handle, buffer, self._weighted_symm(recv_t, recv_w_out))
 
         with torch.no_grad():
             ref = step(tokens, topk_idx, w).detach().clone()

@@ -275,14 +275,18 @@ def main():
         out = fwd_bwd_combine_fn(eo_p)
         (0.5 * (out * out).sum(dtype=torch.float32)).backward()
 
+    # Under strict zero_copy, autograd-allocated grads are plain HBM and the
+    # cpp require_symm_when_zero_copy check rejects them, so fwd+bwd stages
+    # can't run end-to-end without a custom upstream op.
     stages = [
         ("dispatch_raw", _dispatch_raw, True),
         ("ep_dispatch_fwd", _ep_dispatch_fwd, True),
-        ("ep_dispatch_fwd_bwd", _ep_dispatch_fwd_bwd, False),
         ("combine_raw", _combine_raw, True),
         ("ep_combine_fwd", _ep_combine_fwd, True),
-        ("ep_combine_fwd_bwd", _ep_combine_fwd_bwd, False),
     ]
+    if not args.zero_copy:
+        stages.insert(2, ("ep_dispatch_fwd_bwd", _ep_dispatch_fwd_bwd, False))
+        stages.append(("ep_combine_fwd_bwd", _ep_combine_fwd_bwd, False))
     # Third tuple element: True = direct torch.cuda.graph capture; False = use
     # make_graphed_callables (autograd-aware) instead.
 
@@ -299,23 +303,25 @@ def main():
     # so addresses stay stable across replays.
     captured_runners = {}
     if args.cuda_graph:
-        # Graph fwd+bwd of the autograd-wrapped ops via make_graphed_callables.
-        class _DispatchMod(torch.nn.Module):
-            def forward(self, x):
-                return ep_dispatch(handle, buffer, x, topk_idx, topk_w)[0]
+        # make_graphed_callables captures both fwd and bwd; skip under zero_copy
+        # where the bwd path requires symm-mem grads from a custom upstream op.
+        if not args.zero_copy:
+            class _DispatchMod(torch.nn.Module):
+                def forward(self, x):
+                    return ep_dispatch(handle, buffer, x, topk_idx, topk_w)[0]
 
-        class _CombineMod(torch.nn.Module):
-            def forward(self, eo):
-                return ep_combine(handle, buffer, eo)
+            class _CombineMod(torch.nn.Module):
+                def forward(self, eo):
+                    return ep_combine(handle, buffer, eo)
 
-        disp_mod = _DispatchMod().cuda()
-        comb_mod = _CombineMod().cuda()
-        g_disp, g_comb = torch.cuda.make_graphed_callables(
-            (disp_mod, comb_mod),
-            ((tokens_p,), (eo_p,)),
-        )
-        fwd_bwd_dispatch_fn = g_disp
-        fwd_bwd_combine_fn = g_comb
+            disp_mod = _DispatchMod().cuda()
+            comb_mod = _CombineMod().cuda()
+            g_disp, g_comb = torch.cuda.make_graphed_callables(
+                (disp_mod, comb_mod),
+                ((tokens_p,), (eo_p,)),
+            )
+            fwd_bwd_dispatch_fn = g_disp
+            fwd_bwd_combine_fn = g_comb
 
         # Direct torch.cuda.graph capture for raw + fwd-only stages.
         side = torch.cuda.Stream()
@@ -362,35 +368,30 @@ def main():
         print("", flush=True)
         print(f"| stage                | mean wall (us){label} |", flush=True)
         print("|----------------------|---------------:|", flush=True)
-        for name in (
-            "dispatch_raw",
-            "ep_dispatch_fwd",
-            "ep_dispatch_fwd_bwd",
-            "combine_raw",
-            "ep_combine_fwd",
-            "ep_combine_fwd_bwd",
-        ):
+        for name, _fn, _capt in stages:
             print(f"| {name:20s} | {results[name]:14.1f} |", flush=True)
         print(
             "| (dispatch fwd-raw)   |"
             f" {results['ep_dispatch_fwd'] - results['dispatch_raw']:14.1f} |",
             flush=True,
         )
-        print(
-            "| (dispatch bwd-fwd)   |"
-            f" {results['ep_dispatch_fwd_bwd'] - results['ep_dispatch_fwd']:14.1f} |",
-            flush=True,
-        )
+        if "ep_dispatch_fwd_bwd" in results:
+            print(
+                "| (dispatch bwd-fwd)   |"
+                f" {results['ep_dispatch_fwd_bwd'] - results['ep_dispatch_fwd']:14.1f} |",
+                flush=True,
+            )
         print(
             "| (combine fwd-raw)    |"
             f" {results['ep_combine_fwd'] - results['combine_raw']:14.1f} |",
             flush=True,
         )
-        print(
-            "| (combine bwd-fwd)    |"
-            f" {results['ep_combine_fwd_bwd'] - results['ep_combine_fwd']:14.1f} |",
-            flush=True,
-        )
+        if "ep_combine_fwd_bwd" in results:
+            print(
+                "| (combine bwd-fwd)    |"
+                f" {results['ep_combine_fwd_bwd'] - results['ep_combine_fwd']:14.1f} |",
+                flush=True,
+            )
         print("", flush=True)
 
     if args.kineto and rank == 0 and prof is not None:

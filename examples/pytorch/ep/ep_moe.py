@@ -21,7 +21,6 @@ from transformer_engine.pytorch.ep import (
     ep_finalize,
     ep_dispatch,
     ep_combine,
-    symm_mem_alloc,
 )
 
 
@@ -117,12 +116,17 @@ def main():
     recv_pr = ep_size * T * args.top_k
 
     ep_group = dist.new_group(ranks=list(range(world_size)), backend="nccl")
+    # zero_copy=False: torch.bmm in the expert layer auto-allocates plain-HBM grad
+    # tensors in bwd; the strict zero_copy=True path requires the upstream of
+    # dispatch_bwd to be symm-mem-backed (production callers wrap their expert
+    # op so its bwd output is symm-mem).
     ep_bootstrap(
         ep_group,
         num_experts=num_experts,
         max_tokens_per_rank=T,
         recv_capacity_per_rank=recv_pr,
         hidden_dim=args.hidden,
+        zero_copy=False,
     )
 
     rng = np.random.default_rng(seed=42 + rank)
@@ -155,10 +159,10 @@ def main():
     buffer = EpBuffer(handle)
 
     recv_t, recv_w_out, _tc = ep_dispatch(handle, buffer, tokens, topk_idx, topk_w)
-    expert_out = _batched_expert_linear(recv_t, kernels_local, num_local_experts)
+    expert_out_raw = _batched_expert_linear(recv_t, kernels_local, num_local_experts)
     # Fold topk weights into expert_out before combine (ep_combine no longer weights).
-    expert_out = expert_out * recv_w_out.unsqueeze(-1).to(expert_out.dtype)
-    out = ep_combine(handle, buffer, expert_out)
+    expert_out_raw = expert_out_raw * recv_w_out.unsqueeze(-1).to(expert_out_raw.dtype)
+    out = ep_combine(handle, buffer, expert_out_raw)
 
     loss = 0.5 * (out.float() ** 2).sum()
     loss.backward()
@@ -171,51 +175,31 @@ def main():
         )
 
     if args.benchmark:
-        # Compare dispatch + expert + combine over HBM vs symm-mem payload buffers.
         import time
 
-        def _time(label, tokens_buf, buffer_obj):
-            torch.cuda.synchronize()
-            dist.barrier()
-            for _ in range(args.benchmark_warmup):
-                rt, rw, _tc = ep_dispatch(handle, buffer_obj, tokens_buf, topk_idx, topk_w)
-                eo = _batched_expert_linear(rt, kernels_local, num_local_experts)
-                eo = eo * rw.unsqueeze(-1).to(eo.dtype)
-                ep_combine(handle, buffer_obj, eo)
-            torch.cuda.synchronize()
-            dist.barrier()
-            t0 = time.perf_counter()
-            for _ in range(args.benchmark_iters):
-                rt, rw, _tc = ep_dispatch(handle, buffer_obj, tokens_buf, topk_idx, topk_w)
-                eo = _batched_expert_linear(rt, kernels_local, num_local_experts)
-                eo = eo * rw.unsqueeze(-1).to(eo.dtype)
-                ep_combine(handle, buffer_obj, eo)
-            torch.cuda.synchronize()
-            dt_ms = (time.perf_counter() - t0) * 1000.0 / args.benchmark_iters
-            if rank == 0:
-                print(
-                    f"[ep_moe --benchmark] {label}: {dt_ms:.3f} ms/iter "
-                    f"(iters={args.benchmark_iters})"
-                )
-            return dt_ms
+        tokens_d = tokens.detach()
 
-        # HBM variant: pass plain tensors so EpBuffer skips the symm-mem auto-alloc.
-        # cpp takes the staged fallback (set NVTE_EP_SILENCE_NONSYMM_WARN=1 to mute warn).
-        recv_hbm = torch.empty((recv_pr, args.hidden), dtype=torch.bfloat16, device=device)
-        recv_grad_hbm = torch.empty((recv_pr, args.hidden), dtype=torch.bfloat16, device=device)
-        buffer_hbm = EpBuffer(handle, recv_tokens=recv_hbm, recv_tokens_grad=recv_grad_hbm)
-        hbm_ms = _time("regular HBM", tokens.detach(), buffer_hbm)
+        def _step():
+            rt, rw, _tc = ep_dispatch(handle, buffer, tokens_d, topk_idx, topk_w)
+            eo_raw = _batched_expert_linear(rt, kernels_local, num_local_experts)
+            ep_combine(handle, buffer, eo_raw * rw.unsqueeze(-1).to(eo_raw.dtype))
 
-        # Place the dispatch input in symm-mem too for the fast-path comparison.
-        try:
-            tokens_sm = symm_mem_alloc((T, args.hidden), torch.bfloat16, ep_group, device=device)
-            tokens_sm.copy_(tokens.detach())
-            symm_ms = _time("symm-mem", tokens_sm, buffer)
-            if rank == 0:
-                print(f"[ep_moe --benchmark] speedup: {hbm_ms / symm_ms:.2f}x")
-        except RuntimeError as e:
-            if rank == 0:
-                print(f"[ep_moe --benchmark] symm-mem path skipped: {e}")
+        torch.cuda.synchronize()
+        dist.barrier()
+        for _ in range(args.benchmark_warmup):
+            _step()
+        torch.cuda.synchronize()
+        dist.barrier()
+        t0 = time.perf_counter()
+        for _ in range(args.benchmark_iters):
+            _step()
+        torch.cuda.synchronize()
+        dt_ms = (time.perf_counter() - t0) * 1000.0 / args.benchmark_iters
+        if rank == 0:
+            print(
+                f"[ep_moe --benchmark] {dt_ms:.3f} ms/iter "
+                f"(iters={args.benchmark_iters})"
+            )
 
     if args.check:
         # All-gather inputs/outputs/grads for a global reference comparison.
@@ -240,12 +224,9 @@ def main():
             np.testing.assert_allclose(all_grad, ref_grad, rtol=5e-2, atol=5e-2)
             print(f"[ep_moe] --check PASSED (ref_out.sum()={float(ref_out.sum()):.4f})")
 
-    # Drop refs to symm-mem-backed tensors before the process group is
-    # destroyed, otherwise their windows outlive the NCCL comm and
-    # ncclCommWindowDeregister fails at interpreter shutdown. recv_t/
-    # recv_w_out alias buffer.recv_tokens / buffer.recv_topk_weights.
+    # Drop refs to long-lived EP buffers before the process group is destroyed.
     tokens.grad = None
-    recv_t = recv_w_out = expert_out = out = loss = None
+    recv_t = recv_w_out = out = loss = None
     buffer = handle = None
     import gc
 

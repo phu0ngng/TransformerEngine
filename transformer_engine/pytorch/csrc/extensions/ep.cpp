@@ -50,31 +50,18 @@ bool g_ep_initialized = false;
 // toggle is safe against concurrent ep_dispatch/combine (which release the GIL).
 std::atomic<bool> g_zero_copy_enabled{true};
 
-// Warn-once per role when a token-payload tensor isn't symm-mem-backed under
-// zero-copy (staged-copy fallback is correct but slower). Token tensors only —
-// weight/count tensors intentionally skip the check. Set
-// NVTE_EP_SILENCE_NONSYMM_WARN=1 to silence.
-void warn_if_not_symm(const at::Tensor& t, const char* role) {
+// Hard-require a recv-side token-payload tensor to be NCCL symm-mem-backed
+// when zero-copy is enabled. Applied to: dispatch recv_tokens, combine
+// expert_out, combine_bwd grad_expert_out, dispatch_bwd grad. Token tensors
+// only; weight/count tensors are exempt.
+void require_symm_when_zero_copy(const at::Tensor& t, const char* role) {
 #ifdef NCCL_HAS_SYMMEM_SUPPORT
   if (!g_zero_copy_enabled.load(std::memory_order_relaxed)) return;
   if (g_ep_group_name.empty()) return;
-  if (c10d::symmetric_memory::is_symm_mem_tensor(t)) return;
-  static const bool silenced = []() {
-    const char* e = std::getenv("NVTE_EP_SILENCE_NONSYMM_WARN");
-    return e != nullptr && e[0] != '\0' && e[0] != '0';
-  }();
-  if (silenced) return;
-  static std::atomic<uint32_t> warned_mask{0};
-  uint32_t h = 5381;
-  for (const char* p = role; *p; ++p) h = h * 33u + static_cast<unsigned char>(*p);
-  const uint32_t bit = 1u << (h & 31u);
-  if ((warned_mask.fetch_or(bit) & bit) != 0) return;
-  std::fprintf(stderr,
-               "[NVTE EP] WARNING: %s tensor is not backed by an NCCL symmetric memory "
-               "window; falling back to staged copy. Allocate this buffer via the "
-               "framework's symm-mem API and rendezvous it for the zero-copy fast path. "
-               "Set NVTE_EP_SILENCE_NONSYMM_WARN=1 to suppress.\n",
-               role);
+  NVTE_CHECK(c10d::symmetric_memory::is_symm_mem_tensor(t),
+             "EP zero_copy=True requires ", role,
+             " to be NCCL symm-mem-backed; allocate via symm_mem_alloc + rendezvous "
+             "on the EP group, or call ep_bootstrap(zero_copy=False).");
 #else
   (void)t;
   (void)role;
@@ -220,7 +207,6 @@ void ep_dispatch(at::Tensor handle_mem, int64_t handle_id, at::Tensor topk_idx, 
   auto topk_idx_te =
       makeTransformerEngineTensor(topk_idx.data_ptr(), Shape{T_flat, topk_n}, DType::kInt64);
   auto tokens_te = makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype);
-  warn_if_not_symm(tokens, "dispatch input (tokens)");
   NVTECommWindow tokens_win = maybe_make_window(tokens);
   auto topk_w_te =
       makeTransformerEngineTensor(topk_weights.data_ptr(), Shape{T_flat, topk_n}, DType::kFloat32);
@@ -229,7 +215,7 @@ void ep_dispatch(at::Tensor handle_mem, int64_t handle_id, at::Tensor topk_idx, 
   NVTECommWindow topk_weights_win = maybe_make_window(topk_weights);
   auto recv_tokens_te =
       makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype);
-  warn_if_not_symm(recv_tokens, "dispatch output (recv_tokens)");
+  require_symm_when_zero_copy(recv_tokens, "dispatch output (recv_tokens)");
   NVTECommWindow recv_tokens_win = maybe_make_window(recv_tokens);
   auto recv_topk_w_te =
       makeTransformerEngineTensor(recv_topk_weights.data_ptr(), Shape{recv_pr}, DType::kFloat32);
@@ -261,7 +247,7 @@ void ep_combine(at::Tensor handle_mem, int64_t handle_id, at::Tensor expert_out,
       handle_mem.data_ptr(), Shape{static_cast<size_t>(handle_mem.numel())}, DType::kByte);
   auto expert_out_te =
       makeTransformerEngineTensor(expert_out.data_ptr(), Shape{recv_pr, H}, eo_dtype);
-  warn_if_not_symm(expert_out, "combine input (expert_out)");
+  require_symm_when_zero_copy(expert_out, "combine input (expert_out)");
   NVTECommWindow expert_out_win = maybe_make_window(expert_out);
   // combine ``result`` is local accumulation (not cross-rank put/get); leave it
   // un-annotated so the backend uses the raw-pointer path regardless of how it
@@ -299,7 +285,7 @@ void ep_dispatch_bwd(at::Tensor handle_mem, int64_t handle_id, at::Tensor grad,
   auto handle_mem_te = makeTransformerEngineTensor(
       handle_mem.data_ptr(), Shape{static_cast<size_t>(handle_mem.numel())}, DType::kByte);
   auto grad_te = makeTransformerEngineTensor(grad.data_ptr(), Shape{recv_pr, H}, g_dtype);
-  warn_if_not_symm(grad, "dispatch_bwd input (grad)");
+  require_symm_when_zero_copy(grad, "dispatch_bwd input (grad)");
   NVTECommWindow grad_win = maybe_make_window(grad);
   auto g_recv_w_te =
       makeTransformerEngineTensor(g_recv_topk_weights.data_ptr(), Shape{recv_pr}, DType::kFloat32);
@@ -337,6 +323,7 @@ void ep_combine_bwd(at::Tensor handle_mem, int64_t handle_id, at::Tensor grad,
   NVTECommWindow grad_win = maybe_make_window(grad);
   auto grad_eo_te =
       makeTransformerEngineTensor(grad_expert_out.data_ptr(), Shape{recv_pr, H}, g_dtype);
+  require_symm_when_zero_copy(grad_expert_out, "combine_bwd output (grad_expert_out)");
   NVTECommWindow grad_eo_win = maybe_make_window(grad_expert_out);
 
   NVTEEpHandle handle{static_cast<uint64_t>(handle_id), handle_mem_te.data()};
