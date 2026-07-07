@@ -690,7 +690,9 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor token_cou
                 int64_t dispatch_output_per_expert_alignment);
 
 void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
-                 at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights);
+                 at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights,
+                 std::optional<at::Tensor> tokens_scale_inv = std::nullopt,
+                 std::optional<at::Tensor> recv_scale_inv = std::nullopt);
 
 void ep_combine(at::Tensor handle_mem, at::Tensor expert_out, at::Tensor result);
 

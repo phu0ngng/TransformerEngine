@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 
 """Methods needed for distributed training (DP/TP)."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -49,7 +50,6 @@ from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from .tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
-
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
 
@@ -1909,6 +1909,25 @@ def _get_symm_mem_pool(device: torch.device, backend: str = "NCCL"):
             f"cannot switch to {backend!r}"
         )
     return _SYMM_MEM_POOL
+
+
+def release_symm_mem_pool(device: Optional[torch.device] = None) -> None:
+    """Free the process-wide symm-mem pool's segments, deregistering their NCCL windows.
+
+    Call before ``dist.destroy_process_group()``: the pool's windows are registered on
+    the group's NCCL comm, which becomes invalid once the group is destroyed. No-op if
+    no pool was created.
+    """
+    global _SYMM_MEM_POOL, _SYMM_MEM_POOL_BACKEND
+    if _SYMM_MEM_POOL is None:
+        return
+    if device is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    _SYMM_MEM_POOL = None
+    _SYMM_MEM_POOL_BACKEND = None
+    # Drop torch's own cached reference so the segments' refcount reaches zero.
+    getattr(symm_mem, "_symm_mem_pools", {}).pop(device, None)
+    torch.cuda.empty_cache()
 
 
 def symm_mem_alloc(

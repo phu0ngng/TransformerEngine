@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
+from transformer_engine.common.recipe import MXFP8BlockScaling
 from transformer_engine.pytorch.ep import (
     EpBuffer,
     ep_bootstrap,
@@ -19,22 +20,24 @@ from transformer_engine.pytorch.ep import (
     ep_dispatch,
     ep_combine,
     symm_mem_alloc,
+    release_symm_mem_pool,
     is_symm_backed,
     _ep_combine_raw,
     _ep_dispatch_raw,
 )
-
 
 ZERO_COPY = os.environ.get("NVTE_EP_ZERO_COPY", "0") == "1"
 
 # Must come after the transformer_engine import so libtransformer_engine.so is loaded.
 import transformer_engine_torch as tex  # noqa: F401
 
-
 NUM_LOCAL_EXPERTS = 2
-HIDDEN_DIM = 32
+# MXFP8 dispatch needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0. Defaults
+# satisfy both so the MXFP8 tests run by default; override via NVTE_EP_HIDDEN_DIM /
+# NVTE_EP_TOKENS_PER_RANK.
+HIDDEN_DIM = int(os.environ.get("NVTE_EP_HIDDEN_DIM", "512"))
 TOP_K = 2
-TOKENS_PER_RANK = 4
+TOKENS_PER_RANK = int(os.environ.get("NVTE_EP_TOKENS_PER_RANK", "32"))
 
 
 def _zero_copy_test_include(fn):
@@ -156,7 +159,7 @@ class TestEP(unittest.TestCase):
         ):
             self.skipTest("not exercised in zero-copy mode")
 
-    def _make_buffer(self, alignment=0, top_k=TOP_K):
+    def _make_buffer(self, alignment=0, top_k=TOP_K, quant_recipe=None):
         return EpBuffer(
             top_k=top_k,
             max_tokens_per_rank=TOKENS_PER_RANK,
@@ -164,6 +167,7 @@ class TestEP(unittest.TestCase):
             hidden_dim=HIDDEN_DIM,
             num_local_experts=NUM_LOCAL_EXPERTS,
             alignment=alignment,
+            dispatch_quant_recipe=quant_recipe,
         )
 
     def _expert_out(self, expert_out):
@@ -259,6 +263,128 @@ class TestEP(unittest.TestCase):
                 torch.testing.assert_close(
                     tokens_p.grad.float(), tokens.float() * float(TOP_K), atol=5e-2, rtol=5e-2
                 )
+
+    # MXFP8 dispatch
+
+    def _mxfp8_quantizer(self):
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        return MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3, rowwise=True, columnwise=False)
+
+    def test_dispatch_mxfp8_identity(self):
+        """MXFP8 dispatch routes e4m3 data + e8m0 scales together; recv dequantized
+        matches a bf16 dispatch of the same (dequantized) tokens."""
+        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
+            self.skipTest(
+                "MXFP8 dispatch needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
+                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
+            )
+        q = self._mxfp8_quantizer()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_mx = q.quantize(tokens)
+        recv_mx, _rw, _tc = ep_dispatch(self._make_buffer(), tokens_mx, topk_idx, w)
+        ref_recv, _rw2, _tc2 = ep_dispatch(self._make_buffer(), tokens_mx.dequantize(), topk_idx, w)
+        torch.cuda.synchronize()
+        self.assertTrue(hasattr(recv_mx, "_rowwise_data"))
+        torch.testing.assert_close(
+            recv_mx.dequantize().float(), ref_recv.float(), atol=1e-2, rtol=1e-2
+        )
+
+    def test_dispatch_mxfp8_autograd(self):
+        """Grad flows through dispatch and the quantizer STE to the pre-quant bf16
+        input; grad_tokens ~= TOP_K * dequant(tokens)."""
+        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
+            self.skipTest(
+                "MXFP8 dispatch needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
+                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
+            )
+        q = self._mxfp8_quantizer()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        tokens_mx = q.quantize(tokens_p)
+        recv_mx, _rw, _tc = ep_dispatch(self._make_buffer(), tokens_mx, topk_idx, w)
+        (0.5 * (recv_mx.dequantize().float() ** 2).sum()).backward()
+        torch.cuda.synchronize()
+        self.assertIsNotNone(tokens_p.grad)
+        ref = tokens_mx.dequantize().float() * float(TOP_K)
+        torch.testing.assert_close(tokens_p.grad.float(), ref, atol=5e-2, rtol=5e-2)
+
+    def test_dispatch_mxfp8_internal_quantize(self):
+        """An MXFP8BlockScaling quant_recipe quantizes a bf16 input to MXFP8 inside
+        ep_dispatch; recv is an MXFP8Tensor matching an explicit MXFP8 dispatch,
+        and grad reaches the bf16 input."""
+        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
+            self.skipTest(
+                "MXFP8 dispatch needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
+                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
+            )
+        q = self._mxfp8_quantizer()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        buf = self._make_buffer(quant_recipe=MXFP8BlockScaling())
+        recv_mx, _rw, _tc = ep_dispatch(buf, tokens_p, topk_idx, w)
+        self.assertTrue(hasattr(recv_mx, "_rowwise_data"))
+        ref_recv, _rw2, _tc2 = ep_dispatch(self._make_buffer(), q.quantize(tokens), topk_idx, w)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            recv_mx.dequantize().float(), ref_recv.dequantize().float(), atol=1e-2, rtol=1e-2
+        )
+        (0.5 * (recv_mx.dequantize().float() ** 2).sum()).backward()
+        torch.cuda.synchronize()
+        self.assertIsNotNone(tokens_p.grad)
+        ref_grad = q.quantize(tokens).dequantize().float() * float(TOP_K)
+        torch.testing.assert_close(tokens_p.grad.float(), ref_grad, atol=5e-2, rtol=5e-2)
+
+    def test_moe_mxfp8_roundtrip(self):
+        """Full MoE step with MXFP8 dispatch: dispatch -> weight -> combine, then
+        backward. Verifies combine bwd composes with MXFP8 dispatch bwd and grad
+        reaches the pre-quant bf16 input (identity routing => result ~= tokens,
+        grad ~= tokens)."""
+        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
+            self.skipTest(
+                "MXFP8 dispatch needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
+                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
+            )
+        q = self._mxfp8_quantizer()
+        buf = self._make_buffer()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_p = tokens.detach().clone().requires_grad_(True)
+        tokens_mx = q.quantize(tokens_p)
+        recv_mx, recv_w, _tc = ep_dispatch(buf, tokens_mx, topk_idx, w)
+        expert_out = self._weighted(recv_mx.dequantize(), recv_w)
+        result = ep_combine(buf, expert_out)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(result.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+        (0.5 * (result.float() ** 2).sum()).backward()
+        torch.cuda.synchronize()
+        self.assertIsNotNone(tokens_p.grad)
+        torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
+
+    @_zero_copy_test_include
+    def test_dispatch_mxfp8_zero_copy(self):
+        """MXFP8 dispatch under zero-copy: recv data + scales are symm-mem one-sided
+        write targets, pool-allocated and addressed via NVTECommWindow's scale
+        window/offset. Result matches a bf16 dispatch reference."""
+        if HIDDEN_DIM % 512 != 0 or TOKENS_PER_RANK % 32 != 0:
+            self.skipTest(
+                "MXFP8 dispatch needs HIDDEN_DIM % 512 == 0 and TOKENS_PER_RANK % 32 == 0 "
+                "(set NVTE_EP_HIDDEN_DIM / NVTE_EP_TOKENS_PER_RANK)"
+            )
+        if not ZERO_COPY:
+            self.skipTest("zero-copy path exercised only in the zero-copy pass")
+        q = self._mxfp8_quantizer()
+        topk_idx, tokens, w = _make_identity_inputs(self.cfg.rank, self.cfg.ep_size)
+        tokens_mx = q.quantize(tokens)
+        ref_recv, _rw, _tc = ep_dispatch(self._make_buffer(), tokens_mx.dequantize(), topk_idx, w)
+        recv_mx, _rw2, _tc2 = ep_dispatch(self._make_buffer(), tokens_mx, topk_idx, w)
+        torch.cuda.synchronize()
+        self.assertTrue(hasattr(recv_mx, "_rowwise_data"))
+        # recv data + scales are one-sided write targets from the symm-mem pool.
+        self.assertTrue(is_symm_backed(recv_mx._rowwise_data))
+        self.assertTrue(is_symm_backed(recv_mx._rowwise_scale_inv))
+        torch.testing.assert_close(
+            recv_mx.dequantize().float(), ref_recv.float(), atol=1e-2, rtol=1e-2
+        )
 
     @_zero_copy_test_include
     def test_caller_provides_dispatch_recv_tokens(self):
@@ -517,5 +643,7 @@ if __name__ == "__main__":
     result = runner.run(suite)
     dist.barrier()
     ep_finalize()
+    # Deregister symm-mem windows while the comm is still valid.
+    release_symm_mem_pool()
     dist.destroy_process_group()
     sys.exit(0 if result.wasSuccessful() else 1)

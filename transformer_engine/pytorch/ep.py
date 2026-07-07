@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import atexit
 import warnings
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -15,8 +15,10 @@ import torch.distributed as dist
 import transformer_engine_torch as tex
 
 from .cpu_offload import mark_not_offload
-from .distributed import symm_mem_alloc
+from .distributed import symm_mem_alloc, release_symm_mem_pool
 
+if TYPE_CHECKING:
+    from ..common.recipe import Recipe
 
 __all__ = [
     "EpBuffer",
@@ -25,6 +27,7 @@ __all__ = [
     "ep_dispatch",
     "ep_combine",
     "symm_mem_alloc",
+    "release_symm_mem_pool",
     "is_symm_backed",
 ]
 
@@ -199,6 +202,7 @@ class EpBuffer:
         "device",
         "token_counts",
         "zero_copy",
+        "dispatch_quant_recipe",
     )
 
     def __init__(
@@ -211,6 +215,7 @@ class EpBuffer:
         alignment: int = 0,
         payload_dtype: torch.dtype = torch.bfloat16,
         device: Optional[torch.device] = None,
+        dispatch_quant_recipe: Optional["Recipe"] = None,
     ) -> None:
         if device is None:
             device = torch.device("cuda", torch.cuda.current_device())
@@ -226,6 +231,7 @@ class EpBuffer:
         self.payload_dtype = payload_dtype
         self.device = device
         self.zero_copy = bool(tex.ep_get_zero_copy())
+        self.dispatch_quant_recipe = dispatch_quant_recipe
 
         size_bytes = tex.ep_handle_mem_size(self.top_k, self.alignment)
         self.handle_mem = torch.empty(int(size_bytes), dtype=torch.uint8, device=device)
@@ -261,7 +267,7 @@ def _(*_args, **_kw):
 
 @torch.library.custom_op(
     f"{_LIB}::dispatch",
-    mutates_args=("recv_tokens", "recv_topk_weights"),
+    mutates_args=("recv_tokens", "recv_topk_weights", "recv_scale_inv"),
     device_types="cuda",
 )
 def _dispatch_op(
@@ -271,8 +277,19 @@ def _dispatch_op(
     topk_weights: torch.Tensor,
     recv_tokens: torch.Tensor,
     recv_topk_weights: torch.Tensor,
+    tokens_scale_inv: Optional[torch.Tensor] = None,
+    recv_scale_inv: Optional[torch.Tensor] = None,
 ) -> None:
-    tex.ep_dispatch(handle_mem, topk_idx, tokens, topk_weights, recv_tokens, recv_topk_weights)
+    tex.ep_dispatch(
+        handle_mem,
+        topk_idx,
+        tokens,
+        topk_weights,
+        recv_tokens,
+        recv_topk_weights,
+        tokens_scale_inv,
+        recv_scale_inv,
+    )
 
 
 @_dispatch_op.register_fake
@@ -387,32 +404,73 @@ class _EpDispatch(torch.autograd.Function):
         topk_idx: torch.Tensor,
         tokens: torch.Tensor,
         topk_weights: torch.Tensor,
+        tokens_scale_inv: Optional[torch.Tensor] = None,
+        recv_scale_inv: Optional[torch.Tensor] = None,
     ):
-        """Prepare + dispatch fwd."""
+        """Prepare + dispatch fwd. When scales are set (FP8; MXFP8 for now), ``tokens`` is the
+        quantized tensor itself, kept as the autograd operand so grad reaches the pre-quant
+        input through the quantizer."""
+        from .quantized_tensor import QuantizedTensor
+
+        is_scaled = tokens_scale_inv is not None
+        tokens_data = tokens._rowwise_data if isinstance(tokens, QuantizedTensor) else tokens
+        hidden = tokens_data.shape[-1]
+        tokens_data = tokens_data.reshape(-1, hidden)
+        # Reinterpret byte-backed FP8 data as the fp8 dtype so the backend sees a
+        # scaled tensor.
+        dispatch_tokens = tokens_data
+        dispatch_recv = recv_tokens
+        if is_scaled:
+            fp8_view_dtype = (
+                torch.float8_e5m2
+                if tokens._fp8_dtype == tex.DType.kFloat8E5M2
+                else torch.float8_e4m3fn
+            )
+            dispatch_tokens = tokens_data.view(fp8_view_dtype)
+            dispatch_recv = recv_tokens.view(fp8_view_dtype)
         torch.ops.transformer_engine_ep.prepare(
             handle_mem, top_k, topk_idx, token_counts, alignment
         )
         torch.ops.transformer_engine_ep.dispatch(
             handle_mem,
             topk_idx,
-            tokens,
+            dispatch_tokens,
             topk_weights,
-            recv_tokens,
+            dispatch_recv,
             recv_topk_weights,
+            tokens_scale_inv,
+            recv_scale_inv,
         )
         ctx.save_for_backward(handle_mem)
         ctx.tokens_shape = tokens.shape
-        ctx.tokens_dtype = tokens.dtype
+        # Dispatch grad is high-precision (the quantizer's STE owns the fp8 boundary),
+        # so grad_tokens is bf16 for scaled inputs.
+        ctx.tokens_dtype = torch.bfloat16 if is_scaled else tokens.dtype
         ctx.topk_weights_shape = topk_weights.shape
-        ctx.tokens_T_flat = tokens.numel() // tokens.shape[-1]
+        ctx.tokens_T_flat = tokens_data.shape[0]
         ctx.topk_T_flat = topk_weights.numel() // topk_weights.shape[-1]
         ctx.top_k = topk_weights.shape[-1]
         ctx.recv_capacity = recv_tokens.shape[0]
-        ctx.hidden_dim = tokens.shape[-1]
+        ctx.hidden_dim = hidden
         ctx.mark_non_differentiable(token_counts)
         # Detach so the long-lived buffers aren't tracked as differentiable outputs;
-        # autograd re-attaches grad_fn pointing back at this Function.
-        return recv_tokens.detach(), recv_topk_weights.detach(), token_counts
+        # autograd re-attaches grad_fn pointing back at this Function. For scaled
+        # inputs the recv data + scales are wrapped into a single differentiable
+        # MXFP8Tensor so downstream ops and autograd see a proper quantized tensor.
+        if is_scaled:
+            from .tensor.mxfp8_tensor import MXFP8Quantizer
+
+            quantizer = MXFP8Quantizer(fp8_dtype=tokens._fp8_dtype, rowwise=True, columnwise=False)
+            # View the recv buffer as its fp8 dtype (it may be byte-typed under zero-copy).
+            recv_out = quantizer.create_tensor_from_data(
+                recv_tokens.view(tokens._rowwise_data.dtype).detach(),
+                recv_scale_inv.detach(),
+                fake_dtype=tokens.dtype,
+                fp8_dtype=tokens._fp8_dtype,
+            )
+        else:
+            recv_out = recv_tokens.detach()
+        return recv_out, recv_topk_weights.detach(), token_counts
 
     @staticmethod
     def backward(ctx, g_recv_tokens, g_recv_topk_weights, _g_token_counts):  # type: ignore[override]
@@ -444,6 +502,8 @@ class _EpDispatch(torch.autograd.Function):
             None,  # topk_idx
             grad_tokens.view(ctx.tokens_shape),
             grad_topk_weights.view(ctx.topk_weights_shape),
+            None,  # tokens_scale_inv (scales; non-differentiable)
+            None,  # recv_scale_inv (mutated buffer; non-differentiable)
         )
 
 
@@ -506,11 +566,12 @@ class _EpCombine(torch.autograd.Function):
 # Public high-level wrappers
 
 
-# NCCL EP currently only supports bfloat16 payload tensors.
+# NCCL EP payloads are bfloat16, or a block-scaled QuantizedTensor (MXFP8).
 def _require_bf16(name: str, t: torch.Tensor) -> None:
     if t.dtype is not torch.bfloat16:
         raise NotImplementedError(
-            f"NCCL EP currently supports only bfloat16 payloads; got {name}.dtype={t.dtype}."
+            "NCCL EP currently supports only bfloat16 or MXFP8 payloads; got"
+            f" {name}.dtype={t.dtype}."
         )
 
 
@@ -526,6 +587,14 @@ def _alloc_io(shape, dtype: torch.dtype, device, zero_copy: bool) -> torch.Tenso
     return torch.empty(*shape, dtype=dtype, device=device)
 
 
+def _check_topk_weights_f32(topk_weights: torch.Tensor) -> None:
+    if topk_weights.dtype is not torch.float32:
+        raise TypeError(
+            f"topk_weights must be float32; got dtype={topk_weights.dtype}. "
+            "Cast with topk_weights.float() before calling."
+        )
+
+
 def ep_dispatch(
     buffer: EpBuffer,
     tokens: torch.Tensor,
@@ -537,28 +606,102 @@ def ep_dispatch(
 ):
     """Prepare + dispatch with autograd. topk_idx must be int32 or int64.
 
-    ``recv_tokens`` / ``recv_topk_weights`` are the dispatch recv outputs: pass caller-owned buffers
-    (mcore-managed mode; in zero-copy they must be symm-mem-backed) or leave them None to allocate on
-    the fly (zero-copy: symm-mem pool; normal: plain). Returns (recv_tokens, recv_topk_weights,
-    token_counts); token_counts is non-diff.
+    ``tokens`` is a bfloat16 tensor or an FP8 ``MXFP8Tensor`` with compact (unswizzled) scales;
+    only MXFP8 is supported for now. A bfloat16 input is quantized before dispatch when the
+    buffer's ``dispatch_quant_recipe`` is set (currently ``MXFP8BlockScaling``); an
+    ``MXFP8Tensor`` input is dispatched as-is.
+    ``recv_tokens`` / ``recv_topk_weights`` are the dispatch recv outputs: pass caller-owned
+    buffers (mcore-managed mode; in zero-copy they must be symm-mem-backed) or leave them None
+    to allocate on the fly (zero-copy: symm-mem pool; normal: plain). Returns (recv_tokens,
+    recv_topk_weights, token_counts); token_counts is non-diff. For FP8, recv_tokens is an
+    ``MXFP8Tensor``.
     """
-    _require_bf16("tokens", tokens)
-    if topk_weights.dtype is not torch.float32:
-        raise TypeError(
-            f"topk_weights must be float32; got dtype={topk_weights.dtype}. "
-            "Cast with topk_weights.float() before calling."
+    from .quantized_tensor import QuantizedTensor
+
+    _check_topk_weights_f32(topk_weights)
+
+    # Quantize a bfloat16 input when the buffer requests FP8 dispatch.
+    if not isinstance(tokens, QuantizedTensor) and buffer.dispatch_quant_recipe is not None:
+        from ..common.recipe import MXFP8BlockScaling
+
+        if not isinstance(buffer.dispatch_quant_recipe, MXFP8BlockScaling):
+            raise NotImplementedError(
+                "EP dispatch supports MXFP8BlockScaling only; got "
+                f"{type(buffer.dispatch_quant_recipe).__name__}."
+            )
+        _require_bf16("tokens", tokens)
+        from .quantization import get_fp8_te_dtype
+        from .tensor.mxfp8_tensor import MXFP8Quantizer
+
+        fp8_dtype = get_fp8_te_dtype(buffer.dispatch_quant_recipe, fprop_tensor=True)
+        tokens = MXFP8Quantizer(fp8_dtype, rowwise=True, columnwise=False).quantize(tokens)
+
+    tokens_scale_inv = None
+    recv_scale_inv = None
+    if isinstance(tokens, QuantizedTensor):
+        # FP8 dispatch: route e4m3 data + compact e8m0 scales; recv is repacked as an
+        # MXFP8Tensor. recv data/scale/weight buffers are one-sided write targets, so
+        # pool-allocate (symm-mem) under zero-copy, else plain tensors.
+        from .constants import MXFP8_BLOCK_SCALING_SIZE
+        from .tensor.mxfp8_tensor import MXFP8Tensor
+
+        if not isinstance(tokens, MXFP8Tensor):
+            raise NotImplementedError(
+                f"NCCL EP dispatch supports bfloat16 or MXFP8Tensor; got {type(tokens).__name__}."
+            )
+        if tokens._with_gemm_swizzled_scales:
+            raise NotImplementedError(
+                "NCCL EP dispatch requires compact (unswizzled) MXFP8 scales; "
+                "quantize with with_gemm_swizzled_scales=False."
+            )
+        data = tokens._rowwise_data
+        tokens_scale_inv = tokens._rowwise_scale_inv
+        if data is None or tokens_scale_inv is None:
+            raise ValueError("MXFP8 tokens must carry rowwise data and scale_inv for EP dispatch.")
+
+        hidden = data.shape[-1]
+        t_flat = data.numel() // hidden
+        cols = hidden // MXFP8_BLOCK_SCALING_SIZE
+        # The backend forwards each token's scale row with a 16-byte-aligned store, so
+        # the row (cols * dtype bytes) must be a multiple of 16.
+        scale_row_bytes = cols * tokens_scale_inv.element_size()
+        if scale_row_bytes % 16 != 0:
+            raise ValueError(
+                f"MXFP8 dispatch requires a 16-byte-aligned scale row; hidden={hidden} gives "
+                f"{scale_row_bytes} bytes. Use a hidden size that is a multiple of "
+                f"{16 * MXFP8_BLOCK_SCALING_SIZE}."
+            )
+        # Strip GEMM row/col padding to the logical [T, H/block] the backend expects.
+        tokens_scale_inv = tokens_scale_inv.reshape(tokens_scale_inv.shape[0], -1)[
+            :t_flat, :cols
+        ].contiguous()
+
+        recv_pr = buffer.recv_capacity_per_rank
+        if recv_tokens is None:
+            recv_tokens = _alloc_io((recv_pr, hidden), data.dtype, buffer.device, buffer.zero_copy)
+        recv_scale_inv = _alloc_io(
+            (recv_pr, cols), tokens_scale_inv.dtype, buffer.device, buffer.zero_copy
         )
-    if recv_tokens is None:
-        recv_tokens = _alloc_io(
-            (buffer.recv_capacity_per_rank, buffer.hidden_dim),
-            buffer.payload_dtype,
-            buffer.device,
-            buffer.zero_copy,
-        )
+        # Dispatch doesn't clear unrouted recv rows; zero them so padding dequantizes to 0
+        # rather than an fp8/e8m0 NaN.
+        recv_tokens.zero_()
+        recv_scale_inv.zero_()
+    else:
+        _require_bf16("tokens", tokens)
+        if recv_tokens is None:
+            recv_tokens = _alloc_io(
+                (buffer.recv_capacity_per_rank, buffer.hidden_dim),
+                buffer.payload_dtype,
+                buffer.device,
+                buffer.zero_copy,
+            )
+
     if recv_topk_weights is None:
         recv_topk_weights = _alloc_io(
             (buffer.recv_capacity_per_rank,), torch.float32, buffer.device, buffer.zero_copy
         )
+    # Pass the (possibly quantized) tokens as the autograd operand so grad reaches the
+    # pre-quant input; tokens_scale_inv/recv_scale_inv are None for bf16 dispatch.
     return _EpDispatch.apply(
         buffer.handle_mem,
         buffer.top_k,
@@ -569,6 +712,8 @@ def ep_dispatch(
         topk_idx,
         tokens,
         topk_weights,
+        tokens_scale_inv,
+        recv_scale_inv,
     )
 
 

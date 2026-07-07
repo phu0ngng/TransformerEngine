@@ -206,8 +206,13 @@ void ep_prepare(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor token_cou
                   /*total_recv_tokens_per_rank=*/nullptr, &layer_cfg, stream);
 }
 
+// tokens_scale_inv / recv_scale_inv are set only for block-scaled dispatch (for
+// now MXFP8): tokens/recv_tokens carry e4m3 data and the scale tensors carry the
+// unswizzled e8m0 scale-inverses [T, H/block]. Both null => bf16/fp16/fp32.
 void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
-                 at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights) {
+                 at::Tensor topk_weights, at::Tensor recv_tokens, at::Tensor recv_topk_weights,
+                 std::optional<at::Tensor> tokens_scale_inv,
+                 std::optional<at::Tensor> recv_scale_inv) {
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   NVTE_CHECK(tokens.dim() >= 2, "tokens must be at least 2D [..., H]");
   NVTE_CHECK(topk_idx.dim() >= 2, "topk_idx must be at least 2D [..., top_k]");
@@ -238,16 +243,54 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
   check_symm_mem_required(recv_tokens, "recv_tokens");
   check_symm_mem_required(recv_topk_weights, "recv_topk_weights");
 
+  // Block-scaled dispatch: tokens carry e4m3 data and the scale tensors carry
+  // unswizzled e8m0 scale-inverses [T, H/block]. Scales ride in the tensor; the
+  // backend keys on the tensor's scaling mode. is_mxfp8 is split from is_scaled
+  // so future block-scaled recipes can reuse the scale-routing plumbing while
+  // building their own TE tensors; only MXFP8 is supported for now.
+  const bool is_scaled = tokens_scale_inv.has_value();
+  const bool is_mxfp8 = is_scaled;
+  size_t sc_cols = 0;
+  if (is_scaled) {
+    NVTE_CHECK(recv_scale_inv.has_value(),
+               "recv_scale_inv must be provided together with tokens_scale_inv");
+    NVTE_CHECK(is_mxfp8, "EP dispatch currently supports only MXFP8 block scaling");
+    NVTE_CHECK(
+        tokens.scalar_type() == at::kFloat8_e4m3fn || tokens.scalar_type() == at::kFloat8_e5m2,
+        "block-scaled EP dispatch requires FP8 tokens; got ", c10::toString(tokens.scalar_type()));
+    auto& tsi = *tokens_scale_inv;
+    auto& rsi = *recv_scale_inv;
+    NVTE_CHECK(tsi.dim() >= 2 && rsi.dim() >= 2, "scale-inverses must be at least 2D [T, H/block]");
+    NVTE_CHECK(tsi.is_contiguous() && rsi.is_contiguous(), "scale-inverses must be contiguous");
+    sc_cols = static_cast<size_t>(tsi.size(-1));
+    NVTE_CHECK(sc_cols > 0 && H % sc_cols == 0, "scale cols (", sc_cols,
+               ") must be a non-zero divisor of hidden (", H, ")");
+    NVTE_CHECK(static_cast<size_t>(rsi.size(-1)) == sc_cols,
+               "recv_scale_inv cols must match tokens_scale_inv cols");
+    NVTE_CHECK(static_cast<size_t>(tsi.numel()) == T_flat * sc_cols,
+               "tokens_scale_inv numel must equal T_flat * cols");
+    NVTE_CHECK(static_cast<size_t>(rsi.numel()) == recv_pr * sc_cols,
+               "recv_scale_inv numel must equal recv_pr * cols");
+    check_symm_mem_required(rsi, "recv_scale_inv");
+  }
+
   auto tok_dtype = GetTransformerEngineDType(tokens.scalar_type());
   auto handle_mem_te = makeTransformerEngineTensor(
       handle_mem.data_ptr(), Shape{static_cast<size_t>(handle_mem.numel())}, DType::kByte);
   auto topk_idx_te =
       makeTransformerEngineTensor(topk_idx.data_ptr(), Shape{T_flat, topk_n}, idx_dtype);
-  auto tokens_te = makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype);
+  auto tokens_te =
+      is_mxfp8 ? makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype,
+                                             nullptr, nullptr, tokens_scale_inv->data_ptr(),
+                                             Shape{T_flat, sc_cols}, NVTE_MXFP8_1D_SCALING)
+               : makeTransformerEngineTensor(tokens.data_ptr(), Shape{T_flat, H}, tok_dtype);
   auto topk_w_te =
       makeTransformerEngineTensor(topk_weights.data_ptr(), Shape{T_flat, topk_n}, DType::kFloat32);
   auto recv_tokens_te =
-      makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype);
+      is_mxfp8 ? makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype,
+                                             nullptr, nullptr, recv_scale_inv->data_ptr(),
+                                             Shape{recv_pr, sc_cols}, NVTE_MXFP8_1D_SCALING)
+               : makeTransformerEngineTensor(recv_tokens.data_ptr(), Shape{recv_pr, H}, tok_dtype);
   auto recv_topk_w_te =
       makeTransformerEngineTensor(recv_topk_weights.data_ptr(), Shape{recv_pr}, DType::kFloat32);
 
@@ -257,6 +300,17 @@ void ep_dispatch(at::Tensor handle_mem, at::Tensor topk_idx, at::Tensor tokens,
   NVTECommWindow topk_w_win = maybe_make_window(topk_weights);
   NVTECommWindow recv_tokens_win = maybe_make_window(recv_tokens);
   NVTECommWindow recv_topk_w_win = maybe_make_window(recv_topk_weights);
+  // Block-scaled zero-copy: the scale-inverse rides on the data tensor's window.
+  // Send scales (tokens_scale_inv) stay staged like the send data; recv scales
+  // are the one-sided write target and must be symm-mem-backed under zero-copy.
+  if (is_scaled) {
+    const NVTECommWindow tsi_win = maybe_make_window(*tokens_scale_inv);
+    const NVTECommWindow rsi_win = maybe_make_window(*recv_scale_inv);
+    tokens_win.scale_window = tsi_win.window;
+    tokens_win.scale_offset = tsi_win.offset;
+    recv_tokens_win.scale_window = rsi_win.window;
+    recv_tokens_win.scale_offset = rsi_win.offset;
+  }
   nvte_ep_dispatch(handle_mem_te.data(), topk_idx_te.data(), tokens_te.data(), tokens_win,
                    topk_w_te.data(), topk_w_win, recv_tokens_te.data(), recv_tokens_win,
                    recv_topk_w_te.data(), recv_topk_w_win, stream);
@@ -380,7 +434,10 @@ void register_ep_bindings(pybind11::module_& m) {
         "Return the handle_mem byte size for the given layer config.", py::arg("top_k"),
         py::arg("dispatch_output_per_expert_alignment") = 0);
   m.def("ep_prepare", &ep_prepare, "EP prepare", py::call_guard<py::gil_scoped_release>());
-  m.def("ep_dispatch", &ep_dispatch, "EP dispatch", py::call_guard<py::gil_scoped_release>());
+  m.def("ep_dispatch", &ep_dispatch, "EP dispatch", py::arg("handle_mem"), py::arg("topk_idx"),
+        py::arg("tokens"), py::arg("topk_weights"), py::arg("recv_tokens"),
+        py::arg("recv_topk_weights"), py::arg("tokens_scale_inv") = std::nullopt,
+        py::arg("recv_scale_inv") = std::nullopt, py::call_guard<py::gil_scoped_release>());
   m.def("ep_combine", &ep_combine, "EP combine", py::call_guard<py::gil_scoped_release>());
   m.def("ep_dispatch_bwd", &ep_dispatch_bwd, "EP dispatch backward",
         py::call_guard<py::gil_scoped_release>());
