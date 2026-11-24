@@ -401,6 +401,72 @@ for judgment.
   For example, add cases to an existing test suite instead of creating
   a new test file for each change.
 
+### Reuse and design conventions
+
+Before writing code, find what already exists and let the nearest sibling
+set the structure.
+
+- Search the repository by behavior (verbs, shapes, dtypes), not only by the
+  name you would give the code. Open the closest existing operation, module,
+  binding, kernel, or test and follow its structure. Say in the PR what was
+  reused, and why nothing fit when something new was added.
+- Look for shared helpers before adding one:
+  - PyTorch: `pytorch/utils.py`, `pytorch/ops/_common.py`,
+    `pytorch/module/_common.py`, `pytorch/distributed.py`,
+    `pytorch/quantization.py`, `pytorch/quantized_tensor.py`.
+  - Bindings: `pytorch/csrc/common.h` and `pytorch/csrc/util.h`; JAX
+    `jax/cpp_extensions/` and `jax/csrc/`.
+  - Common: `common/common.h` (`TRANSFORMER_ENGINE_TYPE_SWITCH_*`),
+    `common/util/`, `common/utils.cuh`.
+  - Tests: `tests/pytorch/utils.py`, `tests/jax/utils.py`,
+    `tests/cpp/test_common.h`.
+- Extend before adding: a new argument, case, or dtype on an existing function
+  is preferred over a sibling function. Add a helper only when nothing fits
+  and at least two callers need it, and place it next to its siblings.
+- Compose through the existing abstractions. New PyTorch behavior is a
+  `BasicOperation` in `pytorch/ops/basic/`; a performance fusion is a
+  `FusedOperation` in `pytorch/ops/fused/` registered with
+  `register_forward_fusion` or `register_backward_fusion`. Operations do not
+  inspect their neighbors; the fuser decides when a fusion applies.
+- Share code between modules through `pytorch/module/_common.py` instead of
+  copying a block from one module into the next.
+- Go through the quantizer interface (`Quantizer`, `QuantizedTensorStorage`,
+  recipes) instead of `isinstance` chains over tensor types. When a
+  per-type decision is needed, add a method to the base class and override it
+  per type, as `supports_only_rowwise_all_gather` does.
+- Decide dtype, recipe, and architecture behavior in one place (a type-switch
+  macro, a capability function, or a registry), not at every call site.
+  Derive shape- or architecture-specific behavior from the inputs; do not
+  hard-code it.
+- Reuse an existing `NVTE_*` variable or constructor argument before adding
+  another. A new environment variable needs an entry in `docs/envvars.rst`.
+  Prefer an explicit argument over hidden global state.
+- Keep functions focused. Split a long function into the named steps its
+  sibling uses rather than into one-use private helpers. Do not leave unused
+  options, commented-out code, or TODOs without a tracked issue.
+- Validate at the boundary with the local idiom: `NVTE_CHECK(cond, "message ",
+  value, ".")` in C++, and `ValueError`, `TypeError`, or `RuntimeError` with a
+  full sentence naming the offending value in Python. Do not use `assert` for
+  user input, and do not copy or fall back silently; reject, or warn through
+  the existing warning helpers.
+- Match the surrounding file: copyright header of a sibling file, import order,
+  keyword-only options, type hints on new signatures, numpy-style docstrings
+  for public APIs, `\brief` Doxygen on public C API declarations. Keep
+  `pylint` and `cpplint` suppressions on one line, with the rule name, and
+  only after trying to fix the cause.
+- Tests extend the existing suite for the area and reuse its helpers
+  (`dtype_tols`, `assert_close`, `reset_rng_states`,
+  `make_reference_and_test_tensors`), parametrized over dtype, quantization,
+  shape, and layout as the neighbors are.
+- Add only the tests the change needs: one per new behavior, failure mode, or
+  fixed bug. CI time is a shared budget, so consolidate. Fold new cases into
+  an existing parametrized test, share setup and reference computation across
+  cases, and cover the boundary shapes and the affected dtypes and recipes
+  instead of the full cross product. Do not add tests that duplicate existing
+  coverage or exercise unchanged code paths.
+- Prefer deleting code to adding it. A change that removes a special case,
+  branch, or duplicate is a good change.
+
 ## Contribution Requirements
 
 Follow `CONTRIBUTING.rst` and `.github/PULL_REQUEST_TEMPLATE.md`.
